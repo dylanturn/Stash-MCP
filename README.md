@@ -204,6 +204,10 @@ Open http://localhost:8000/ui in your browser to:
 - Create new files and folders
 - Search content (coming soon)
 
+<p align="center">
+  <img src="assets/images/user-interface.png" alt="Stash-MCP Web UI" width="800">
+</p>
+
 ## Configuration
 
 Environment variables:
