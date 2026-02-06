@@ -149,6 +149,7 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             )
         filesystem.write_file(path, content)
         _register_resource(path)
+        await ctx.send_resource_list_changed()
         emit(CONTENT_CREATED, path)
         logger.info(f"Created: {path}")
         return f"Created: {path}"
@@ -169,6 +170,7 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
         filesystem.write_file(path, content)
         if is_new:
             _register_resource(path)
+            await ctx.send_resource_list_changed()
             emit(CONTENT_CREATED, path)
         else:
             uri = AnyUrl(f"stash://{path}")
@@ -235,6 +237,7 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
         filesystem.move_file(source_path, dest_path)
         _unregister_resource(source_path)
         _register_resource(dest_path)
+        await ctx.send_resource_list_changed()
         emit(CONTENT_MOVED, dest_path, source_path=source_path)
         logger.info(f"Moved: {source_path} -> {dest_path}")
         return f"Moved: {source_path} -> {dest_path}"
