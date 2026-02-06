@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  stash-mcp:
+    build: .
+    container_name: stash-mcp
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./content:/data/content
+    environment:
+      - STASH_CONTENT_DIR=/data/content
+      - STASH_HOST=0.0.0.0
+      - STASH_PORT=8000
+      - STASH_LOG_LEVEL=info
+    restart: unless-stopped

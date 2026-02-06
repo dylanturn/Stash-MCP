@@ -1,0 +1,172 @@
+# Stash-MCP
+
+A file-backed content server that exposes documents to AI agents via the Model Context Protocol (MCP). It provides a centralized documentation collection that multiple agents can share — stash content as files, serve them as MCP resources, and let agents update them through tools.
+
+## Features
+
+- **Centralized knowledge store** — A single place to stash documentation, notes, specs, and reference material that any connected agent can access
+- **File-first design** — Files on disk are the source of truth. No database layer. Inspect, edit, or manage content directly on the filesystem
+- **MCP native** — Expose content as MCP resources (read path) and provide MCP tools (write path) so agents can both consume and update documentation
+- **Human-friendly UI** — A simple web browser/viewer so humans can manage content alongside agents
+- **Simple deployment** — Single Docker container with a volume mount. No external dependencies
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  Docker Container                           │
+│                                             │
+│  ┌───────────┐  ┌────────────────────────┐  │
+│  │  Web UI   │  │  FastAPI               │  │
+│  │  Browser/ │──│  REST API              │  │
+│  │  Viewer   │  │                        │  │
+│  └───────────┘  └──────────┬─────────────┘  │
+│                            │                │
+│                 ┌──────────┴─────────────┐  │
+│                 │  FastMCP Server        │  │
+│                 │  - Resources (read)    │  │
+│                 │  - Tools (write)       │  │
+│                 │  - Notifications       │  │
+│                 └──────────┬─────────────┘  │
+│                            │                │
+│                 ┌──────────┴─────────────┐  │
+│                 │  Filesystem Layer      │  │
+│                 │  /data/content/        │  │
+│                 └────────────────────────┘  │
+│                            │                │
+└────────────────────────────┼────────────────┘
+                             │
+                    Volume Mount
+                   ./content:/data/content
+```
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|-----------|
+| Package management | uv (or pip/venv) |
+| MCP server | FastMCP |
+| REST API | FastAPI |
+| Content UI | HTML/CSS (FastAPI) |
+| Containerization | Docker + Compose |
+| Persistence | Filesystem (volume mount) |
+
+## Quick Start
+
+### Using Docker Compose (Recommended)
+
+```bash
+# Start the server
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop the server
+docker-compose down
+```
+
+The server will be available at:
+- MCP Server: stdio transport via Docker
+- REST API: http://localhost:8000
+- UI: http://localhost:8000/ui
+
+Your content will be persisted in the `./content` directory.
+
+### Local Development
+
+```bash
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -e ".[dev]"
+
+# Run the server
+python -m stash_mcp.server
+
+# Run tests
+pytest
+
+# Run linter
+ruff check .
+```
+
+## Usage
+
+### MCP Resources (Read)
+
+Connect your MCP client to read documents:
+
+```python
+# List all available resources
+resources = await client.list_resources()
+
+# Read a specific document
+content = await client.read_resource("stash://docs/architecture.md")
+```
+
+### MCP Tools (Write)
+
+Agents can create, update, and delete content:
+
+```python
+# Create new content
+await client.call_tool("create_content", {
+    "path": "docs/new-doc.md",
+    "content": "# New Document\n\nContent here..."
+})
+
+# Update existing content
+await client.call_tool("update_content", {
+    "path": "docs/existing-doc.md",
+    "content": "Updated content..."
+})
+
+# Delete content
+await client.call_tool("delete_content", {
+    "path": "docs/old-doc.md"
+})
+```
+
+### REST API
+
+Access content via HTTP:
+
+```bash
+# List content
+curl http://localhost:8000/api/content
+
+# Get specific file
+curl http://localhost:8000/api/content/docs/architecture.md
+
+# Create/update file
+curl -X PUT http://localhost:8000/api/content/docs/new.md \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# New Doc"}'
+
+# Delete file
+curl -X DELETE http://localhost:8000/api/content/docs/old.md
+```
+
+### Web UI
+
+Open http://localhost:8000/ui in your browser to:
+- Browse the content tree
+- View and edit documents
+- Create new files and folders
+- Search content (coming soon)
+
+## Configuration
+
+Environment variables:
+
+- `STASH_CONTENT_DIR` - Content directory path (default: `/data/content`)
+- `STASH_HOST` - Server host (default: `0.0.0.0`)
+- `STASH_PORT` - Server port (default: `8000`)
+- `STASH_LOG_LEVEL` - Logging level (default: `info`)
+
+## License
+
+MIT License - see LICENSE file for details
