@@ -7,6 +7,7 @@ import uvicorn
 from .api import create_api
 from .config import Config
 from .filesystem import FileSystem
+from .mcp_server import create_mcp_server
 from .ui import create_ui_router
 
 # Configure logging
@@ -26,6 +27,10 @@ def create_app():
     ui_router = create_ui_router(filesystem)
     app.include_router(ui_router)
 
+    # Mount FastMCP server onto FastAPI for SSE transport
+    mcp = create_mcp_server(filesystem)
+    app.mount("/mcp", mcp.http_app())
+
     return app
 
 
@@ -38,6 +43,7 @@ def main():
     logger.info(f"Server running at http://{Config.HOST}:{Config.PORT}")
     logger.info(f"API docs at http://{Config.HOST}:{Config.PORT}/docs")
     logger.info(f"UI at http://{Config.HOST}:{Config.PORT}/ui")
+    logger.info(f"MCP (SSE) at http://{Config.HOST}:{Config.PORT}/mcp")
 
     uvicorn.run(
         app,

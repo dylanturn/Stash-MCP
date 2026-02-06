@@ -1,235 +1,205 @@
-"""MCP Server implementation for Stash."""
+"""MCP Server implementation for Stash using FastMCP."""
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-from mcp.server import Server
-from mcp.types import Resource, TextContent, Tool
+from fastmcp import FastMCP
+from fastmcp.resources import FunctionResource
+from pydantic import AnyUrl
 
 from .config import Config
 from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
 
 logger = logging.getLogger(__name__)
 
+# Mime type mapping for common extensions
+MIME_TYPES: dict[str, str] = {
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".txt": "text/plain",
+    ".json": "application/json",
+    ".yaml": "application/x-yaml",
+    ".yml": "application/x-yaml",
+    ".xml": "application/xml",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".ts": "application/typescript",
+    ".py": "text/x-python",
+    ".csv": "text/csv",
+    ".toml": "application/toml",
+    ".ini": "text/plain",
+    ".cfg": "text/plain",
+    ".rst": "text/x-rst",
+    ".log": "text/plain",
+}
 
-class StashMCPServer:
-    """MCP Server for Stash content management."""
 
-    def __init__(self, filesystem: FileSystem):
-        """Initialize the MCP server.
+def _get_mime_type(path: str) -> str:
+    """Get mime type for a file path based on extension."""
+    from pathlib import PurePosixPath
 
-        Args:
-            filesystem: Filesystem instance for content management
-        """
-        self.fs = filesystem
-        self.server = Server(Config.SERVER_NAME)
-        self._setup_handlers()
+    suffix = PurePosixPath(path).suffix.lower()
+    return MIME_TYPES.get(suffix, "text/plain")
 
-    def _setup_handlers(self) -> None:
-        """Set up MCP protocol handlers."""
 
-        @self.server.list_resources()
-        async def list_resources() -> list[Resource]:
-            """List all available resources (files)."""
-            resources = []
-            try:
-                files = self.fs.list_all_files()
-                for file_path in files:
-                    # Convert file path to stash:// URI
-                    uri = f"stash://{file_path}"
-                    resources.append(
-                        Resource(
-                            uri=uri,
-                            name=file_path,
-                            mimeType="text/plain",
-                            description=f"Content file: {file_path}",
-                        )
-                    )
-                logger.info(f"Listed {len(resources)} resources")
-            except Exception as e:
-                logger.error(f"Error listing resources: {e}")
-            return resources
+def _get_description(fs: FileSystem, path: str) -> str:
+    """Get description for a file from frontmatter or first line."""
+    try:
+        content = fs.read_file(path)
+        lines = content.strip().splitlines()
+        if not lines:
+            return f"Content file: {path}"
+        first_line = lines[0].strip()
+        # Strip markdown heading markers
+        if first_line.startswith("#"):
+            first_line = first_line.lstrip("# ").strip()
+        return first_line[:100] if first_line else f"Content file: {path}"
+    except Exception:
+        return f"Content file: {path}"
 
-        @self.server.read_resource()
-        async def read_resource(uri: str) -> str:
-            """Read a resource by URI.
 
-            Args:
-                uri: Resource URI in format stash://path/to/file
+def create_mcp_server(filesystem: FileSystem) -> FastMCP:
+    """Create and configure the FastMCP server.
 
-            Returns:
-                Resource content
-            """
-            # Extract path from URI
-            if not uri.startswith("stash://"):
-                raise ValueError(f"Invalid URI scheme: {uri}")
+    Args:
+        filesystem: Filesystem instance for content management
 
-            file_path = uri[8:]  # Remove 'stash://' prefix
+    Returns:
+        Configured FastMCP server
+    """
 
-            try:
-                content = self.fs.read_file(file_path)
-                logger.info(f"Read resource: {uri}")
-                return content
-            except FileNotFoundError:
-                raise ValueError(f"Resource not found: {uri}")
-            except InvalidPathError as e:
-                raise ValueError(f"Invalid resource path: {e}")
-            except Exception as e:
-                logger.error(f"Error reading resource {uri}: {e}")
-                raise ValueError(f"Failed to read resource: {e}")
+    @asynccontextmanager
+    async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
+        """Lifespan handler to inject filesystem into context."""
+        yield {"fs": filesystem}
 
-        @self.server.list_tools()
-        async def list_tools() -> list[Tool]:
-            """List available tools for content management."""
-            return [
-                Tool(
-                    name="create_content",
-                    description="Create a new content file",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "File path relative to content root",
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "File content",
-                            },
-                        },
-                        "required": ["path", "content"],
-                    },
-                ),
-                Tool(
-                    name="update_content",
-                    description="Update an existing content file",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "File path relative to content root",
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "New file content",
-                            },
-                        },
-                        "required": ["path", "content"],
-                    },
-                ),
-                Tool(
-                    name="delete_content",
-                    description="Delete a content file",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "File path relative to content root",
-                            },
-                        },
-                        "required": ["path"],
-                    },
-                ),
-            ]
+    mcp = FastMCP(
+        name=Config.SERVER_NAME,
+        version=Config.SERVER_VERSION,
+        lifespan=lifespan,
+    )
 
-        @self.server.call_tool()
-        async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-            """Execute a tool.
+    # --- Resources ---
 
-            Args:
-                name: Tool name
-                arguments: Tool arguments
+    # Register individual resources for each file (for resources/list)
+    for file_path in filesystem.list_all_files():
+        uri = f"stash://{file_path}"
+        mime = _get_mime_type(file_path)
+        desc = _get_description(filesystem, file_path)
+        fp = file_path  # capture for closure
 
-            Returns:
-                Tool execution result
-            """
-            try:
-                if name == "create_content":
-                    return await self._create_content(arguments)
-                elif name == "update_content":
-                    return await self._update_content(arguments)
-                elif name == "delete_content":
-                    return await self._delete_content(arguments)
-                else:
-                    raise ValueError(f"Unknown tool: {name}")
-            except Exception as e:
-                logger.error(f"Error executing tool {name}: {e}")
-                return [TextContent(type="text", text=f"Error: {str(e)}")]
+        mcp.add_resource(
+            FunctionResource(
+                uri=AnyUrl(uri),
+                name=file_path,
+                description=desc,
+                mime_type=mime,
+                fn=lambda _fp=fp: filesystem.read_file(_fp),
+            )
+        )
 
-    async def _create_content(self, arguments: dict) -> list[TextContent]:
-        """Create new content file.
+    # Resource template for dynamic access (resources/templates/list)
+    @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")
+    def read_resource(path: str) -> str:
+        """Read a file by its path."""
+        try:
+            return filesystem.read_file(path)
+        except FileNotFoundError:
+            raise ValueError(f"Resource not found: stash://{path}")
+        except InvalidPathError as e:
+            raise ValueError(f"Invalid resource path: {e}")
+
+    # --- Tools ---
+
+    @mcp.tool(description="Create a new content file")
+    async def create_content(
+        path: str,
+        content: str,
+    ) -> str:
+        """Create a new file. Errors if file already exists.
 
         Args:
-            arguments: Tool arguments with 'path' and 'content'
-
-        Returns:
-            Success message
+            path: File path relative to content root
+            content: File content
         """
-        path = arguments.get("path")
-        content = arguments.get("content")
+        if filesystem.file_exists(path):
+            raise ValueError(
+                f"File already exists: {path}. Use update_content to modify existing files."
+            )
+        filesystem.write_file(path, content)
+        logger.info(f"Created: {path}")
+        return f"Created: {path}"
 
-        if not path or not content:
-            raise ValueError("Both 'path' and 'content' are required")
-
-        # Check if file already exists
-        if self.fs.file_exists(path):
-            raise ValueError(f"File already exists: {path}")
-
-        self.fs.write_file(path, content)
-
-        # Notify about resource update
-        uri = f"stash://{path}"
-        await self.server.request_context.session.send_resource_updated(uri)
-
-        return [TextContent(type="text", text=f"Created: {path}")]
-
-    async def _update_content(self, arguments: dict) -> list[TextContent]:
-        """Update existing content file.
+    @mcp.tool(description="Update an existing content file")
+    async def update_content(
+        path: str,
+        content: str,
+    ) -> str:
+        """Update an existing file.
 
         Args:
-            arguments: Tool arguments with 'path' and 'content'
-
-        Returns:
-            Success message
+            path: File path relative to content root
+            content: New file content
         """
-        path = arguments.get("path")
-        content = arguments.get("content")
+        filesystem.write_file(path, content)
+        logger.info(f"Updated: {path}")
+        return f"Updated: {path}"
 
-        if not path or not content:
-            raise ValueError("Both 'path' and 'content' are required")
-
-        # File can be created or updated
-        self.fs.write_file(path, content)
-
-        # Notify about resource update
-        uri = f"stash://{path}"
-        await self.server.request_context.session.send_resource_updated(uri)
-
-        return [TextContent(type="text", text=f"Updated: {path}")]
-
-    async def _delete_content(self, arguments: dict) -> list[TextContent]:
-        """Delete content file.
+    @mcp.tool(description="Delete a content file")
+    async def delete_content(
+        path: str,
+    ) -> str:
+        """Delete a file.
 
         Args:
-            arguments: Tool arguments with 'path'
-
-        Returns:
-            Success message
+            path: File path relative to content root
         """
-        path = arguments.get("path")
+        filesystem.delete_file(path)
+        logger.info(f"Deleted: {path}")
+        return f"Deleted: {path}"
 
-        if not path:
-            raise ValueError("'path' is required")
+    @mcp.tool(description="List files and directories")
+    async def list_content(
+        path: str = "",
+        recursive: bool = False,
+    ) -> str:
+        """List files and directories in the content store.
 
-        self.fs.delete_file(path)
+        Args:
+            path: Path relative to content root (defaults to root)
+            recursive: If true, list all files recursively
+        """
+        if recursive:
+            files = filesystem.list_all_files(path)
+            if not files:
+                return f"No files found under '{path or '/'}'"
+            return "\n".join(files)
+        else:
+            items = filesystem.list_files(path)
+            lines = []
+            for name, is_dir in items:
+                prefix = "📁 " if is_dir else "📄 "
+                lines.append(f"{prefix}{name}")
+            if not lines:
+                return f"Empty directory: '{path or '/'}'"
+            return "\n".join(lines)
 
-        # Notify about resource deletion
-        uri = f"stash://{path}"
-        await self.server.request_context.session.send_resource_updated(uri)
+    @mcp.tool(description="Move or rename a content file")
+    async def move_content(
+        source_path: str,
+        dest_path: str,
+    ) -> str:
+        """Move or rename a file.
 
-        return [TextContent(type="text", text=f"Deleted: {path}")]
+        Args:
+            source_path: Current file path relative to content root
+            dest_path: New file path relative to content root
+        """
+        filesystem.move_file(source_path, dest_path)
+        logger.info(f"Moved: {source_path} -> {dest_path}")
+        return f"Moved: {source_path} -> {dest_path}"
 
-    def get_server(self) -> Server:
-        """Get the MCP server instance."""
-        return self.server
+    return mcp

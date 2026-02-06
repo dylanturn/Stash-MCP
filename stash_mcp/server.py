@@ -1,14 +1,12 @@
-"""Main server entry point."""
+"""Main server entry point for stdio MCP transport."""
 
 import asyncio
 import logging
 import sys
 
-from mcp.server.stdio import stdio_server
-
 from .config import Config
 from .filesystem import FileSystem
-from .mcp_server import StashMCPServer
+from .mcp_server import create_mcp_server
 
 # Configure logging
 logging.basicConfig(
@@ -19,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    """Run the Stash MCP server."""
+    """Run the Stash MCP server over stdio."""
     logger.info("Starting Stash-MCP server...")
 
     # Ensure content directory exists
@@ -28,17 +26,11 @@ async def main():
     # Initialize filesystem
     filesystem = FileSystem(Config.CONTENT_DIR)
 
-    # Initialize MCP server
-    mcp_server = StashMCPServer(filesystem)
+    # Create FastMCP server and run with stdio transport
+    mcp = create_mcp_server(filesystem)
 
-    # Run server with stdio transport
     logger.info(f"Server running with content dir: {Config.CONTENT_DIR}")
-    async with stdio_server() as (read_stream, write_stream):
-        await mcp_server.get_server().run(
-            read_stream,
-            write_stream,
-            mcp_server.get_server().create_initialization_options()
-        )
+    await mcp.run_stdio_async()
 
 
 if __name__ == "__main__":
