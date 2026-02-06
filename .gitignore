@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+# Stash-MCP specific - user content directory
+# (example content is included in repo, but ignore everything else)
+content/*
+!content/docs/
+!content/examples/
+
 # Distribution / packaging
 .Python
 build/
