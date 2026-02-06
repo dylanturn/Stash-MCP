@@ -7,7 +7,7 @@ A file-backed content server that exposes documents to AI agents via the Model C
 - **Centralized knowledge store** — A single place to stash documentation, notes, specs, and reference material that any connected agent can access
 - **File-first design** — Files on disk are the source of truth. No database layer. Inspect, edit, or manage content directly on the filesystem
 - **MCP native** — Expose content as MCP resources (read path) and provide MCP tools (write path) so agents can both consume and update documentation
-- **Human-friendly UI** — A FastUI-powered browser/editor so humans can manage content alongside agents
+- **Human-friendly UI** — A simple web browser/viewer so humans can manage content alongside agents
 - **Simple deployment** — Single Docker container with a volume mount. No external dependencies
 
 ## Architecture
@@ -17,9 +17,9 @@ A file-backed content server that exposes documents to AI agents via the Model C
 │  Docker Container                           │
 │                                             │
 │  ┌───────────┐  ┌────────────────────────┐  │
-│  │  FastUI   │  │  FastAPI               │  │
+│  │  Web UI   │  │  FastAPI               │  │
 │  │  Browser/ │──│  REST API              │  │
-│  │  Editor   │  │                        │  │
+│  │  Viewer   │  │                        │  │
 │  └───────────┘  └──────────┬─────────────┘  │
 │                            │                │
 │                 ┌──────────┴─────────────┐  │
@@ -47,7 +47,7 @@ A file-backed content server that exposes documents to AI agents via the Model C
 | Package management | uv (or pip/venv) |
 | MCP server | FastMCP |
 | REST API | FastAPI |
-| Content UI | FastUI |
+| Content UI | HTML/CSS (FastAPI) |
 | Containerization | Docker + Compose |
 | Persistence | Filesystem (volume mount) |
 
