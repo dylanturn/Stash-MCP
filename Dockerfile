@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -e .
 RUN mkdir -p /data/content
 
 # Set environment variables
-ENV STASH_CONTENT_DIR=/data/content
+ENV STASH_CONTENT_ROOT=/data/content
 ENV STASH_HOST=0.0.0.0
 ENV STASH_PORT=8000
 ENV PYTHONUNBUFFERED=1
