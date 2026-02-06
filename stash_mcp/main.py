@@ -6,6 +6,7 @@ import uvicorn
 
 from .api import create_api
 from .config import Config
+from .events import add_listener
 from .filesystem import FileSystem
 from .mcp_server import create_mcp_server
 from .ui import create_ui_router
@@ -30,6 +31,12 @@ def create_app():
     # Mount FastMCP server onto FastAPI for SSE transport
     mcp = create_mcp_server(filesystem)
     app.mount("/mcp", mcp.http_app())
+
+    # Wire event bus: REST mutations emit MCP resource notifications
+    def on_content_changed(event_type: str, path: str, **kwargs: str) -> None:
+        logger.info(f"Content event: {event_type} {path} {kwargs}")
+
+    add_listener(on_content_changed)
 
     return app
 
