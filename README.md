@@ -162,7 +162,7 @@ Open http://localhost:8000/ui in your browser to:
 
 Environment variables:
 
-- `STASH_CONTENT_DIR` - Content directory path (default: `/data/content`)
+- `STASH_CONTENT_ROOT` - Content directory path (default: `/data/content`)
 - `STASH_HOST` - Server host (default: `0.0.0.0`)
 - `STASH_PORT` - Server port (default: `8000`)
 - `STASH_LOG_LEVEL` - Logging level (default: `info`)

@@ -8,7 +8,10 @@ class Config:
     """Server configuration."""
 
     # Content directory - where files are stored
-    CONTENT_DIR: Path = Path(os.getenv("STASH_CONTENT_DIR", "/data/content"))
+    # STASH_CONTENT_ROOT is the canonical env var; STASH_CONTENT_DIR is kept for backward compat
+    CONTENT_DIR: Path = Path(
+        os.getenv("STASH_CONTENT_ROOT", os.getenv("STASH_CONTENT_DIR", "/data/content"))
+    )
 
     # Server settings
     HOST: str = os.getenv("STASH_HOST", "0.0.0.0")

@@ -24,6 +24,9 @@ dependencies = [
     "python-multipart>=0.0.9",
 ]
 
+[project.scripts]
+stash-mcp = "stash_mcp.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.0",

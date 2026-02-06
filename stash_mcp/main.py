@@ -1,0 +1,51 @@
+"""FastAPI app entrypoint for Stash-MCP."""
+
+import logging
+
+import uvicorn
+
+from .api import create_api
+from .config import Config
+from .filesystem import FileSystem
+from .ui import create_ui_router
+
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, Config.LOG_LEVEL.upper()),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+def create_app():
+    """Create and configure the FastAPI application."""
+    Config.ensure_content_dir()
+    filesystem = FileSystem(Config.CONTENT_DIR)
+
+    app = create_api(filesystem)
+    ui_router = create_ui_router(filesystem)
+    app.include_router(ui_router)
+
+    return app
+
+
+def main():
+    """Run the Stash-MCP web server."""
+    logger.info("Starting Stash-MCP server...")
+
+    app = create_app()
+
+    logger.info(f"Server running at http://{Config.HOST}:{Config.PORT}")
+    logger.info(f"API docs at http://{Config.HOST}:{Config.PORT}/docs")
+    logger.info(f"UI at http://{Config.HOST}:{Config.PORT}/ui")
+
+    uvicorn.run(
+        app,
+        host=Config.HOST,
+        port=Config.PORT,
+        log_level=Config.LOG_LEVEL.lower(),
+    )
+
+
+if __name__ == "__main__":
+    main()
