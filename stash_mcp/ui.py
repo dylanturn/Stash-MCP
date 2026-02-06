@@ -182,13 +182,17 @@ def _breadcrumbs_html(path: str) -> str:
 
 
 def _render_markdown(content: str) -> str:
-    """Render markdown to HTML with extensions."""
+    """Render markdown to HTML with extensions.
+
+    Raw HTML tags in content are escaped to prevent XSS.
+    """
+    safe_content = content.replace("<", "&lt;")
     converter = md.Markdown(extensions=[
         "fenced_code",
         "tables",
         "nl2br",
     ])
-    return converter.convert(content)
+    return converter.convert(safe_content)
 
 
 def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
@@ -424,16 +428,24 @@ function hideConfirm(btn){
 }
 function filterTree(query){
   var files=document.querySelectorAll('.tree-file');
-  var dirs=document.querySelectorAll('details');
+  var dirs=document.querySelectorAll('.tree-root details');
   query=query.toLowerCase();
   if(!query){
     files.forEach(function(f){f.style.display='flex';});
-    dirs.forEach(function(d){d.style.display='';});
+    dirs.forEach(function(d){d.style.display='';d.removeAttribute('open');});
     return;
   }
+  dirs.forEach(function(d){d.style.display='none';});
   files.forEach(function(file){
     var name=file.textContent.toLowerCase();
-    file.style.display=name.includes(query)?'flex':'none';
+    if(name.includes(query)){
+      file.style.display='flex';
+      var p=file.parentElement;
+      while(p&&!p.classList.contains('tree-root')){
+        if(p.tagName==='DETAILS'){p.style.display='';p.setAttribute('open','');}
+        p=p.parentElement;
+      }
+    }else{file.style.display='none';}
   });
 }
 var _unsaved=false;
@@ -445,10 +457,9 @@ var _unsaved=false;
   window.addEventListener('beforeunload',function(e){
     if(_unsaved){e.preventDefault();e.returnValue='';return '';}
   });
-  document.querySelectorAll('a').forEach(function(link){
-    link.addEventListener('click',function(e){
-      if(_unsaved&&!confirm('You have unsaved changes. Continue?')){e.preventDefault();}
-    });
+  document.body.addEventListener('click',function(e){
+    var link=e.target.closest('a');
+    if(link&&_unsaved&&!confirm('You have unsaved changes. Continue?')){e.preventDefault();}
   });
   document.addEventListener('keydown',function(e){
     if((e.ctrlKey||e.metaKey)&&e.key==='s'){
@@ -539,7 +550,8 @@ def _sidebar_html(filesystem: FileSystem, active: str = "") -> str:
         f'<a href="/ui/new" class="btn-new">{_icon("plus")} New Document</a>'
         '<div class="search-box">'
         '<input type="text" id="tree-search" class="search-input" '
-        'placeholder="Search files..." oninput="filterTree(this.value)">'
+        'placeholder="Search files..." aria-label="Search files" '
+        'oninput="filterTree(this.value)">'
         "</div>"
         "</div>"
         f'<div class="tree-root">{tree if tree else "<p class=empty-msg>No files yet</p>"}</div>'
