@@ -69,22 +69,19 @@ class TestUIBrowse:
         # Should have edit link
         assert "/ui/edit/hello.md" in body
 
-    def test_browse_file_has_breadcrumbs(self, ui_client):
-        """File view includes breadcrumb navigation."""
+    def test_browse_file_no_breadcrumbs(self, ui_client):
+        """File view does not include breadcrumb navigation."""
         response = ui_client.get("/ui/browse/docs/readme.md")
         assert response.status_code == 200
         body = response.text
-        # Should have breadcrumb links
-        assert "Home" in body
-        assert "docs" in body
-        assert "readme.md" in body
+        assert "breadcrumbs" not in body or 'class="breadcrumbs"' not in body
 
     def test_browse_file_has_metadata(self, ui_client):
         """File view shows metadata in right panel."""
         response = ui_client.get("/ui/browse/hello.md")
         assert response.status_code == 200
         body = response.text
-        assert "File Info" in body
+        assert "Document Metadata" in body
         assert "Words" in body
         assert "Characters" in body
 
@@ -200,6 +197,47 @@ class TestUIDelete:
         assert response.status_code == 303
 
 
+class TestUIMove:
+    """Tests for POST /ui/move/."""
+
+    def test_move_renames_file(self, ui_client):
+        """POST /ui/move/hello.md renames the file and redirects to new location."""
+        response = ui_client.post(
+            "/ui/move/hello.md",
+            data={"destination": "renamed.md"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "/ui/browse/renamed.md" in response.headers["location"]
+
+        # Verify file is at new location
+        view_resp = ui_client.get("/ui/browse/renamed.md")
+        assert "<h1>Hello World</h1>" in view_resp.text
+
+        # Verify old path is gone
+        old_resp = ui_client.get("/ui/browse/hello.md")
+        assert "not found" in old_resp.text.lower() or "Path not found" in old_resp.text
+
+    def test_move_nested_file(self, ui_client):
+        """POST /ui/move/docs/readme.md moves to a new path and redirects."""
+        response = ui_client.post(
+            "/ui/move/docs/readme.md",
+            data={"destination": "notes/readme.md"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "/ui/browse/notes/readme.md" in response.headers["location"]
+
+    def test_move_form_present(self, ui_client):
+        """GET browse page for a file shows the rename form."""
+        response = ui_client.get("/ui/browse/hello.md")
+        body = response.text
+        assert "Rename / Move" in body
+        assert "rename-form" in body
+        assert "/ui/move/hello.md" in body
+        assert 'name="destination"' in body
+
+
 class TestUIMarkdown:
     """Tests for markdown rendering."""
 
@@ -254,12 +292,12 @@ class TestUIFeatures:
         assert "beforeunload" in body
         assert "_unsaved" in body
 
-    def test_sticky_save_bar_css(self, ui_client):
-        """Action bar CSS should include sticky positioning."""
+    def test_save_bar_css(self, ui_client):
+        """Action bar CSS should be present in edit page."""
         response = ui_client.get("/ui/edit/hello.md")
         body = response.text
-        assert "position:sticky" in body
-        assert "backdrop-filter" in body
+        assert "action-bar" in body
+        assert "btn-save" in body
 
     def test_scrollbar_css(self, ui_client):
         """Page should include custom scrollbar styles."""
