@@ -1,6 +1,7 @@
 """Filesystem layer for content management."""
 
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -24,15 +25,19 @@ class InvalidPathError(FileSystemError):
 class FileSystem:
     """Manages filesystem operations for content storage."""
 
-    def __init__(self, content_dir: Path):
+    def __init__(self, content_dir: Path, include_patterns: list[str] | None = None):
         """Initialize filesystem layer.
 
         Args:
             content_dir: Root directory for content storage
+            include_patterns: Optional glob patterns to filter discovered files
         """
         self.content_dir = content_dir.resolve()
         self.content_dir.mkdir(parents=True, exist_ok=True)
+        self.include_patterns = include_patterns
         logger.info(f"Filesystem initialized with content_dir: {self.content_dir}")
+        if include_patterns:
+            logger.info(f"Content path patterns: {include_patterns}")
 
     def _resolve_path(self, relative_path: str) -> Path:
         """Resolve and validate a relative path.
@@ -61,8 +66,53 @@ class FileSystem:
 
         return full_path
 
+    @staticmethod
+    def _glob_to_regex(pattern: str) -> re.Pattern[str]:
+        """Convert a glob pattern to a regex.
+
+        Handles *, ?, and ** (zero or more path segments).
+        """
+        i = 0
+        n = len(pattern)
+        res = ""
+        while i < n:
+            c = pattern[i]
+            if c == "*":
+                if i + 1 < n and pattern[i + 1] == "*":
+                    i += 2
+                    if i < n and pattern[i] == "/":
+                        i += 1
+                        res += "(?:.+/)?"
+                    else:
+                        res += ".*"
+                else:
+                    res += "[^/]*"
+                    i += 1
+            elif c == "?":
+                res += "[^/]"
+                i += 1
+            else:
+                res += re.escape(c)
+                i += 1
+        return re.compile(res + r"\Z")
+
+    def _matches_patterns(self, relative_path: str) -> bool:
+        """Check if a relative path matches any of the include patterns.
+
+        Returns True if no patterns are set (all files included).
+        """
+        if not self.include_patterns:
+            return True
+        return any(
+            self._glob_to_regex(pattern).match(relative_path)
+            for pattern in self.include_patterns
+        )
+
     def list_files(self, relative_path: str = "") -> list[tuple[str, bool]]:
         """List files and directories at the given path.
+
+        When include_patterns is set, only files matching patterns and
+        directories containing matching files are shown.
 
         Args:
             relative_path: Path relative to content_dir
@@ -82,17 +132,45 @@ class FileSystem:
         if not full_path.is_dir():
             raise InvalidPathError(f"Path '{relative_path}' is not a directory")
 
-        items = []
-        for item in sorted(full_path.iterdir()):
-            # Skip hidden files
-            if item.name.startswith("."):
-                continue
-            items.append((item.name, item.is_dir()))
+        if not self.include_patterns:
+            items = []
+            for item in sorted(full_path.iterdir()):
+                if item.name.startswith("."):
+                    continue
+                items.append((item.name, item.is_dir()))
+            return items
 
+        # With patterns: derive visible entries from all matching files
+        all_matching = self.list_all_files(relative_path)
+        prefix = (relative_path.rstrip("/") + "/") if relative_path else ""
+        visible_files: set[str] = set()
+        visible_dirs: set[str] = set()
+
+        for file_path in all_matching:
+            # Strip prefix to get the path relative to current directory
+            if prefix:
+                rest = file_path[len(prefix):]
+            else:
+                rest = file_path
+            parts = rest.split("/")
+            if len(parts) == 1:
+                visible_files.add(parts[0])
+            else:
+                visible_dirs.add(parts[0])
+
+        items = []
+        for name in sorted(visible_dirs | visible_files):
+            if name in visible_dirs:
+                items.append((name, True))
+            else:
+                items.append((name, False))
         return items
 
     def list_all_files(self, relative_path: str = "") -> list[str]:
         """Recursively list all files under the given path.
+
+        When include_patterns is set, only files matching at least one
+        pattern are returned.
 
         Args:
             relative_path: Path relative to content_dir
@@ -108,10 +186,29 @@ class FileSystem:
         if not full_path.exists():
             return []
 
-        files = []
         if full_path.is_file():
-            return [relative_path]
+            if self._matches_patterns(relative_path):
+                return [relative_path]
+            return []
 
+        if self.include_patterns:
+            seen: set[str] = set()
+            for pattern in self.include_patterns:
+                for item in self.content_dir.glob(pattern):
+                    if not item.is_file():
+                        continue
+                    if any(part.startswith(".") for part in item.relative_to(self.content_dir).parts):
+                        continue
+                    rel = str(item.relative_to(self.content_dir))
+                    # Filter by relative_path prefix
+                    if relative_path:
+                        prefix = relative_path.rstrip("/") + "/"
+                        if not rel.startswith(prefix) and rel != relative_path:
+                            continue
+                    seen.add(rel)
+            return sorted(seen)
+
+        files = []
         for item in full_path.rglob("*"):
             if item.is_file() and not any(part.startswith(".") for part in item.parts):
                 rel_path = item.relative_to(self.content_dir)

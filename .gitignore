@@ -9,9 +9,10 @@ __pycache__/
 # Stash-MCP specific - user content directory
 # (example content is included in repo, but ignore everything else)
 content/*
+!content/README.md
 !content/docs/
 !content/examples/
-
+.idea/
 # Distribution / packaging
 .Python
 build/

@@ -64,11 +64,12 @@ class TreeNode(BaseModel):
     children: list["TreeNode"] | None = None
 
 
-def create_api(filesystem: FileSystem) -> FastAPI:
+def create_api(filesystem: FileSystem, lifespan=None) -> FastAPI:
     """Create FastAPI application.
 
     Args:
         filesystem: Filesystem instance
+        lifespan: Optional lifespan context manager for the app
 
     Returns:
         FastAPI application
@@ -77,6 +78,7 @@ def create_api(filesystem: FileSystem) -> FastAPI:
         title="Stash-MCP API",
         description="REST API for Stash content management",
         version=Config.SERVER_VERSION,
+        lifespan=lifespan,
     )
 
     # Add CORS middleware

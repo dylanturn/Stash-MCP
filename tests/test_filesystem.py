@@ -20,6 +20,25 @@ def temp_fs():
         yield fs
 
 
+@pytest.fixture
+def populated_dir(tmp_path):
+    """Create a temp directory with a known file structure for pattern tests."""
+    files = {
+        "docs/guide.md": "# Guide",
+        "docs/api.md": "# API",
+        "docs/deep/nested.md": "# Nested",
+        "notes/todo.txt": "todo",
+        "notes/ideas.md": "ideas",
+        "readme.md": "# Root readme",
+        "data.json": '{"key": "value"}',
+    }
+    for rel, content in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    return tmp_path
+
+
 def test_write_and_read_file(temp_fs):
     """Test writing and reading a file."""
     temp_fs.write_file("test.txt", "Hello, World!")
@@ -142,3 +161,124 @@ def test_move_file_to_existing_dest(temp_fs):
     from stash_mcp.filesystem import FileSystemError
     with pytest.raises(FileSystemError, match="already exists"):
         temp_fs.move_file("source.txt", "dest.txt")
+
+
+# --- Include patterns tests ---
+
+
+def test_list_all_files_with_include_patterns(populated_dir):
+    """Test that only files matching patterns are returned."""
+    fs = FileSystem(populated_dir, include_patterns=["docs/**/*.md"])
+    files = fs.list_all_files()
+    assert "docs/guide.md" in files
+    assert "docs/api.md" in files
+    assert "docs/deep/nested.md" in files
+    assert "notes/todo.txt" not in files
+    assert "readme.md" not in files
+    assert "data.json" not in files
+
+
+def test_list_all_files_with_multiple_patterns(populated_dir):
+    """Test that multiple patterns are unioned."""
+    fs = FileSystem(populated_dir, include_patterns=["docs/**/*.md", "*.json"])
+    files = fs.list_all_files()
+    assert "docs/guide.md" in files
+    assert "docs/api.md" in files
+    assert "data.json" in files
+    assert "notes/todo.txt" not in files
+    assert "readme.md" not in files
+
+
+def test_list_all_files_with_glob_star_star(populated_dir):
+    """Test ** patterns work across directories."""
+    fs = FileSystem(populated_dir, include_patterns=["**/*.md"])
+    files = fs.list_all_files()
+    assert "docs/guide.md" in files
+    assert "docs/api.md" in files
+    assert "docs/deep/nested.md" in files
+    assert "notes/ideas.md" in files
+    assert "readme.md" in files
+    assert "notes/todo.txt" not in files
+    assert "data.json" not in files
+
+
+def test_list_files_with_include_patterns(populated_dir):
+    """Test directories shown only when they contain matches."""
+    fs = FileSystem(populated_dir, include_patterns=["docs/**/*.md"])
+    items = fs.list_files("")
+    names = [name for name, _ in items]
+    assert "docs" in names
+    assert "notes" not in names
+    assert "readme.md" not in names
+    assert "data.json" not in names
+
+
+def test_list_files_with_patterns_hides_non_matching(populated_dir):
+    """Test non-matching files and empty dirs hidden."""
+    fs = FileSystem(populated_dir, include_patterns=["notes/*.txt"])
+    items = fs.list_files("")
+    names = [name for name, _ in items]
+    assert "notes" in names
+    assert "docs" not in names
+    assert "readme.md" not in names
+
+    # Inside notes, only .txt files are visible
+    items = fs.list_files("notes")
+    names = [name for name, _ in items]
+    assert "todo.txt" in names
+    assert "ideas.md" not in names
+
+
+def test_include_patterns_trailing_slash_normalization():
+    """Test that trailing '/' is treated as '/**'."""
+    from stash_mcp.config import _parse_content_paths
+
+    result = _parse_content_paths("docs/")
+    assert result == ["docs/**"]
+
+    result = _parse_content_paths("docs/, notes/")
+    assert result == ["docs/**", "notes/**"]
+
+
+def test_parse_content_paths_none_and_empty():
+    """Test _parse_content_paths returns None for None/empty input."""
+    from stash_mcp.config import _parse_content_paths
+
+    assert _parse_content_paths(None) is None
+    assert _parse_content_paths("") is None
+    assert _parse_content_paths("  , , ") is None
+
+
+def test_no_patterns_returns_all(populated_dir):
+    """Test that None patterns preserves existing behavior."""
+    fs = FileSystem(populated_dir, include_patterns=None)
+    files = fs.list_all_files()
+    assert len(files) == 7
+    assert "docs/guide.md" in files
+    assert "notes/todo.txt" in files
+    assert "readme.md" in files
+    assert "data.json" in files
+
+
+def test_matches_patterns_helper(populated_dir):
+    """Test the _matches_patterns method directly."""
+    fs = FileSystem(populated_dir, include_patterns=["docs/**/*.md", "*.json"])
+    assert fs._matches_patterns("docs/guide.md") is True
+    assert fs._matches_patterns("docs/deep/nested.md") is True
+    assert fs._matches_patterns("data.json") is True
+    assert fs._matches_patterns("notes/todo.txt") is False
+    assert fs._matches_patterns("readme.md") is False
+
+    # No patterns = everything matches
+    fs_all = FileSystem(populated_dir)
+    assert fs_all._matches_patterns("anything.xyz") is True
+
+
+def test_list_all_files_with_patterns_and_subpath(populated_dir):
+    """Test list_all_files with patterns filtered to a subdirectory."""
+    fs = FileSystem(populated_dir, include_patterns=["docs/**/*.md", "notes/*.txt"])
+    files = fs.list_all_files("docs")
+    assert "docs/guide.md" in files
+    assert "docs/api.md" in files
+    assert "docs/deep/nested.md" in files
+    assert all(f.startswith("docs/") for f in files)

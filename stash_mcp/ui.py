@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
+import markdown as md
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -24,6 +25,18 @@ _ICONS = {
         'stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9'
         "a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0"
         ' 2 2Z"/></svg>'
+    ),
+    "folder-open": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 '
+        '0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2'
+        'h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>'
+    ),
+    "chevron-down": (
+        '<svg class="icon chevron-down" width="14" height="14" viewBox="0 0 24 24" '
+        'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>'
     ),
     "file-text": (
         '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
@@ -118,6 +131,13 @@ _ICONS = {
         '<path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/>'
         '<path d="M10 12h4"/></svg>'
     ),
+    "pen-line": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.376 3.622a1 1 0 0 1 '
+        '3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l'
+        '.838-2.872a2 2 0 0 1 .506-.854z"/></svg>'
+    ),
 }
 
 
@@ -131,14 +151,9 @@ def _icon(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _file_icon(name: str) -> str:
-    """Return a Lucide SVG icon based on file extension."""
-    suffix = PurePosixPath(name).suffix.lower()
-    if suffix in (".md", ".markdown"):
-        return _icon("file-text")
-    if suffix in (".json", ".yaml", ".yml", ".toml"):
-        return _icon("file-json")
-    return _icon("file")
+def _file_icon(_name: str) -> str:
+    """Return a Lucide SVG icon for a file."""
+    return _icon("file-text")
 
 
 def _mime_type(path: str) -> str:
@@ -180,6 +195,20 @@ def _breadcrumbs_html(path: str) -> str:
     return f' <span class="sep">{_icon("chevron-right")}</span> '.join(items)
 
 
+def _render_markdown(content: str) -> str:
+    """Render markdown to HTML with extensions.
+
+    Raw HTML tags in content are escaped to prevent XSS.
+    """
+    safe_content = content.replace("<", "&lt;")
+    converter = md.Markdown(extensions=[
+        "fenced_code",
+        "tables",
+        "nl2br",
+    ])
+    return converter.convert(safe_content)
+
+
 def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
     """Build recursive HTML for the sidebar tree."""
     try:
@@ -193,9 +222,13 @@ def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") ->
         if is_dir:
             open_attr = "open" if active.startswith(child) else ""
             children_html = _build_tree_html(filesystem, child, active)
+            escaped_child = html.escape(child)
             parts.append(
-                f'<details {open_attr}><summary class="tree-dir">'
-                f'{_icon("chevron-right")} {_icon("folder")} {escaped}</summary>'
+                f'<details {open_attr} data-path="{escaped_child}">'
+                f'<summary class="tree-dir">'
+                f'<span class="tree-chevron">{_icon("chevron-right")}{_icon("chevron-down")}</span>'
+                f'<span class="tree-folder-icon">{_icon("folder")}{_icon("folder-open")}</span>'
+                f' {escaped}</summary>'
                 f'<div class="tree-children">{children_html}</div></details>'
             )
         else:
@@ -217,48 +250,81 @@ background:#1e1e2e;color:#cdd6f4;min-height:100vh}
 a{color:#94e2d5;text-decoration:none}
 a:hover{text-decoration:underline}
 
+/* custom scrollbar */
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#313244;border-radius:4px;
+transition:background 150ms ease}
+::-webkit-scrollbar-thumb:hover{background:#7f849c}
+*{scrollbar-width:thin;scrollbar-color:#313244 transparent}
+
 /* icons */
 .icon{display:inline-block;vertical-align:middle;flex-shrink:0}
-.icon.chevron{transition:transform 150ms ease}
-details[open]>summary .icon.chevron{transform:rotate(90deg)}
+
+/* tree chevron + folder icon swap */
+.tree-chevron{display:inline-flex;align-items:center;flex-shrink:0;color:#7f849c}
+.tree-chevron .icon.chevron-down{display:none}
+details[open]>summary .tree-chevron .icon{display:none}
+details[open]>summary .tree-chevron .icon.chevron-down{display:inline-block}
+.tree-folder-icon{display:inline-flex;align-items:center;flex-shrink:0;color:#94e2d5}
+.tree-folder-icon .icon:last-child{display:none}
+details[open]>summary .tree-folder-icon .icon:first-child{display:none}
+details[open]>summary .tree-folder-icon .icon:last-child{display:inline-block}
+.tree-file .icon{color:#7f849c}
 
 /* layout */
-.layout{display:flex;height:100vh}
+.app{display:flex;flex-direction:column;height:100vh}
+.top-bar{display:flex;align-items:center;justify-content:space-between;
+padding:0 20px;height:70px;background:#272738;border-bottom:1px solid #313244;flex-shrink:0}
+.top-bar-left{display:flex;align-items:center}
+.app-wordmark{display:block}
+.top-bar-right{display:flex;align-items:center;gap:4px}
+.layout{display:flex;flex:1;overflow:hidden}
 .sidebar{width:250px;min-width:0;background:#272738;border-right:1px solid #313244;
 overflow-y:auto;padding:12px;flex-shrink:0;display:flex;flex-direction:column;
 transition:width 150ms ease,padding 150ms ease}
 .sidebar.collapsed{width:0;padding:0;overflow:hidden;border-right:none}
 .sidebar-header{padding:8px 0 12px;border-bottom:1px solid #313244;margin-bottom:8px;
 display:flex;flex-direction:column;gap:6px}
-.sidebar-title{display:flex;align-items:center;gap:6px;font-size:14px;color:#cdd6f4;
-font-weight:600}
 .btn-new{display:flex;align-items:center;justify-content:center;gap:6px;
-padding:6px 12px;background:#94e2d5;color:#1e1e2e;
-border-radius:4px;font-size:13px;font-weight:600;text-align:center;border:none;cursor:pointer}
-.btn-new:hover{background:#a6e3e0;text-decoration:none}
+padding:8px 12px;background:#94e2d5;color:#1e1e2e;
+border-radius:6px;font-size:13px;font-weight:600;text-align:center;border:none;cursor:pointer;
+transition:background 150ms ease,transform 150ms ease}
+.btn-new:hover{background:#a6e3e0;text-decoration:none;transform:translateY(-1px)}
+
+/* search */
+.search-box{margin-top:8px;position:relative}
+.search-input{width:100%;padding:8px 12px;background:#1e1e2e;color:#cdd6f4;
+border:1px solid #313244;border-radius:6px;font-size:13px;outline:none;
+transition:border-color 150ms ease,box-shadow 150ms ease}
+.search-input:focus{border-color:#94e2d5;box-shadow:0 0 0 2px rgba(148,226,213,0.1)}
 
 .center{flex:1;overflow-y:auto;display:flex;flex-direction:column}
-.center-toolbar{display:flex;align-items:center;justify-content:space-between;
-padding:8px 24px;background:#272738;border-bottom:1px solid #313244;flex-shrink:0}
-.toolbar-left{display:flex;align-items:center;gap:8px}
-.toolbar-right{display:flex;align-items:center;gap:4px}
 .panel-toggle{background:none;border:none;color:#7f849c;cursor:pointer;
-padding:4px 6px;border-radius:4px;display:flex;align-items:center}
+padding:6px 8px;border-radius:4px;display:flex;align-items:center;
+transition:background 150ms ease,color 150ms ease}
 .panel-toggle:hover{color:#cdd6f4;background:#2e2e42}
-.mode-switch{display:flex;background:#1e1e2e;border-radius:4px;overflow:hidden;
-border:1px solid #313244}
-.mode-btn{display:flex;align-items:center;gap:5px;padding:5px 12px;font-size:12px;
-color:#7f849c;background:transparent;border:none;cursor:pointer;
-transition:background 150ms ease,color 150ms ease;white-space:nowrap}
-.mode-btn:hover{color:#cdd6f4}
-.mode-btn.active{background:#94e2d5;color:#1e1e2e}
+
+/* mode tabs */
+.mode-tabs{display:flex;gap:0;border-bottom:1px solid #313244;flex-shrink:0;
+padding:0 32px;background:transparent;height: 50px;}
+.mode-tab{display:inline-flex;align-items:center;gap:6px;padding:10px 16px;
+font-size:14px;color:#7f849c;background:transparent;border:none;
+border-bottom:2px solid transparent;cursor:pointer;
+transition:color 150ms ease,border-color 150ms ease;white-space:nowrap;margin-bottom:-1px}
+.mode-tab:hover{color:#cdd6f4;text-decoration:none}
+.mode-tab.active{color:#cdd6f4;border-bottom-color:#94e2d5}
+
 .center-content{flex:1;padding:24px 32px;overflow-y:auto;display:flex;
-flex-direction:column;align-items:center}
-.center-inner{width:100%;max-width:900px}
+flex-direction:column;align-items:center;min-height:0}
+.center-inner{width:100%;max-width:900px;display:flex;flex-direction:column;flex:1;min-height:0}
 
 .right-panel{width:280px;min-width:0;background:#272738;border-left:1px solid #313244;
-overflow-y:auto;padding:16px;flex-shrink:0;transition:width 150ms ease,padding 150ms ease}
+overflow-y:auto;padding:16px;flex-shrink:0;display:flex;flex-direction:column;
+transition:width 150ms ease,padding 150ms ease}
 .right-panel.collapsed{width:0;padding:0;overflow:hidden;border-left:none}
+.right-top{flex:1}
+.right-bottom{border-top:1px solid #313244;padding-top:16px;margin-top:16px}
 
 /* breadcrumbs */
 .breadcrumbs{font-size:13px;color:#7f849c;margin-bottom:16px;
@@ -267,16 +333,16 @@ display:flex;align-items:center;flex-wrap:wrap;gap:2px}
 .breadcrumbs .sep{color:#7f849c;display:inline-flex;align-items:center}
 
 /* tree */
-.tree-file{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:13px;
-border-radius:4px;color:#cdd6f4;border-left:3px solid transparent;margin:1px 0}
+.tree-file{display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:14px;
+border-radius:6px;color:#cdd6f4;margin:2px 0;transition:background 150ms ease}
 .tree-file:hover{background:#2e2e42;text-decoration:none}
-.tree-file.selected{border-left-color:#94e2d5;background:#2e2e42}
+.tree-file.selected{background:rgba(148,226,213,0.08);outline:1px solid rgba(148,226,213,0.20)}
 details summary.tree-dir{display:flex;align-items:center;gap:4px;
-padding:4px 8px;font-size:13px;cursor:pointer;color:#cdd6f4;
-list-style:none;border-radius:4px;margin:1px 0}
+padding:6px 8px;font-size:14px;cursor:pointer;color:#cdd6f4;
+list-style:none;border-radius:6px;margin:2px 0;transition:background 150ms ease}
 details summary.tree-dir:hover{background:#2e2e42}
 details summary.tree-dir::marker,details summary.tree-dir::-webkit-details-marker{display:none}
-.tree-children{padding-left:14px;border-left:1px solid #313244;margin-left:10px}
+.tree-children{padding-left:24px}
 
 /* file listing table */
 .file-table{width:100%;border-collapse:collapse;margin-top:12px}
@@ -288,45 +354,83 @@ border-bottom:1px solid #313244;font-weight:500}
 .file-table .name a{color:#94e2d5}
 .file-table .dir a{color:#cdd6f4}
 
-/* viewer */
-.viewer-content{background:#181825;padding:20px;border-radius:6px;overflow-x:auto;
-font-family:'Monaco','Menlo','Ubuntu Mono',monospace;font-size:14px;line-height:1.6;
-white-space:pre-wrap;word-wrap:break-word;color:#cdd6f4;margin-top:12px}
+/* viewer - typography for comfortable reading */
+.viewer-content{background:#181825;padding:24px 32px;border-radius:6px;overflow-x:auto;
+font-size:18px;line-height:1.6;color:#cdd6f4;margin-top:12px;flex:1;width:100%}
+.viewer-content pre{font-family:'Monaco','Menlo','Ubuntu Mono',monospace;
+white-space:pre-wrap;word-wrap:break-word;margin:0}
+.viewer-content h1{color:#e0e4f0;font-size:28px;margin-bottom:1.5rem;margin-top:0}
+.viewer-content h2{color:#e0e4f0;font-size:22px;margin-top:2rem;margin-bottom:1rem}
+.viewer-content h3{color:#e0e4f0;font-size:18px;margin-top:1.5rem;margin-bottom:0.75rem}
+.viewer-content p{margin-bottom:1.5rem}
+.viewer-content ul,.viewer-content ol{margin-bottom:1.5rem;padding-left:1.5rem}
+.viewer-content li{margin-bottom:0.5rem}
+
+/* markdown body styles */
+.markdown-body code{background:#181825;padding:0.2em 0.4em;border-radius:3px;
+font-size:0.9em;font-family:'Monaco','Menlo',monospace}
+.markdown-body pre{background:#181825;padding:1rem;border-radius:6px;
+overflow-x:auto;margin-bottom:1.5rem}
+.markdown-body pre code{background:transparent;padding:0}
+.markdown-body a{color:#94e2d5;text-decoration:underline}
+.markdown-body table{width:100%;border-collapse:collapse;margin-bottom:1.5rem;
+border:1px solid #313244}
+.markdown-body th{padding:0.75rem;background:#272738;
+border-bottom:2px solid #313244;text-align:left;color:#e0e4f0}
+.markdown-body td{padding:0.75rem;border-bottom:1px solid #313244}
+.markdown-body blockquote{border-left:3px solid #94e2d5;padding-left:1rem;
+margin-left:0;color:#7f849c;margin-bottom:1.5rem}
 
 /* editor */
-.editor-area{width:100%;min-height:400px;background:#181825;color:#cdd6f4;
-border:1px solid #313244;border-radius:6px;padding:16px;
-font-family:'Monaco','Menlo','Ubuntu Mono',monospace;font-size:14px;line-height:1.6;
-resize:vertical}
+.editor-form{display:flex;flex-direction:column;flex:1;min-height:0}
+.editor-area{width:100%;flex:1;min-height:300px;background:#181825;color:#cdd6f4;
+border:1px solid #313244;border-radius:8px;padding:20px 24px;
+font-family:'Monaco','Menlo','Ubuntu Mono',monospace;font-size:14px;line-height:1.7;
+resize:none;transition:border-color 150ms ease,box-shadow 150ms ease}
 .editor-area:focus{outline:none;border-color:#94e2d5;box-shadow:0 0 0 2px rgba(148,226,213,0.15)}
 .path-input{width:100%;padding:10px 12px;background:#181825;color:#cdd6f4;
-border:1px solid #313244;border-radius:6px;font-size:14px;margin-bottom:12px}
+border:1px solid #313244;border-radius:6px;font-size:14px;margin-bottom:12px;
+transition:border-color 150ms ease,box-shadow 150ms ease}
 .path-input:focus{outline:none;border-color:#94e2d5;box-shadow:0 0 0 2px rgba(148,226,213,0.15)}
-.action-bar{display:flex;gap:10px;margin-top:12px}
-.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border-radius:4px;
-font-size:14px;font-weight:500;cursor:pointer;border:none;transition:background 150ms ease}
+.action-bar{display:flex;gap:12px;padding:16px 0;justify-content:center;flex-shrink:0}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:10px 24px;border-radius:6px;
+font-size:14px;font-weight:500;cursor:pointer;border:none;
+transition:background 150ms ease,transform 150ms ease}
+.btn:hover{transform:translateY(-1px)}
 .btn-save{background:#94e2d5;color:#1e1e2e}
 .btn-save:hover{background:#a6e3e0}
-.btn-cancel{background:#313244;color:#cdd6f4}
-.btn-cancel:hover{background:#3e3e55}
+.btn-discard{background:transparent;color:#7f849c;border:1px solid #313244}
+.btn-discard:hover{color:#cdd6f4;border-color:#7f849c}
+.unsaved-dot{display:inline-block;width:8px;height:8px;border-radius:50%;
+background:#94e2d5;margin-left:4px;vertical-align:middle}
 
 /* right panel */
-.meta-section{margin-bottom:20px}
-.meta-section h3{font-size:13px;color:#7f849c;margin-bottom:8px;text-transform:uppercase;
-letter-spacing:0.5px}
-.meta-row{display:flex;justify-content:space-between;font-size:13px;padding:4px 0;
+.meta-heading{font-size:16px;font-weight:600;color:#e0e4f0;margin-bottom:16px}
+.meta-field{padding:12px 0;border-bottom:1px solid #313244}
+.meta-field:last-child{border-bottom:none}
+.meta-field-label{font-size:12px;color:#7f849c;margin-bottom:4px;text-transform:capitalize;
+letter-spacing:0.3px}
+.meta-field-value{font-size:15px;color:#cdd6f4;font-weight:500}
+.meta-field-path{background:#181825;padding:10px 12px;border-radius:6px;
+font-family:'Monaco','Menlo','Ubuntu Mono',monospace;font-size:13px;
+color:#cdd6f4;word-break:break-all;margin-top:6px}
+.meta-stats-heading{font-size:12px;color:#7f849c;margin-bottom:8px;text-transform:capitalize;
+letter-spacing:0.3px}
+.meta-stat-row{display:flex;justify-content:space-between;font-size:15px;padding:2px 0;
 color:#cdd6f4}
-.meta-row .label{color:#7f849c}
+.meta-stat-row .label{color:#7f849c}
+.meta-stat-row .value{font-weight:500}
 .action-stack{display:flex;flex-direction:column;gap:8px;margin-top:16px}
 .btn-edit{display:flex;align-items:center;justify-content:center;gap:6px;
 padding:8px 14px;background:#94e2d5;color:#1e1e2e;border-radius:4px;
-font-weight:500;font-size:13px;border:none;cursor:pointer}
-.btn-edit:hover{background:#a6e3e0;text-decoration:none}
+font-weight:500;font-size:13px;border:none;cursor:pointer;
+transition:background 150ms ease,transform 150ms ease}
+.btn-edit:hover{background:#a6e3e0;text-decoration:none;transform:translateY(-1px)}
 .btn-delete{display:flex;align-items:center;justify-content:center;gap:6px;
 padding:8px 14px;background:transparent;color:#f38ba8;
 border:1px solid #f38ba8;border-radius:4px;font-weight:500;
-font-size:13px;cursor:pointer}
-.btn-delete:hover{background:rgba(243,139,168,0.1);text-decoration:none}
+font-size:13px;cursor:pointer;transition:background 150ms ease,transform 150ms ease}
+.btn-delete:hover{background:rgba(243,139,168,0.1);text-decoration:none;transform:translateY(-1px)}
 .confirm-row{display:flex;gap:6px}
 .btn-confirm-del{padding:6px 12px;background:#f38ba8;color:#1e1e2e;border-radius:4px;
 font-size:12px;font-weight:600;border:none;cursor:pointer}
@@ -334,6 +438,24 @@ font-size:12px;font-weight:600;border:none;cursor:pointer}
 .btn-confirm-cancel{padding:6px 12px;background:#313244;color:#cdd6f4;border-radius:4px;
 font-size:12px;border:none;cursor:pointer}
 .btn-confirm-cancel:hover{background:#3e3e55}
+.btn-rename{display:flex;align-items:center;justify-content:center;gap:6px;
+padding:8px 14px;background:transparent;color:#cdd6f4;
+border:1px solid #585b70;border-radius:4px;font-weight:500;
+font-size:13px;cursor:pointer;transition:background 150ms ease,transform 150ms ease}
+.btn-rename:hover{background:rgba(148,226,213,0.08);border-color:#94e2d5;
+transform:translateY(-1px)}
+.rename-form{display:none}
+.rename-input{width:100%;padding:8px 10px;background:#181825;color:#cdd6f4;
+border:1px solid #313244;border-radius:4px;font-size:13px;margin-bottom:6px;
+transition:border-color 150ms ease,box-shadow 150ms ease}
+.rename-input:focus{outline:none;border-color:#94e2d5;
+box-shadow:0 0 0 2px rgba(148,226,213,0.15)}
+.btn-confirm-rename{padding:6px 12px;background:#94e2d5;color:#1e1e2e;border-radius:4px;
+font-size:12px;font-weight:600;border:none;cursor:pointer}
+.btn-confirm-rename:hover{background:#a6e3e0}
+.btn-cancel-rename{padding:6px 12px;background:#313244;color:#cdd6f4;border-radius:4px;
+font-size:12px;border:none;cursor:pointer}
+.btn-cancel-rename:hover{background:#3e3e55}
 
 /* headings */
 h1{font-size:22px;color:#e0e4f0;margin-bottom:4px;font-weight:600}
@@ -363,6 +485,94 @@ function hideConfirm(btn){
   var f=btn.closest('.del-form');f.style.display='none';
   f.previousElementSibling.style.display='block';
 }
+function showRename(btn){
+  btn.style.display='none';
+  btn.nextElementSibling.style.display='block';
+}
+function hideRename(btn){
+  var f=btn.closest('.rename-form');f.style.display='none';
+  f.previousElementSibling.style.display='flex';
+}
+function _getExpandedDirs(){
+  try{return JSON.parse(localStorage.getItem('stash_expanded_dirs'))||[];}
+  catch(e){return [];}
+}
+function _saveExpandedDirs(dirs){
+  try{localStorage.setItem('stash_expanded_dirs',JSON.stringify(dirs));}catch(e){}
+}
+function _restoreTreeState(){
+  var saved=_getExpandedDirs();
+  document.querySelectorAll('.tree-root details[data-path]').forEach(function(d){
+    if(saved.indexOf(d.getAttribute('data-path'))!==-1){d.setAttribute('open','');}
+  });
+}
+function _trackTreeToggles(){
+  document.querySelector('.tree-root').addEventListener('toggle',function(e){
+    var d=e.target;if(d.tagName!=='DETAILS'||!d.dataset.path)return;
+    var dirs=_getExpandedDirs();var p=d.dataset.path;
+    if(d.open){if(dirs.indexOf(p)===-1)dirs.push(p);}
+    else{dirs=dirs.filter(function(x){return x!==p;});}
+    _saveExpandedDirs(dirs);
+  },true);
+}
+function filterTree(query){
+  var files=document.querySelectorAll('.tree-file');
+  var dirs=document.querySelectorAll('.tree-root details');
+  query=query.toLowerCase();
+  if(!query){
+    files.forEach(function(f){f.style.display='flex';});
+    dirs.forEach(function(d){d.style.display='';d.removeAttribute('open');});
+    _restoreTreeState();
+    return;
+  }
+  dirs.forEach(function(d){d.style.display='none';});
+  files.forEach(function(file){
+    var name=file.textContent.toLowerCase();
+    if(name.includes(query)){
+      file.style.display='flex';
+      var p=file.parentElement;
+      while(p&&!p.classList.contains('tree-root')){
+        if(p.tagName==='DETAILS'){p.style.display='';p.setAttribute('open','');}
+        p=p.parentElement;
+      }
+    }else{file.style.display='none';}
+  });
+}
+var _unsaved=false;
+(function(){
+  var ta=document.querySelector('.editor-area');
+  if(ta){ta.addEventListener('input',function(){
+    _unsaved=true;
+    var et=document.querySelector('.mode-tab.active');
+    if(et&&!et.querySelector('.unsaved-dot')){
+      var dot=document.createElement('span');dot.className='unsaved-dot';et.appendChild(dot);
+    }
+  });}
+  var form=document.querySelector('form');
+  if(form){form.addEventListener('submit',function(){_unsaved=false;});}
+  window.addEventListener('beforeunload',function(e){
+    if(_unsaved){e.preventDefault();e.returnValue='';return '';}
+  });
+  document.body.addEventListener('click',function(e){
+    var link=e.target.closest('a');
+    if(link&&_unsaved&&!confirm('You have unsaved changes. Continue?')){e.preventDefault();}
+  });
+  document.addEventListener('keydown',function(e){
+    if((e.ctrlKey||e.metaKey)&&e.key==='s'){
+      e.preventDefault();
+      var f=document.querySelector('form');if(f)f.submit();
+    }
+    if((e.ctrlKey||e.metaKey)&&e.key==='e'){
+      e.preventDefault();
+      var el=document.querySelector('.mode-tab:not(.active)');if(el)el.click();
+    }
+    if((e.ctrlKey||e.metaKey)&&e.key==='b'){
+      e.preventDefault();toggleSidebar();
+    }
+  });
+  _restoreTreeState();
+  _trackTreeToggles();
+})();
 """
 
 # ---------------------------------------------------------------------------
@@ -381,14 +591,14 @@ def _page(
     """Wrap content in the three-panel layout."""
     right_panel = f'<aside class="right-panel">{right}</aside>' if right else ""
 
-    # Build mode switch if viewing/editing a file
-    mode_switch = ""
+    # Build mode-switch tabs if viewing/editing a file
+    mode_tabs = ""
     if path:
-        view_cls = "mode-btn active" if mode == "view" else "mode-btn"
-        edit_cls = "mode-btn active" if mode == "edit" else "mode-btn"
+        view_cls = "mode-tab active" if mode == "view" else "mode-tab"
+        edit_cls = "mode-tab active" if mode == "edit" else "mode-tab"
         escaped_path = html.escape(path)
-        mode_switch = (
-            '<div class="mode-switch">'
+        mode_tabs = (
+            '<div class="mode-tabs">'
             f'<a class="{view_cls}" href="/ui/browse/{escaped_path}">'
             f'{_icon("eye")} View</a>'
             f'<a class="{edit_cls}" href="/ui/edit/{escaped_path}">'
@@ -396,7 +606,11 @@ def _page(
             "</div>"
         )
 
-    toolbar_right_items = mode_switch
+    toolbar_right_items = ""
+    toolbar_right_items += (
+        f'<button class="panel-toggle" onclick="toggleSidebar()" '
+        f'title="Toggle sidebar">{_icon("panel-left")}</button>'
+    )
     if right:
         toolbar_right_items += (
             f'<button class="panel-toggle" onclick="toggleRight()" '
@@ -411,31 +625,37 @@ def _page(
 <style>{_CSS}</style>
 </head>
 <body>
+<div class="app">
+<header class="top-bar">
+<div class="top-bar-left">
+<svg class="app-wordmark" width="220" height="44" viewBox="0 0 320 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="8" width="38" height="48" rx="8" fill="#272738" stroke="#94e2d5" stroke-width="2"/><rect x="7" y="14" width="28" height="34" rx="5" fill="#1e1e2e" stroke="#313244" stroke-width="1"/><path d="M13 18 L13 42 L31 42 L31 24 L25 18 Z" fill="#272738" stroke="#94e2d5" stroke-width="1.2" stroke-linejoin="round"/><path d="M25 18 L25 24 L31 24" fill="none" stroke="#94e2d5" stroke-width="1.2" stroke-linejoin="round"/><line x1="16" y1="28" x2="27" y2="28" stroke="#585b70" stroke-width="1.2" stroke-linecap="round"/><line x1="16" y1="32" x2="28" y2="32" stroke="#4a4b5e" stroke-width="1" stroke-linecap="round"/><line x1="16" y1="36" x2="24" y2="36" stroke="#4a4b5e" stroke-width="1" stroke-linecap="round"/><circle cx="52" cy="16" r="5" fill="#272738" stroke="#94e2d5" stroke-width="1.5"/><circle cx="52" cy="16" r="2" fill="#94e2d5"/><circle cx="52" cy="32" r="5" fill="#272738" stroke="#94e2d5" stroke-width="1.5"/><circle cx="52" cy="32" r="2" fill="#94e2d5"/><circle cx="52" cy="48" r="5" fill="#272738" stroke="#94e2d5" stroke-width="1.5"/><circle cx="52" cy="48" r="2" fill="#94e2d5"/><line x1="40" y1="18" x2="47" y2="16" stroke="#94e2d5" stroke-width="1" opacity="0.4"/><line x1="40" y1="32" x2="47" y2="32" stroke="#94e2d5" stroke-width="1" opacity="0.4"/><line x1="40" y1="46" x2="47" y2="48" stroke="#94e2d5" stroke-width="1" opacity="0.4"/><circle cx="21" cy="14" r="2.5" fill="#1e1e2e" stroke="#94e2d5" stroke-width="1"/><circle cx="21" cy="14" r="1" fill="#94e2d5"/><text x="70" y="41" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',sans-serif" font-size="32" font-weight="600" fill="#cdd6f4" letter-spacing="-0.5">stash</text><text x="147" y="41" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',sans-serif" font-size="32" font-weight="300" fill="#94e2d5" letter-spacing="-0.5">-mcp</text></svg>
+</div>
+<div class="top-bar-right">{toolbar_right_items}</div>
+</header>
 <div class="layout">
 <nav class="sidebar">{sidebar}</nav>
 <div class="center">
-<div class="center-toolbar">
-<div class="toolbar-left">
-<button class="panel-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
-{_icon("panel-left")}</button>
-</div>
-<div class="toolbar-right">{toolbar_right_items}</div>
-</div>
+{mode_tabs}
 <div class="center-content"><div class="center-inner">{center}</div></div>
 </div>
 {right_panel}
+</div>
 </div>
 <script>{_JS}</script>
 </body></html>"""
 
 
 def _sidebar_html(filesystem: FileSystem, active: str = "") -> str:
-    """Build sidebar HTML with header + tree."""
+    """Build sidebar HTML with header + search + tree."""
     tree = _build_tree_html(filesystem, active=active)
     return (
         '<div class="sidebar-header">'
-        f'<div class="sidebar-title">{_icon("archive")} Stash-MCP</div>'
         f'<a href="/ui/new" class="btn-new">{_icon("plus")} New Document</a>'
+        '<div class="search-box">'
+        '<input type="text" id="tree-search" class="search-input" '
+        'placeholder="Search files..." aria-label="Search files" '
+        'oninput="filterTree(this.value)">'
+        "</div>"
         "</div>"
         f'<div class="tree-root">{tree if tree else "<p class=empty-msg>No files yet</p>"}</div>'
     )
@@ -548,18 +768,22 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
                 return _page("Error", sidebar, center)
 
             escaped_content = html.escape(content)
-            center = (
-                f'<div class="breadcrumbs">{breadcrumbs}</div>'
-                f"<h1>{html.escape(PurePosixPath(path).name)}</h1>"
-                f'<div class="viewer-content">{escaped_content}</div>'
-            )
+            if path.endswith((".md", ".markdown")):
+                rendered = _render_markdown(content)
+                center = (
+                    f'<div class="viewer-content markdown-body">{rendered}</div>'
+                )
+            else:
+                center = (
+                    f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
+                )
 
             # right panel — metadata + actions
             try:
                 st = full.stat()
                 size = _human_size(st.st_size)
                 mtime = datetime.fromtimestamp(st.st_mtime, tz=UTC).strftime(
-                    "%Y-%m-%d %H:%M:%S"
+                    "%b %-d, %Y, %I:%M %p"
                 )
             except Exception:
                 size = "—"
@@ -567,23 +791,45 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
             words = len(content.split())
             chars = len(content)
             right = (
-                '<div class="meta-section"><h3>File Info</h3>'
-                f'<div class="meta-row"><span class="label">Path</span>'
-                f"<span>{html.escape(path)}</span></div>"
-                f'<div class="meta-row"><span class="label">MIME</span>'
-                f"<span>{html.escape(_mime_type(path))}</span></div>"
-                f'<div class="meta-row"><span class="label">Size</span>'
-                f"<span>{size}</span></div>"
-                f'<div class="meta-row"><span class="label">Modified</span>'
-                f"<span>{mtime}</span></div>"
-                f'<div class="meta-row"><span class="label">Words</span>'
-                f"<span>{words}</span></div>"
-                f'<div class="meta-row"><span class="label">Characters</span>'
-                f"<span>{chars}</span></div>"
+                '<div class="right-top">'
+                '<h2 class="meta-heading">Document Metadata</h2>'
+                '<div class="meta-field">'
+                '<div class="meta-field-label">File Path</div>'
+                f'<div class="meta-field-path">{html.escape(path)}</div>'
+                '</div>'
+                '<div class="meta-field">'
+                '<div class="meta-field-label">File Size</div>'
+                f'<div class="meta-field-value">{size}</div>'
+                '</div>'
+                '<div class="meta-field">'
+                '<div class="meta-field-label">MIME Type</div>'
+                f'<div class="meta-field-value">{html.escape(_mime_type(path))}</div>'
+                '</div>'
+                '<div class="meta-field">'
+                '<div class="meta-field-label">Last Modified</div>'
+                f'<div class="meta-field-value">{mtime}</div>'
+                '</div>'
+                '<div class="meta-field">'
+                '<div class="meta-stats-heading">Content Stats</div>'
+                f'<div class="meta-stat-row"><span class="label">Characters:</span>'
+                f'<span class="value">{chars}</span></div>'
+                f'<div class="meta-stat-row"><span class="label">Words:</span>'
+                f'<span class="value">{words}</span></div>'
+                '</div>'
                 "</div>"
+                '<div class="right-bottom">'
                 '<div class="action-stack">'
-                f'<a href="/ui/edit/{html.escape(path)}" class="btn-edit">'
-                f'{_icon("pencil")} Edit</a>'
+                f'<button class="btn-rename" onclick="showRename(this)">'
+                f'{_icon("pen-line")} Rename / Move</button>'
+                f'<form method="post" action="/ui/move/{html.escape(path)}" '
+                f'class="rename-form">'
+                f'<input type="text" name="destination" class="rename-input" '
+                f'value="{html.escape(path)}">'
+                '<div class="confirm-row">'
+                '<button type="submit" class="btn-confirm-rename">Confirm</button>'
+                '<button type="button" class="btn-cancel-rename" '
+                'onclick="hideRename(this)">Cancel</button>'
+                "</div></form>"
                 f'<button class="btn-delete" onclick="showConfirm(this)">'
                 f'{_icon("trash-2")} Delete</button>'
                 f'<form method="post" action="/ui/delete/{html.escape(path)}" '
@@ -594,10 +840,10 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
                 '<button type="button" class="btn-confirm-cancel" '
                 'onclick="hideConfirm(this)">Cancel</button>'
                 "</div></form>"
-                "</div>"
+                "</div></div>"
             )
             return _page(
-                PurePosixPath(path).name, sidebar, center, right, mode="view", path=path
+                PurePosixPath(path).name, sidebar, center, right, mode="view", path=path,
             )
 
         # path exists but is neither dir nor file
@@ -632,18 +878,84 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
 
         escaped = html.escape(content)
         center = (
-            f'<div class="breadcrumbs">{breadcrumbs}</div>'
-            f"<h1>{html.escape(PurePosixPath(path).name)}</h1>"
-            f'<form method="post" action="/ui/save">'
+            f'<form class="editor-form" method="post" action="/ui/save">'
             f'<input type="hidden" name="path" value="{html.escape(path)}">'
             f'<textarea class="editor-area" name="content">{escaped}</textarea>'
             '<div class="action-bar">'
             f'<button type="submit" class="btn btn-save">{_icon("save")} Save</button>'
-            f'<a href="/ui/browse/{html.escape(path)}" class="btn btn-cancel">'
-            f'{_icon("x")} Cancel</a>'
+            f'<a href="/ui/browse/{html.escape(path)}" class="btn btn-discard">'
+            f'{_icon("x")} Discard</a>'
             "</div></form>"
         )
-        return _page(f"Edit {path}", sidebar, center, mode="edit", path=path)
+
+        # right panel — metadata + actions (same as browse view)
+        full = filesystem._resolve_path(path)
+        try:
+            st = full.stat()
+            size = _human_size(st.st_size)
+            mtime = datetime.fromtimestamp(st.st_mtime, tz=UTC).strftime(
+                "%b %-d, %Y, %I:%M %p"
+            )
+        except Exception:
+            size = "—"
+            mtime = "—"
+        words = len(content.split())
+        chars = len(content)
+        right = (
+            '<div class="right-top">'
+            '<h2 class="meta-heading">Document Metadata</h2>'
+            '<div class="meta-field">'
+            '<div class="meta-field-label">File Path</div>'
+            f'<div class="meta-field-path">{html.escape(path)}</div>'
+            '</div>'
+            '<div class="meta-field">'
+            '<div class="meta-field-label">File Size</div>'
+            f'<div class="meta-field-value">{size}</div>'
+            '</div>'
+            '<div class="meta-field">'
+            '<div class="meta-field-label">MIME Type</div>'
+            f'<div class="meta-field-value">{html.escape(_mime_type(path))}</div>'
+            '</div>'
+            '<div class="meta-field">'
+            '<div class="meta-field-label">Last Modified</div>'
+            f'<div class="meta-field-value">{mtime}</div>'
+            '</div>'
+            '<div class="meta-field">'
+            '<div class="meta-stats-heading">Content Stats</div>'
+            f'<div class="meta-stat-row"><span class="label">Characters:</span>'
+            f'<span class="value">{chars}</span></div>'
+            f'<div class="meta-stat-row"><span class="label">Words:</span>'
+            f'<span class="value">{words}</span></div>'
+            '</div>'
+            "</div>"
+            '<div class="right-bottom">'
+            '<div class="action-stack">'
+            f'<button class="btn-rename" onclick="showRename(this)">'
+            f'{_icon("pen-line")} Rename / Move</button>'
+            f'<form method="post" action="/ui/move/{html.escape(path)}" '
+            f'class="rename-form">'
+            f'<input type="text" name="destination" class="rename-input" '
+            f'value="{html.escape(path)}">'
+            '<div class="confirm-row">'
+            '<button type="submit" class="btn-confirm-rename">Confirm</button>'
+            '<button type="button" class="btn-cancel-rename" '
+            'onclick="hideRename(this)">Cancel</button>'
+            "</div></form>"
+            f'<button class="btn-delete" onclick="showConfirm(this)">'
+            f'{_icon("trash-2")} Delete</button>'
+            f'<form method="post" action="/ui/delete/{html.escape(path)}" '
+            f'style="display:none" '
+            f'class="del-form">'
+            '<div class="confirm-row">'
+            '<button type="submit" class="btn-confirm-del">Yes, delete</button>'
+            '<button type="button" class="btn-confirm-cancel" '
+            'onclick="hideConfirm(this)">Cancel</button>'
+            "</div></form>"
+            "</div></div>"
+        )
+        return _page(
+            f"Edit {path}", sidebar, center, right, mode="edit", path=path,
+        )
 
     # --- new file ---
     @router.get("/ui/new", response_class=HTMLResponse)
@@ -678,6 +990,19 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
             # Fall back to edit page with error shown via redirect
             return RedirectResponse(url=f"/ui/edit/{path}", status_code=303)
         return RedirectResponse(url=f"/ui/browse/{path}", status_code=303)
+
+    # --- move / rename ---
+    @router.post("/ui/move/{path:path}")
+    async def ui_move(path: str, destination: str = Form(...)):
+        """Move/rename a file and redirect to the new location."""
+        path = path.strip("/")
+        destination = destination.strip("/")
+        try:
+            filesystem.move_file(path, destination)
+        except Exception as exc:
+            logger.error(f"UI move error: {exc}")
+            return RedirectResponse(url=f"/ui/browse/{path}", status_code=303)
+        return RedirectResponse(url=f"/ui/browse/{destination}", status_code=303)
 
     # --- delete ---
     @router.post("/ui/delete/{path:path}")

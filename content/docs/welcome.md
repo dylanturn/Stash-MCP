@@ -1,5 +1,7 @@
 # Welcome to Stash-MCP
 
+Hello World!
+
 This is your content directory. Files stored here are:
 
 - **Accessible via MCP** - Any connected AI agent can read these documents as resources

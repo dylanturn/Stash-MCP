@@ -6,9 +6,11 @@ from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 from fastmcp.resources import FunctionResource
+from fastmcp.server.context import Context
 from pydantic import AnyUrl
 
 from .config import Config
+from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,21 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             )
         )
 
+    def _register_resource(path: str) -> None:
+        """Add a file to the MCP resource registry."""
+        uri = f"stash://{path}"
+        mcp.add_resource(FunctionResource(
+            uri=AnyUrl(uri), name=path,
+            description=_get_description(filesystem, path),
+            mime_type=_get_mime_type(path),
+            fn=lambda _fp=path: filesystem.read_file(_fp),
+        ))
+
+    def _unregister_resource(path: str) -> None:
+        """Remove a file from the MCP resource registry."""
+        uri_key = f"stash://{path}"
+        mcp._resource_manager._resources.pop(uri_key, None)
+
     # Resource template for dynamic access (resources/templates/list)
     @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")
     def read_resource(path: str) -> str:
@@ -118,6 +135,7 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
     async def create_content(
         path: str,
         content: str,
+        ctx: Context,
     ) -> str:
         """Create a new file. Errors if file already exists.
 
@@ -130,6 +148,8 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
                 f"File already exists: {path}. Use update_content to modify existing files."
             )
         filesystem.write_file(path, content)
+        _register_resource(path)
+        emit(CONTENT_CREATED, path)
         logger.info(f"Created: {path}")
         return f"Created: {path}"
 
@@ -137,6 +157,7 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
     async def update_content(
         path: str,
         content: str,
+        ctx: Context,
     ) -> str:
         """Update an existing file.
 
@@ -144,13 +165,22 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             path: File path relative to content root
             content: New file content
         """
+        is_new = not filesystem.file_exists(path)
         filesystem.write_file(path, content)
+        if is_new:
+            _register_resource(path)
+            emit(CONTENT_CREATED, path)
+        else:
+            uri = AnyUrl(f"stash://{path}")
+            await ctx.session.send_resource_updated(uri=uri)
+            emit(CONTENT_UPDATED, path)
         logger.info(f"Updated: {path}")
         return f"Updated: {path}"
 
     @mcp.tool(description="Delete a content file")
     async def delete_content(
         path: str,
+        ctx: Context,
     ) -> str:
         """Delete a file.
 
@@ -158,6 +188,9 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             path: File path relative to content root
         """
         filesystem.delete_file(path)
+        _unregister_resource(path)
+        await ctx.send_resource_list_changed()
+        emit(CONTENT_DELETED, path)
         logger.info(f"Deleted: {path}")
         return f"Deleted: {path}"
 
@@ -191,6 +224,7 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
     async def move_content(
         source_path: str,
         dest_path: str,
+        ctx: Context,
     ) -> str:
         """Move or rename a file.
 
@@ -199,6 +233,9 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             dest_path: New file path relative to content root
         """
         filesystem.move_file(source_path, dest_path)
+        _unregister_resource(source_path)
+        _register_resource(dest_path)
+        emit(CONTENT_MOVED, dest_path, source_path=source_path)
         logger.info(f"Moved: {source_path} -> {dest_path}")
         return f"Moved: {source_path} -> {dest_path}"
 

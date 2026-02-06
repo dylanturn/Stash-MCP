@@ -2,8 +2,10 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import AnyUrl
 
 from stash_mcp.filesystem import FileSystem
 from stash_mcp.mcp_server import _get_mime_type, create_mcp_server
@@ -24,6 +26,19 @@ def mcp_server(temp_fs):
     temp_fs.write_file("docs/readme.md", "# README\nSome docs")
     temp_fs.write_file("data.json", '{"key": "value"}')
     return create_mcp_server(temp_fs)
+
+
+@pytest.fixture
+def mock_context():
+    """Set up a mock Context in FastMCP's _current_context ContextVar."""
+    from fastmcp.server.context import Context, _current_context
+
+    ctx = MagicMock(spec=Context)
+    ctx.session = AsyncMock()
+    ctx.send_resource_list_changed = AsyncMock()
+    token = _current_context.set(ctx)
+    yield ctx
+    _current_context.reset(token)
 
 
 # --- Mime type tests ---
@@ -104,7 +119,7 @@ async def test_list_tools(mcp_server):
     assert "move_content" in tool_names
 
 
-async def test_create_content_tool(temp_fs):
+async def test_create_content_tool(temp_fs, mock_context):
     """Test create_content tool creates a file."""
     mcp = create_mcp_server(temp_fs)
     tool = await mcp.get_tool("create_content")
@@ -114,14 +129,14 @@ async def test_create_content_tool(temp_fs):
     assert temp_fs.read_file("new.md") == "# New File"
 
 
-async def test_create_content_tool_existing_file(mcp_server, temp_fs):
+async def test_create_content_tool_existing_file(mcp_server, temp_fs, mock_context):
     """Test create_content tool errors on existing file."""
     tool = await mcp_server.get_tool("create_content")
     with pytest.raises(ValueError, match="already exists"):
         await tool.run({"path": "test.md", "content": "overwrite"})
 
 
-async def test_update_content_tool(mcp_server, temp_fs):
+async def test_update_content_tool(mcp_server, temp_fs, mock_context):
     """Test update_content tool updates a file."""
     tool = await mcp_server.get_tool("update_content")
     result = await tool.run({"path": "test.md", "content": "# Updated"})
@@ -129,7 +144,7 @@ async def test_update_content_tool(mcp_server, temp_fs):
     assert temp_fs.read_file("test.md") == "# Updated"
 
 
-async def test_delete_content_tool(mcp_server, temp_fs):
+async def test_delete_content_tool(mcp_server, temp_fs, mock_context):
     """Test delete_content tool deletes a file."""
     tool = await mcp_server.get_tool("delete_content")
     result = await tool.run({"path": "test.md"})
@@ -156,7 +171,7 @@ async def test_list_content_tool_non_recursive(mcp_server):
     assert "docs" in text
 
 
-async def test_move_content_tool(mcp_server, temp_fs):
+async def test_move_content_tool(mcp_server, temp_fs, mock_context):
     """Test move_content tool moves a file."""
     tool = await mcp_server.get_tool("move_content")
     result = await tool.run({"source_path": "test.md", "dest_path": "moved.md"})
@@ -164,3 +179,117 @@ async def test_move_content_tool(mcp_server, temp_fs):
     assert not temp_fs.file_exists("test.md")
     assert temp_fs.file_exists("moved.md")
     assert temp_fs.read_file("moved.md") == "# Test Content"
+
+
+# --- Notification tests ---
+
+
+async def test_create_registers_resource(temp_fs, mock_context):
+    """Test that create_content registers the new resource."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("create_content")
+    await tool.run({"path": "new.md", "content": "# New"})
+    resources = await mcp.get_resources()
+    assert "stash://new.md" in resources
+
+
+async def test_update_existing_sends_resource_updated(mcp_server, mock_context):
+    """Test that updating an existing file sends resource_updated notification."""
+    tool = await mcp_server.get_tool("update_content")
+    await tool.run({"path": "test.md", "content": "# Changed"})
+    mock_context.session.send_resource_updated.assert_awaited_once()
+    call_kwargs = mock_context.session.send_resource_updated.call_args
+    assert str(call_kwargs.kwargs["uri"]) == "stash://test.md"
+
+
+async def test_update_new_file_registers_resource(temp_fs, mock_context):
+    """Test that updating a non-existent file registers it as a new resource."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("update_content")
+    await tool.run({"path": "brand_new.md", "content": "# Brand New"})
+    resources = await mcp.get_resources()
+    assert "stash://brand_new.md" in resources
+    mock_context.session.send_resource_updated.assert_not_awaited()
+
+
+async def test_delete_unregisters_resource(mcp_server, temp_fs, mock_context):
+    """Test that delete_content removes the resource from registry."""
+    resources_before = await mcp_server.get_resources()
+    assert "stash://test.md" in resources_before
+
+    tool = await mcp_server.get_tool("delete_content")
+    await tool.run({"path": "test.md"})
+
+    resources_after = await mcp_server.get_resources()
+    assert "stash://test.md" not in resources_after
+
+
+async def test_delete_sends_list_changed(mcp_server, temp_fs, mock_context):
+    """Test that delete_content sends resource_list_changed notification."""
+    tool = await mcp_server.get_tool("delete_content")
+    await tool.run({"path": "test.md"})
+    mock_context.send_resource_list_changed.assert_awaited_once()
+
+
+async def test_move_updates_resources(mcp_server, temp_fs, mock_context):
+    """Test that move_content removes old resource and adds new one."""
+    tool = await mcp_server.get_tool("move_content")
+    await tool.run({"source_path": "test.md", "dest_path": "moved.md"})
+
+    resources = await mcp_server.get_resources()
+    assert "stash://test.md" not in resources
+    assert "stash://moved.md" in resources
+
+
+async def test_resources_filtered_by_include_patterns(temp_fs):
+    """Test that when patterns are set, only matching files are registered as MCP resources."""
+    # Write files of different types
+    temp_fs.write_file("docs/guide.md", "# Guide")
+    temp_fs.write_file("docs/api.md", "# API")
+    temp_fs.write_file("notes/todo.txt", "todo items")
+    temp_fs.write_file("data.json", '{"key": "value"}')
+
+    # Create a new filesystem with patterns, using the same content directory
+    filtered_fs = FileSystem(temp_fs.content_dir, include_patterns=["docs/**/*.md"])
+    mcp = create_mcp_server(filtered_fs)
+
+    resources = await mcp.get_resources()
+    uris = list(resources.keys())
+
+    # Only docs/*.md should be registered
+    assert "stash://docs/guide.md" in uris
+    assert "stash://docs/api.md" in uris
+    # These should NOT be registered
+    assert "stash://notes/todo.txt" not in uris
+    assert "stash://data.json" not in uris
+    assert "stash://test.md" not in uris
+
+
+async def test_tools_emit_events(mcp_server, temp_fs, mock_context):
+    """Test that MCP tools emit events via the event bus."""
+    with patch("stash_mcp.mcp_server.emit") as mock_emit:
+        # Test create
+        tool = await mcp_server.get_tool("create_content")
+        await tool.run({"path": "evt.md", "content": "event test"})
+        mock_emit.assert_called_with("content_created", "evt.md")
+
+        mock_emit.reset_mock()
+
+        # Test update (existing file)
+        tool = await mcp_server.get_tool("update_content")
+        await tool.run({"path": "evt.md", "content": "updated"})
+        mock_emit.assert_called_with("content_updated", "evt.md")
+
+        mock_emit.reset_mock()
+
+        # Test move
+        tool = await mcp_server.get_tool("move_content")
+        await tool.run({"source_path": "evt.md", "dest_path": "evt2.md"})
+        mock_emit.assert_called_with("content_moved", "evt2.md", source_path="evt.md")
+
+        mock_emit.reset_mock()
+
+        # Test delete
+        tool = await mcp_server.get_tool("delete_content")
+        await tool.run({"path": "evt2.md"})
+        mock_emit.assert_called_with("content_deleted", "evt2.md")
