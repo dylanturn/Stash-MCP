@@ -106,3 +106,39 @@ def test_create_directory(temp_fs):
     # Verify we can write to the directory
     temp_fs.write_file("subdir/nested/test.txt", "Content")
     assert temp_fs.file_exists("subdir/nested/test.txt")
+
+
+def test_move_file(temp_fs):
+    """Test moving a file."""
+    temp_fs.write_file("original.txt", "Content")
+    temp_fs.move_file("original.txt", "renamed.txt")
+
+    assert not temp_fs.file_exists("original.txt")
+    assert temp_fs.file_exists("renamed.txt")
+    assert temp_fs.read_file("renamed.txt") == "Content"
+
+
+def test_move_file_to_subdirectory(temp_fs):
+    """Test moving a file into a new subdirectory."""
+    temp_fs.write_file("original.txt", "Content")
+    temp_fs.move_file("original.txt", "subdir/moved.txt")
+
+    assert not temp_fs.file_exists("original.txt")
+    assert temp_fs.file_exists("subdir/moved.txt")
+    assert temp_fs.read_file("subdir/moved.txt") == "Content"
+
+
+def test_move_nonexistent_file(temp_fs):
+    """Test moving a nonexistent file raises error."""
+    with pytest.raises(FileNotFoundError):
+        temp_fs.move_file("nonexistent.txt", "dest.txt")
+
+
+def test_move_file_to_existing_dest(temp_fs):
+    """Test moving to existing destination raises error."""
+    temp_fs.write_file("source.txt", "Source")
+    temp_fs.write_file("dest.txt", "Dest")
+
+    from stash_mcp.filesystem import FileSystemError
+    with pytest.raises(FileSystemError, match="already exists"):
+        temp_fs.move_file("source.txt", "dest.txt")

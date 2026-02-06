@@ -208,6 +208,38 @@ class FileSystem:
         except InvalidPathError:
             return False
 
+    def move_file(self, source_path: str, dest_path: str) -> None:
+        """Move/rename a file.
+
+        Args:
+            source_path: Source path relative to content_dir
+            dest_path: Destination path relative to content_dir
+
+        Raises:
+            FileNotFoundError: If source file doesn't exist
+            InvalidPathError: If either path is invalid or not a file
+            FileSystemError: If destination already exists or move fails
+        """
+        src_full = self._resolve_path(source_path)
+        dst_full = self._resolve_path(dest_path)
+
+        if not src_full.exists():
+            raise FileNotFoundError(f"File '{source_path}' not found")
+
+        if not src_full.is_file():
+            raise InvalidPathError(f"Path '{source_path}' is not a file")
+
+        if dst_full.exists():
+            raise FileSystemError(f"Destination '{dest_path}' already exists")
+
+        try:
+            dst_full.parent.mkdir(parents=True, exist_ok=True)
+            src_full.rename(dst_full)
+            logger.info(f"Moved file: {source_path} -> {dest_path}")
+        except Exception as e:
+            logger.error(f"Error moving file '{source_path}' to '{dest_path}': {e}")
+            raise FileSystemError(f"Failed to move file: {e}")
+
     def create_directory(self, relative_path: str) -> None:
         """Create a directory.
 
