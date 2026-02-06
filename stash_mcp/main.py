@@ -22,15 +22,18 @@ logger = logging.getLogger(__name__)
 def create_app():
     """Create and configure the FastAPI application."""
     Config.ensure_content_dir()
-    filesystem = FileSystem(Config.CONTENT_DIR)
+    filesystem = FileSystem(Config.CONTENT_DIR, include_patterns=Config.CONTENT_PATHS)
 
-    app = create_api(filesystem)
+    # Create MCP http app first so we can wire its lifespan into FastAPI
+    mcp = create_mcp_server(filesystem)
+    mcp_http_app = mcp.http_app(path="/")
+
+    app = create_api(filesystem, lifespan=mcp_http_app.lifespan)
     ui_router = create_ui_router(filesystem)
     app.include_router(ui_router)
 
-    # Mount FastMCP server onto FastAPI for SSE transport
-    mcp = create_mcp_server(filesystem)
-    app.mount("/mcp", mcp.http_app())
+    # Mount FastMCP server onto FastAPI for streamable HTTP transport
+    app.mount("/mcp", mcp_http_app)
 
     # Wire event bus: REST mutations emit MCP resource notifications
     def on_content_changed(event_type: str, path: str, **kwargs: str) -> None:

@@ -4,6 +4,25 @@ import os
 from pathlib import Path
 
 
+def _parse_content_paths(raw: str | None) -> list[str] | None:
+    """Parse STASH_CONTENT_PATHS env var into a list of glob patterns.
+
+    Returns None if raw is None, empty, or yields no patterns.
+    Normalizes trailing '/' to '/**'.
+    """
+    if not raw:
+        return None
+    patterns = []
+    for part in raw.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        if p.endswith("/"):
+            p += "**"
+        patterns.append(p)
+    return patterns if patterns else None
+
+
 class Config:
     """Server configuration."""
 
@@ -17,6 +36,11 @@ class Config:
     HOST: str = os.getenv("STASH_HOST", "0.0.0.0")
     PORT: int = int(os.getenv("STASH_PORT", "8000"))
     LOG_LEVEL: str = os.getenv("STASH_LOG_LEVEL", "info")
+
+    # Content path patterns - glob-based filtering for file discovery
+    CONTENT_PATHS: list[str] | None = _parse_content_paths(
+        os.getenv("STASH_CONTENT_PATHS")
+    )
 
     # MCP settings
     SERVER_NAME: str = "stash-mcp"

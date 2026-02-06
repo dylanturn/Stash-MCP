@@ -24,7 +24,7 @@ async def main():
     Config.ensure_content_dir()
 
     # Initialize filesystem
-    filesystem = FileSystem(Config.CONTENT_DIR)
+    filesystem = FileSystem(Config.CONTENT_DIR, include_patterns=Config.CONTENT_PATHS)
 
     # Create FastMCP server and run with stdio transport
     mcp = create_mcp_server(filesystem)
