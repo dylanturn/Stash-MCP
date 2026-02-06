@@ -59,7 +59,7 @@ def _breadcrumbs_html(path: str) -> str:
     for i, (label, href) in enumerate(crumbs):
         escaped = html.escape(label)
         if i < len(crumbs) - 1:
-            items.append(f'<a href="{href}">{escaped}</a>')
+            items.append(f'<a href="{html.escape(href)}">{escaped}</a>')
         else:
             items.append(f"<span>{escaped}</span>")
     return ' <span class="sep">›</span> '.join(items)
@@ -85,7 +85,8 @@ def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") ->
         else:
             icon = _file_icon(name)
             sel = ' class="tree-file selected"' if child == active else ' class="tree-file"'
-            parts.append(f'<a href="/ui/browse/{child}"{sel}>{icon} {escaped}</a>')
+            escaped_child = html.escape(child)
+            parts.append(f'<a href="/ui/browse/{escaped_child}"{sel}>{icon} {escaped}</a>')
     return "\n".join(parts)
 
 
@@ -284,9 +285,11 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
             for name, is_dir in entries:
                 child = f"{path}/{name}" if path else name
                 escaped = html.escape(name)
+                escaped_child = html.escape(child)
                 if is_dir:
                     rows += (
-                        f'<tr><td class="dir"><a href="/ui/browse/{child}">📁 {escaped}/</a></td>'
+                        f'<tr><td class="dir"><a href="/ui/browse/{escaped_child}">'
+                        f"📁 {escaped}/</a></td>"
                         "<td>directory</td><td>—</td><td>—</td></tr>"
                     )
                 else:
@@ -303,7 +306,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
                         mtime = "—"
                     icon = _file_icon(name)
                     rows += (
-                        f'<tr><td class="name"><a href="/ui/browse/{child}">'
+                        f'<tr><td class="name"><a href="/ui/browse/{escaped_child}">'
                         f"{icon} {escaped}</a></td>"
                         f"<td>{html.escape(_mime_type(child))}</td>"
                         f"<td>{size}</td><td>{mtime}</td></tr>"
@@ -372,9 +375,10 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
                 f"<span>{chars}</span></div>"
                 "</div>"
                 '<div class="action-stack">'
-                f'<a href="/ui/edit/{path}" class="btn-edit">✏️ Edit</a>'
+                f'<a href="/ui/edit/{html.escape(path)}" class="btn-edit">✏️ Edit</a>'
                 f'<button class="btn-delete" onclick="showConfirm(this)">🗑️ Delete</button>'
-                f'<form method="post" action="/ui/delete/{path}" style="display:none" '
+                f'<form method="post" action="/ui/delete/{html.escape(path)}" '
+                f'style="display:none" '
                 f'class="del-form">'
                 '<div class="confirm-row">'
                 '<button type="submit" class="btn-confirm-del">Yes, delete</button>'
@@ -432,7 +436,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
             f'<textarea class="editor-area" name="content">{escaped}</textarea>'
             '<div class="action-bar">'
             '<button type="submit" class="btn btn-save">Save</button>'
-            f'<a href="/ui/browse/{path}" class="btn btn-cancel">Cancel</a>'
+            f'<a href="/ui/browse/{html.escape(path)}" class="btn btn-cancel">Cancel</a>'
             "</div></form>"
         )
         return _page(f"Edit {path}", sidebar, center)
