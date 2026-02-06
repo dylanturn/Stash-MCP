@@ -57,11 +57,13 @@ class TestUIBrowse:
         assert "readme.md" in body
 
     def test_browse_file_shows_content(self, ui_client):
-        """GET /ui/browse/hello.md shows file content."""
+        """GET /ui/browse/hello.md shows file content rendered as markdown."""
         response = ui_client.get("/ui/browse/hello.md")
         assert response.status_code == 200
         body = response.text
-        assert "# Hello World" in body
+        # Markdown files are rendered to HTML
+        assert "<h1>Hello World</h1>" in body
+        assert "markdown-body" in body
         # Should show metadata panel
         assert "text/markdown" in body
         # Should have edit link
@@ -143,9 +145,9 @@ class TestUISave:
         assert response.status_code == 303
         assert "/ui/browse/new-file.md" in response.headers["location"]
 
-        # Verify file was created
+        # Verify file was created (markdown rendered to HTML)
         view_resp = ui_client.get("/ui/browse/new-file.md")
-        assert "# New File" in view_resp.text
+        assert "<h1>New File</h1>" in view_resp.text
 
     def test_save_updates_existing_file(self, ui_client):
         """POST /ui/save updates existing file content."""
@@ -157,7 +159,7 @@ class TestUISave:
         assert response.status_code == 303
 
         view_resp = ui_client.get("/ui/browse/hello.md")
-        assert "# Updated" in view_resp.text
+        assert "<h1>Updated</h1>" in view_resp.text
 
     def test_save_creates_nested_path(self, ui_client):
         """POST /ui/save creates parent directories as needed."""
@@ -196,3 +198,72 @@ class TestUIDelete:
         """POST /ui/delete/nonexistent.md still redirects without error."""
         response = ui_client.post("/ui/delete/nonexistent.md", follow_redirects=False)
         assert response.status_code == 303
+
+
+class TestUIMarkdown:
+    """Tests for markdown rendering."""
+
+    def test_markdown_file_rendered_as_html(self, ui_client):
+        """Markdown files should be rendered to HTML, not shown raw."""
+        response = ui_client.get("/ui/browse/hello.md")
+        body = response.text
+        assert "markdown-body" in body
+        assert "<h1>Hello World</h1>" in body
+
+    def test_non_markdown_file_shown_as_preformatted(self, ui_client):
+        """Non-markdown files should be shown in pre tags."""
+        response = ui_client.get("/ui/browse/data/config.json")
+        body = response.text
+        assert "<pre>" in body
+        assert "&quot;key&quot;" in body
+
+    def test_markdown_with_formatting(self, ui_client):
+        """Markdown with headings and content renders properly."""
+        response = ui_client.get("/ui/browse/docs/readme.md")
+        body = response.text
+        assert "<h1>README</h1>" in body
+        assert "Some content here." in body
+
+
+class TestUISearch:
+    """Tests for sidebar search functionality."""
+
+    def test_sidebar_has_search_input(self, ui_client):
+        """Sidebar should contain a search input."""
+        response = ui_client.get("/ui/browse/")
+        body = response.text
+        assert "tree-search" in body
+        assert "Search files..." in body
+        assert "filterTree" in body
+
+
+class TestUIFeatures:
+    """Tests for UI enhancement features."""
+
+    def test_keyboard_shortcuts_in_js(self, ui_client):
+        """Page should include keyboard shortcut handlers."""
+        response = ui_client.get("/ui/browse/hello.md")
+        body = response.text
+        assert "keydown" in body
+        assert "ctrlKey" in body
+
+    def test_unsaved_changes_warning_in_js(self, ui_client):
+        """Edit page should include unsaved changes warning."""
+        response = ui_client.get("/ui/edit/hello.md")
+        body = response.text
+        assert "beforeunload" in body
+        assert "_unsaved" in body
+
+    def test_sticky_save_bar_css(self, ui_client):
+        """Action bar CSS should include sticky positioning."""
+        response = ui_client.get("/ui/edit/hello.md")
+        body = response.text
+        assert "position:sticky" in body
+        assert "backdrop-filter" in body
+
+    def test_scrollbar_css(self, ui_client):
+        """Page should include custom scrollbar styles."""
+        response = ui_client.get("/ui/browse/")
+        body = response.text
+        assert "scrollbar-width:thin" in body
+        assert "::-webkit-scrollbar" in body

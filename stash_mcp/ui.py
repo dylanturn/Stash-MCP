@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
+import markdown as md
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -180,6 +181,16 @@ def _breadcrumbs_html(path: str) -> str:
     return f' <span class="sep">{_icon("chevron-right")}</span> '.join(items)
 
 
+def _render_markdown(content: str) -> str:
+    """Render markdown to HTML with extensions."""
+    converter = md.Markdown(extensions=[
+        "fenced_code",
+        "tables",
+        "nl2br",
+    ])
+    return converter.convert(content)
+
+
 def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
     """Build recursive HTML for the sidebar tree."""
     try:
@@ -217,6 +228,14 @@ background:#1e1e2e;color:#cdd6f4;min-height:100vh}
 a{color:#94e2d5;text-decoration:none}
 a:hover{text-decoration:underline}
 
+/* custom scrollbar */
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#313244;border-radius:4px;
+transition:background 150ms ease}
+::-webkit-scrollbar-thumb:hover{background:#7f849c}
+*{scrollbar-width:thin;scrollbar-color:#313244 transparent}
+
 /* icons */
 .icon{display:inline-block;vertical-align:middle;flex-shrink:0}
 .icon.chevron{transition:transform 150ms ease}
@@ -234,8 +253,16 @@ display:flex;flex-direction:column;gap:6px}
 font-weight:600}
 .btn-new{display:flex;align-items:center;justify-content:center;gap:6px;
 padding:6px 12px;background:#94e2d5;color:#1e1e2e;
-border-radius:4px;font-size:13px;font-weight:600;text-align:center;border:none;cursor:pointer}
-.btn-new:hover{background:#a6e3e0;text-decoration:none}
+border-radius:4px;font-size:13px;font-weight:600;text-align:center;border:none;cursor:pointer;
+transition:background 150ms ease,transform 150ms ease}
+.btn-new:hover{background:#a6e3e0;text-decoration:none;transform:translateY(-1px)}
+
+/* search */
+.search-box{margin-top:8px;position:relative}
+.search-input{width:100%;padding:8px 12px;background:#1e1e2e;color:#cdd6f4;
+border:1px solid #313244;border-radius:6px;font-size:13px;outline:none;
+transition:border-color 150ms ease,box-shadow 150ms ease}
+.search-input:focus{border-color:#94e2d5;box-shadow:0 0 0 2px rgba(148,226,213,0.1)}
 
 .center{flex:1;overflow-y:auto;display:flex;flex-direction:column}
 .center-toolbar{display:flex;align-items:center;justify-content:space-between;
@@ -243,7 +270,8 @@ padding:8px 24px;background:#272738;border-bottom:1px solid #313244;flex-shrink:
 .toolbar-left{display:flex;align-items:center;gap:8px}
 .toolbar-right{display:flex;align-items:center;gap:4px}
 .panel-toggle{background:none;border:none;color:#7f849c;cursor:pointer;
-padding:4px 6px;border-radius:4px;display:flex;align-items:center}
+padding:4px 6px;border-radius:4px;display:flex;align-items:center;
+transition:background 150ms ease,color 150ms ease}
 .panel-toggle:hover{color:#cdd6f4;background:#2e2e42}
 .mode-switch{display:flex;background:#1e1e2e;border-radius:4px;overflow:hidden;
 border:1px solid #313244}
@@ -268,12 +296,13 @@ display:flex;align-items:center;flex-wrap:wrap;gap:2px}
 
 /* tree */
 .tree-file{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:13px;
-border-radius:4px;color:#cdd6f4;border-left:3px solid transparent;margin:1px 0}
+border-radius:4px;color:#cdd6f4;border-left:3px solid transparent;margin:1px 0;
+transition:background 150ms ease}
 .tree-file:hover{background:#2e2e42;text-decoration:none}
 .tree-file.selected{border-left-color:#94e2d5;background:#2e2e42}
 details summary.tree-dir{display:flex;align-items:center;gap:4px;
 padding:4px 8px;font-size:13px;cursor:pointer;color:#cdd6f4;
-list-style:none;border-radius:4px;margin:1px 0}
+list-style:none;border-radius:4px;margin:1px 0;transition:background 150ms ease}
 details summary.tree-dir:hover{background:#2e2e42}
 details summary.tree-dir::marker,details summary.tree-dir::-webkit-details-marker{display:none}
 .tree-children{padding-left:14px;border-left:1px solid #313244;margin-left:10px}
@@ -288,23 +317,52 @@ border-bottom:1px solid #313244;font-weight:500}
 .file-table .name a{color:#94e2d5}
 .file-table .dir a{color:#cdd6f4}
 
-/* viewer */
-.viewer-content{background:#181825;padding:20px;border-radius:6px;overflow-x:auto;
-font-family:'Monaco','Menlo','Ubuntu Mono',monospace;font-size:14px;line-height:1.6;
-white-space:pre-wrap;word-wrap:break-word;color:#cdd6f4;margin-top:12px}
+/* viewer - typography for comfortable reading */
+.viewer-content{background:#181825;padding:24px 32px;border-radius:6px;overflow-x:auto;
+font-size:18px;line-height:1.6;color:#cdd6f4;margin-top:12px;max-width:70ch;
+margin-left:auto;margin-right:auto}
+.viewer-content pre{font-family:'Monaco','Menlo','Ubuntu Mono',monospace;
+white-space:pre-wrap;word-wrap:break-word;margin:0}
+.viewer-content h1{color:#e0e4f0;font-size:28px;margin-bottom:1.5rem;margin-top:0}
+.viewer-content h2{color:#e0e4f0;font-size:22px;margin-top:2rem;margin-bottom:1rem}
+.viewer-content h3{color:#e0e4f0;font-size:18px;margin-top:1.5rem;margin-bottom:0.75rem}
+.viewer-content p{margin-bottom:1.5rem}
+.viewer-content ul,.viewer-content ol{margin-bottom:1.5rem;padding-left:1.5rem}
+.viewer-content li{margin-bottom:0.5rem}
+
+/* markdown body styles */
+.markdown-body code{background:#181825;padding:0.2em 0.4em;border-radius:3px;
+font-size:0.9em;font-family:'Monaco','Menlo',monospace}
+.markdown-body pre{background:#181825;padding:1rem;border-radius:6px;
+overflow-x:auto;margin-bottom:1.5rem}
+.markdown-body pre code{background:transparent;padding:0}
+.markdown-body a{color:#94e2d5;text-decoration:underline}
+.markdown-body table{width:100%;border-collapse:collapse;margin-bottom:1.5rem;
+border:1px solid #313244}
+.markdown-body th{padding:0.75rem;background:#272738;
+border-bottom:2px solid #313244;text-align:left;color:#e0e4f0}
+.markdown-body td{padding:0.75rem;border-bottom:1px solid #313244}
+.markdown-body blockquote{border-left:3px solid #94e2d5;padding-left:1rem;
+margin-left:0;color:#7f849c;margin-bottom:1.5rem}
 
 /* editor */
 .editor-area{width:100%;min-height:400px;background:#181825;color:#cdd6f4;
 border:1px solid #313244;border-radius:6px;padding:16px;
 font-family:'Monaco','Menlo','Ubuntu Mono',monospace;font-size:14px;line-height:1.6;
-resize:vertical}
+resize:vertical;transition:border-color 150ms ease,box-shadow 150ms ease}
 .editor-area:focus{outline:none;border-color:#94e2d5;box-shadow:0 0 0 2px rgba(148,226,213,0.15)}
 .path-input{width:100%;padding:10px 12px;background:#181825;color:#cdd6f4;
-border:1px solid #313244;border-radius:6px;font-size:14px;margin-bottom:12px}
+border:1px solid #313244;border-radius:6px;font-size:14px;margin-bottom:12px;
+transition:border-color 150ms ease,box-shadow 150ms ease}
 .path-input:focus{outline:none;border-color:#94e2d5;box-shadow:0 0 0 2px rgba(148,226,213,0.15)}
-.action-bar{display:flex;gap:10px;margin-top:12px}
+.action-bar{position:sticky;bottom:0;display:flex;gap:10px;margin-top:12px;
+padding:16px 24px;background:rgba(30,30,46,0.95);backdrop-filter:blur(12px);
+-webkit-backdrop-filter:blur(12px);border-top:1px solid #313244;
+border-radius:8px 8px 0 0;justify-content:center;z-index:10}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border-radius:4px;
-font-size:14px;font-weight:500;cursor:pointer;border:none;transition:background 150ms ease}
+font-size:14px;font-weight:500;cursor:pointer;border:none;
+transition:background 150ms ease,opacity 150ms ease,transform 150ms ease}
+.btn:hover{opacity:0.9;transform:translateY(-1px)}
 .btn-save{background:#94e2d5;color:#1e1e2e}
 .btn-save:hover{background:#a6e3e0}
 .btn-cancel{background:#313244;color:#cdd6f4}
@@ -320,13 +378,14 @@ color:#cdd6f4}
 .action-stack{display:flex;flex-direction:column;gap:8px;margin-top:16px}
 .btn-edit{display:flex;align-items:center;justify-content:center;gap:6px;
 padding:8px 14px;background:#94e2d5;color:#1e1e2e;border-radius:4px;
-font-weight:500;font-size:13px;border:none;cursor:pointer}
-.btn-edit:hover{background:#a6e3e0;text-decoration:none}
+font-weight:500;font-size:13px;border:none;cursor:pointer;
+transition:background 150ms ease,transform 150ms ease}
+.btn-edit:hover{background:#a6e3e0;text-decoration:none;transform:translateY(-1px)}
 .btn-delete{display:flex;align-items:center;justify-content:center;gap:6px;
 padding:8px 14px;background:transparent;color:#f38ba8;
 border:1px solid #f38ba8;border-radius:4px;font-weight:500;
-font-size:13px;cursor:pointer}
-.btn-delete:hover{background:rgba(243,139,168,0.1);text-decoration:none}
+font-size:13px;cursor:pointer;transition:background 150ms ease,transform 150ms ease}
+.btn-delete:hover{background:rgba(243,139,168,0.1);text-decoration:none;transform:translateY(-1px)}
 .confirm-row{display:flex;gap:6px}
 .btn-confirm-del{padding:6px 12px;background:#f38ba8;color:#1e1e2e;border-radius:4px;
 font-size:12px;font-weight:600;border:none;cursor:pointer}
@@ -363,6 +422,48 @@ function hideConfirm(btn){
   var f=btn.closest('.del-form');f.style.display='none';
   f.previousElementSibling.style.display='block';
 }
+function filterTree(query){
+  var files=document.querySelectorAll('.tree-file');
+  var dirs=document.querySelectorAll('details');
+  query=query.toLowerCase();
+  if(!query){
+    files.forEach(function(f){f.style.display='flex';});
+    dirs.forEach(function(d){d.style.display='';});
+    return;
+  }
+  files.forEach(function(file){
+    var name=file.textContent.toLowerCase();
+    file.style.display=name.includes(query)?'flex':'none';
+  });
+}
+var _unsaved=false;
+(function(){
+  var ta=document.querySelector('.editor-area');
+  if(ta){ta.addEventListener('input',function(){_unsaved=true;});}
+  var form=document.querySelector('form');
+  if(form){form.addEventListener('submit',function(){_unsaved=false;});}
+  window.addEventListener('beforeunload',function(e){
+    if(_unsaved){e.preventDefault();e.returnValue='';return '';}
+  });
+  document.querySelectorAll('a').forEach(function(link){
+    link.addEventListener('click',function(e){
+      if(_unsaved&&!confirm('You have unsaved changes. Continue?')){e.preventDefault();}
+    });
+  });
+  document.addEventListener('keydown',function(e){
+    if((e.ctrlKey||e.metaKey)&&e.key==='s'){
+      e.preventDefault();
+      var f=document.querySelector('form');if(f)f.submit();
+    }
+    if((e.ctrlKey||e.metaKey)&&e.key==='e'){
+      e.preventDefault();
+      var el=document.querySelector('.mode-btn:not(.active)');if(el)el.click();
+    }
+    if((e.ctrlKey||e.metaKey)&&e.key==='b'){
+      e.preventDefault();toggleSidebar();
+    }
+  });
+})();
 """
 
 # ---------------------------------------------------------------------------
@@ -430,12 +531,16 @@ def _page(
 
 
 def _sidebar_html(filesystem: FileSystem, active: str = "") -> str:
-    """Build sidebar HTML with header + tree."""
+    """Build sidebar HTML with header + search + tree."""
     tree = _build_tree_html(filesystem, active=active)
     return (
         '<div class="sidebar-header">'
         f'<div class="sidebar-title">{_icon("archive")} Stash-MCP</div>'
         f'<a href="/ui/new" class="btn-new">{_icon("plus")} New Document</a>'
+        '<div class="search-box">'
+        '<input type="text" id="tree-search" class="search-input" '
+        'placeholder="Search files..." oninput="filterTree(this.value)">'
+        "</div>"
         "</div>"
         f'<div class="tree-root">{tree if tree else "<p class=empty-msg>No files yet</p>"}</div>'
     )
@@ -548,11 +653,19 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
                 return _page("Error", sidebar, center)
 
             escaped_content = html.escape(content)
-            center = (
-                f'<div class="breadcrumbs">{breadcrumbs}</div>'
-                f"<h1>{html.escape(PurePosixPath(path).name)}</h1>"
-                f'<div class="viewer-content">{escaped_content}</div>'
-            )
+            if path.endswith((".md", ".markdown")):
+                rendered = _render_markdown(content)
+                center = (
+                    f'<div class="breadcrumbs">{breadcrumbs}</div>'
+                    f"<h1>{html.escape(PurePosixPath(path).name)}</h1>"
+                    f'<div class="viewer-content markdown-body">{rendered}</div>'
+                )
+            else:
+                center = (
+                    f'<div class="breadcrumbs">{breadcrumbs}</div>'
+                    f"<h1>{html.escape(PurePosixPath(path).name)}</h1>"
+                    f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
+                )
 
             # right panel — metadata + actions
             try:
