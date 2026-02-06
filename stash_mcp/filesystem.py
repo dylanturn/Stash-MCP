@@ -2,7 +2,6 @@
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +61,7 @@ class FileSystem:
 
         return full_path
 
-    def list_files(self, relative_path: str = "") -> List[Tuple[str, bool]]:
+    def list_files(self, relative_path: str = "") -> list[tuple[str, bool]]:
         """List files and directories at the given path.
 
         Args:
@@ -92,7 +91,7 @@ class FileSystem:
 
         return items
 
-    def list_all_files(self, relative_path: str = "") -> List[str]:
+    def list_all_files(self, relative_path: str = "") -> list[str]:
         """Recursively list all files under the given path.
 
         Args:

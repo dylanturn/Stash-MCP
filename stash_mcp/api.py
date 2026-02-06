@@ -1,7 +1,6 @@
 """REST API implementation with FastAPI."""
 
 import logging
-from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,9 +8,8 @@ from pydantic import BaseModel
 
 from .config import Config
 from .filesystem import (
-    FileSystem,
     FileNotFoundError,
-    FileSystemError,
+    FileSystem,
     InvalidPathError,
 )
 
@@ -23,7 +21,7 @@ class ContentItem(BaseModel):
 
     path: str
     is_directory: bool
-    content: Optional[str] = None
+    content: str | None = None
 
 
 class ContentCreate(BaseModel):
@@ -35,7 +33,7 @@ class ContentCreate(BaseModel):
 class ContentList(BaseModel):
     """Content list response."""
 
-    items: List[ContentItem]
+    items: list[ContentItem]
 
 
 def create_api(filesystem: FileSystem) -> FastAPI:

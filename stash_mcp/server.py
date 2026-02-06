@@ -21,16 +21,16 @@ logger = logging.getLogger(__name__)
 async def main():
     """Run the Stash MCP server."""
     logger.info("Starting Stash-MCP server...")
-    
+
     # Ensure content directory exists
     Config.ensure_content_dir()
-    
+
     # Initialize filesystem
     filesystem = FileSystem(Config.CONTENT_DIR)
-    
+
     # Initialize MCP server
     mcp_server = StashMCPServer(filesystem)
-    
+
     # Run server with stdio transport
     logger.info(f"Server running with content dir: {Config.CONTENT_DIR}")
     async with stdio_server() as (read_stream, write_stream):

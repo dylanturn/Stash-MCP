@@ -1,13 +1,12 @@
 """MCP Server implementation for Stash."""
 
 import logging
-from typing import Any, List
 
 from mcp.server import Server
 from mcp.types import Resource, TextContent, Tool
 
 from .config import Config
-from .filesystem import FileSystem, FileNotFoundError, InvalidPathError
+from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ class StashMCPServer:
         """Set up MCP protocol handlers."""
 
         @self.server.list_resources()
-        async def list_resources() -> List[Resource]:
+        async def list_resources() -> list[Resource]:
             """List all available resources (files)."""
             resources = []
             try:
@@ -79,7 +78,7 @@ class StashMCPServer:
                 raise ValueError(f"Failed to read resource: {e}")
 
         @self.server.list_tools()
-        async def list_tools() -> List[Tool]:
+        async def list_tools() -> list[Tool]:
             """List available tools for content management."""
             return [
                 Tool(
@@ -135,7 +134,7 @@ class StashMCPServer:
             ]
 
         @self.server.call_tool()
-        async def call_tool(name: str, arguments: dict) -> List[TextContent]:
+        async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             """Execute a tool.
 
             Args:
@@ -158,7 +157,7 @@ class StashMCPServer:
                 logger.error(f"Error executing tool {name}: {e}")
                 return [TextContent(type="text", text=f"Error: {str(e)}")]
 
-    async def _create_content(self, arguments: dict) -> List[TextContent]:
+    async def _create_content(self, arguments: dict) -> list[TextContent]:
         """Create new content file.
 
         Args:
@@ -185,7 +184,7 @@ class StashMCPServer:
 
         return [TextContent(type="text", text=f"Created: {path}")]
 
-    async def _update_content(self, arguments: dict) -> List[TextContent]:
+    async def _update_content(self, arguments: dict) -> list[TextContent]:
         """Update existing content file.
 
         Args:
@@ -209,7 +208,7 @@ class StashMCPServer:
 
         return [TextContent(type="text", text=f"Updated: {path}")]
 
-    async def _delete_content(self, arguments: dict) -> List[TextContent]:
+    async def _delete_content(self, arguments: dict) -> list[TextContent]:
         """Delete content file.
 
         Args:

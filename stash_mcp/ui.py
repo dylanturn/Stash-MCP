@@ -1,11 +1,10 @@
 """FastUI implementation for content browser."""
 
 import logging
-from typing import List
 
 from fastapi import APIRouter
-from fastui import FastUI, components as c
-from fastui.components.display import DisplayLookup, DisplayMode
+from fastui import FastUI
+from fastui import components as c
 from fastui.events import GoToEvent
 
 from .filesystem import FileSystem
@@ -25,7 +24,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
     router = APIRouter()
 
     @router.get("/ui", response_model=FastUI, response_model_exclude_none=True)
-    async def ui_home() -> List[c.AnyComponent]:
+    async def ui_home() -> list[c.AnyComponent]:
         """Main UI page."""
         try:
             files = filesystem.list_all_files()
@@ -38,10 +37,13 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
                 components=[
                     c.Heading(text="Stash-MCP Content Browser", level=1),
                     c.Paragraph(
-                        text="Browse and manage your content files. Files are stored on disk and exposed via MCP."
+                        text=(
+                            "Browse and manage your content files. "
+                            "Files are stored on disk and exposed via MCP."
+                        )
                     ),
                     c.Table(
-                        data=[{"path": f, "view": f"View"} for f in files],
+                        data=[{"path": f, "view": "View"} for f in files],
                         columns=[
                             {"name": "path", "title": "File Path"},
                             {
@@ -61,7 +63,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
     @router.get(
         "/ui/view/{path:path}", response_model=FastUI, response_model_exclude_none=True
     )
-    async def ui_view_file(path: str) -> List[c.AnyComponent]:
+    async def ui_view_file(path: str) -> list[c.AnyComponent]:
         """View a specific file."""
         try:
             content = filesystem.read_file(path)
