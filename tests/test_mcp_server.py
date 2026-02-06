@@ -83,7 +83,7 @@ async def test_resource_templates(mcp_server):
 
 
 async def test_read_resource_via_template(mcp_server):
-    """Test reading a resource through the static resource."""
+    """Test reading a resource through the resource template."""
     resource = await mcp_server.get_resource("stash://test.md")
     # The resource object's fn reads the content
     content = resource.fn()

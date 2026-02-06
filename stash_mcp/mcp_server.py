@@ -118,14 +118,12 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
     async def create_content(
         path: str,
         content: str,
-        mime_type: str | None = None,
     ) -> str:
         """Create a new file. Errors if file already exists.
 
         Args:
             path: File path relative to content root
             content: File content
-            mime_type: Optional mime type (auto-detected if not provided)
         """
         if filesystem.file_exists(path):
             raise ValueError(
