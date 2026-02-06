@@ -1,6 +1,23 @@
-# Stash-MCP
+<p align="center">
+  <img src="assets/logo/stash-mcp-icon-dark.svg" alt="Stash-MCP" width="128" height="128">
+</p>
 
-A file-backed content server that exposes documents to AI agents via the Model Context Protocol (MCP). It provides a centralized documentation collection that multiple agents can share — stash content as files, serve them as MCP resources, and let agents update them through tools.
+<h1 align="center">Stash-MCP</h1>
+
+<p align="center">
+  A file-backed content server that exposes documents to AI agents via the Model Context Protocol (MCP).<br>
+  Stash content as files, serve them as MCP resources, and let agents update them through tools.
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#features">Features</a> •
+  <a href="#usage">Usage</a> •
+  <a href="#configuration">Configuration</a> •
+  <a href="USAGE.md">Full Docs</a>
+</p>
+
+---
 
 ## Features
 
@@ -43,7 +60,7 @@ A file-backed content server that exposes documents to AI agents via the Model C
 ## Tech Stack
 
 | Component | Technology |
-|-----------|-----------|
+|-----------|------------|
 | Package management | uv (or pip/venv) |
 | MCP server | FastMCP |
 | REST API | FastAPI |
@@ -76,21 +93,35 @@ Your content will be persisted in the `./content` directory.
 ### Local Development
 
 ```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -e ".[dev]"
+# Install dependencies with uv
+uv sync
 
 # Run the server
-python -m stash_mcp.server
+uv run -m stash_mcp.server
 
 # Run tests
-pytest
+uv run pytest
 
 # Run linter
-ruff check .
+uv run ruff check .
+```
+
+### Claude Desktop / MCP Client
+
+Add to your MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/Stash-MCP", "-m", "stash_mcp.server"],
+      "env": {
+        "STASH_CONTENT_DIR": "/path/to/your/content"
+      }
+    }
+  }
+}
 ```
 
 ## Usage
@@ -169,4 +200,4 @@ Environment variables:
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT License - see [LICENSE](LICENSE) file for details.
