@@ -159,7 +159,7 @@ def create_api(filesystem: FileSystem) -> FastAPI:
         """
         try:
             items = []
-            if recursive or not path:
+            if recursive:
                 # List all files recursively
                 for file_path in filesystem.list_all_files(path):
                     if file_type and not file_path.endswith(file_type):
@@ -173,7 +173,7 @@ def create_api(filesystem: FileSystem) -> FastAPI:
                         )
                     )
             else:
-                # List specific directory
+                # List directory contents (shallow)
                 for name, is_dir in filesystem.list_files(path):
                     item_path = f"{path}/{name}" if path else name
                     if file_type and not is_dir and not name.endswith(file_type):

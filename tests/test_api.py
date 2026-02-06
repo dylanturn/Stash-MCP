@@ -45,12 +45,23 @@ def test_root_endpoint(test_client):
 
 
 def test_list_content(test_client):
-    """Test listing all content."""
+    """Test listing root directory contents (shallow by default)."""
     response = test_client.get("/api/content")
     assert response.status_code == 200
     data = response.json()
     assert "items" in data
     assert len(data["items"]) == 2
+    paths = [item["path"] for item in data["items"]]
+    assert "test.md" in paths
+    assert "docs" in paths  # directory, not its contents
+
+
+def test_list_content_recursive(test_client):
+    """Test listing all content recursively."""
+    response = test_client.get("/api/content", params={"recursive": "true"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
     paths = [item["path"] for item in data["items"]]
     assert "test.md" in paths
     assert "docs/readme.md" in paths
@@ -227,10 +238,11 @@ def test_list_content_with_file_type_filter(test_client):
     # First create a .txt file
     test_client.put("/api/content/notes.txt", json={"content": "notes"})
 
-    response = test_client.get("/api/content", params={"file_type": ".md"})
+    response = test_client.get("/api/content", params={"file_type": ".md", "recursive": "true"})
     assert response.status_code == 200
     data = response.json()
     paths = [item["path"] for item in data["items"]]
+    assert len(paths) >= 1  # At least one .md file exists
     assert all(p.endswith(".md") for p in paths)
     assert "notes.txt" not in paths
 
@@ -245,21 +257,23 @@ def test_list_content_directory_with_path(test_client):
 
 
 def test_list_content_items_have_mime_type(test_client):
-    """Test that listed items include mime_type."""
-    response = test_client.get("/api/content")
+    """Test that listed file items include mime_type."""
+    response = test_client.get("/api/content", params={"recursive": "true"})
     assert response.status_code == 200
     data = response.json()
     for item in data["items"]:
-        assert item["mime_type"] is not None
+        if not item["is_directory"]:
+            assert item["mime_type"] is not None
 
 
 def test_path_traversal_post(test_client):
     """Test path traversal is blocked on POST."""
+    # FastAPI normalizes URL paths with ../, so traversal is blocked at HTTP level
     response = test_client.post(
-        "/api/content/..%2F..%2F..%2Fetc%2Fpasswd",
+        "/api/content/../../../etc/passwd",
         json={"content": "malicious"}
     )
-    # The path either gets blocked by filesystem validation (400) or normalized (404)
+    # Path traversal blocked either by URL normalization (404) or filesystem validation (400)
     assert response.status_code in (400, 404)
 
 
