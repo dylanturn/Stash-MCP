@@ -3,18 +3,15 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 # Copy project files
-COPY pyproject.toml ./
-COPY README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY stash_mcp ./stash_mcp
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -e .
+# Install dependencies with uv
+RUN uv sync --frozen --no-dev
 
 # Create content directory
 RUN mkdir -p /data/content
@@ -28,6 +25,9 @@ ENV PYTHONUNBUFFERED=1
 # Expose port
 EXPOSE 8000
 
-# Run the web server by default (includes REST API and UI)
-# For MCP server, override with: python -m stash_mcp.server
-CMD ["python", "-m", "stash_mcp.web_server"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" || exit 1
+
+# Run with uv
+ENTRYPOINT ["uv", "run", "stash-mcp"]

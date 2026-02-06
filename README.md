@@ -84,11 +84,26 @@ docker-compose down
 ```
 
 The server will be available at:
-- MCP Server: stdio transport via Docker
 - REST API: http://localhost:8000
 - UI: http://localhost:8000/ui
+- MCP endpoint: http://localhost:8000/mcp
+- Health check: http://localhost:8000/api/health
 
 Your content will be persisted in the `./content` directory.
+
+### MCP Client Configuration
+
+To connect Claude Desktop (or other MCP clients) to the running container, add the following to your MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
 
 ### Local Development
 
