@@ -265,7 +265,8 @@ async def test_move_sends_list_changed(mcp_server, temp_fs, mock_context):
 
 async def test_resources_filtered_by_include_patterns(temp_fs):
     """Test that when patterns are set, only matching README.md files are
-    registered as MCP resources."""
+    registered as MCP resources.
+    """
     # Write files of different types
     temp_fs.write_file("docs/README.md", "# Docs Guide")
     temp_fs.write_file("docs/other.md", "# Other Doc")
