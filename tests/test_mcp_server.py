@@ -5,7 +5,6 @@ from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import AnyUrl
 
 from stash_mcp.filesystem import FileSystem
 from stash_mcp.mcp_server import _get_mime_type, create_mcp_server
@@ -193,6 +192,14 @@ async def test_create_registers_resource(temp_fs, mock_context):
     assert "stash://new.md" in resources
 
 
+async def test_create_sends_list_changed(temp_fs, mock_context):
+    """Test that create_content sends resource_list_changed notification."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("create_content")
+    await tool.run({"path": "new.md", "content": "# New"})
+    mock_context.send_resource_list_changed.assert_awaited_once()
+
+
 async def test_update_existing_sends_resource_updated(mcp_server, mock_context):
     """Test that updating an existing file sends resource_updated notification."""
     tool = await mcp_server.get_tool("update_content")
@@ -210,6 +217,14 @@ async def test_update_new_file_registers_resource(temp_fs, mock_context):
     resources = await mcp.get_resources()
     assert "stash://brand_new.md" in resources
     mock_context.session.send_resource_updated.assert_not_awaited()
+
+
+async def test_update_new_file_sends_list_changed(temp_fs, mock_context):
+    """Test that updating a non-existent file sends resource_list_changed notification."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("update_content")
+    await tool.run({"path": "brand_new.md", "content": "# Brand New"})
+    mock_context.send_resource_list_changed.assert_awaited_once()
 
 
 async def test_delete_unregisters_resource(mcp_server, temp_fs, mock_context):
@@ -239,6 +254,13 @@ async def test_move_updates_resources(mcp_server, temp_fs, mock_context):
     resources = await mcp_server.get_resources()
     assert "stash://test.md" not in resources
     assert "stash://moved.md" in resources
+
+
+async def test_move_sends_list_changed(mcp_server, temp_fs, mock_context):
+    """Test that move_content sends resource_list_changed notification."""
+    tool = await mcp_server.get_tool("move_content")
+    await tool.run({"source_path": "test.md", "dest_path": "moved.md"})
+    mock_context.send_resource_list_changed.assert_awaited_once()
 
 
 async def test_resources_filtered_by_include_patterns(temp_fs):
