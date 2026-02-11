@@ -254,7 +254,7 @@ async def test_update_new_file_registers_resource(temp_fs, mock_context):
 
 
 async def test_update_new_file_sends_list_changed(temp_fs, mock_context):
-    """Test that updating creates README.md sends resource_list_changed."""
+    """Test that creating a new README.md sends resource_list_changed."""
     mcp = create_mcp_server(temp_fs)
     tool = await mcp.get_tool("update_content")
     
