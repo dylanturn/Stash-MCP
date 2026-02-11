@@ -46,7 +46,10 @@ RESOURCE_FILENAME = "README.md"
 
 def _is_resource_file(path: str) -> bool:
     """Check if a file should be exposed as an MCP resource."""
-    return PurePosixPath(path).name == RESOURCE_FILENAME
+    # Normalize to POSIX-style path and remove trailing slashes to handle
+    # inputs with OS-native separators or accidental trailing separators.
+    normalized = path.replace("\\", "/").rstrip("/")
+    return PurePosixPath(normalized).name == RESOURCE_FILENAME
 
 
 def _get_mime_type(path: str) -> str:
