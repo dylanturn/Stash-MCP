@@ -21,8 +21,8 @@ def temp_fs():
 @pytest.fixture
 def mcp_server(temp_fs):
     """Create a FastMCP server with temporary filesystem."""
-    temp_fs.write_file("test.md", "# Test Content")
-    temp_fs.write_file("docs/readme.md", "# README\nSome docs")
+    temp_fs.write_file("README.md", "# Root README")
+    temp_fs.write_file("docs/README.md", "# Docs README\nSome docs")
     temp_fs.write_file("data.json", '{"key": "value"}')
     return create_mcp_server(temp_fs)
 
@@ -70,24 +70,26 @@ def test_get_mime_type_default():
 
 
 async def test_list_resources(mcp_server):
-    """Test listing resources returns all files."""
+    """Test listing resources returns only README.md files."""
     resources = await mcp_server.get_resources()
     uris = list(resources.keys())
-    assert "stash://test.md" in uris
-    assert "stash://docs/readme.md" in uris
-    assert "stash://data.json" in uris
+    # Only README.md files should be registered as resources
+    assert "stash://README.md" in uris
+    assert "stash://docs/README.md" in uris
+    # Other files should NOT be in the resource list
+    assert "stash://data.json" not in uris
 
 
 async def test_resource_mime_types(mcp_server):
     """Test that resources have correct mime types."""
     resources = await mcp_server.get_resources()
-    md_resource = resources.get("stash://test.md")
+    md_resource = resources.get("stash://README.md")
     assert md_resource is not None
     assert md_resource.mime_type == "text/markdown"
 
+    # Non-README files should not be registered
     json_resource = resources.get("stash://data.json")
-    assert json_resource is not None
-    assert json_resource.mime_type == "application/json"
+    assert json_resource is None
 
 
 async def test_resource_templates(mcp_server):
@@ -98,10 +100,10 @@ async def test_resource_templates(mcp_server):
 
 async def test_read_resource_via_template(mcp_server):
     """Test reading a resource through the resource template."""
-    resource = await mcp_server.get_resource("stash://test.md")
-    # The resource object's fn reads the content
+    # README.md is registered, so it can be accessed
+    resource = await mcp_server.get_resource("stash://README.md")
     content = resource.fn()
-    assert content == "# Test Content"
+    assert content == "# Root README"
 
 
 # --- Tool tests ---
@@ -132,23 +134,23 @@ async def test_create_content_tool_existing_file(mcp_server, temp_fs, mock_conte
     """Test create_content tool errors on existing file."""
     tool = await mcp_server.get_tool("create_content")
     with pytest.raises(ValueError, match="already exists"):
-        await tool.run({"path": "test.md", "content": "overwrite"})
+        await tool.run({"path": "README.md", "content": "overwrite"})
 
 
 async def test_update_content_tool(mcp_server, temp_fs, mock_context):
     """Test update_content tool updates a file."""
     tool = await mcp_server.get_tool("update_content")
-    result = await tool.run({"path": "test.md", "content": "# Updated"})
-    assert "Updated: test.md" in str(result.content)
-    assert temp_fs.read_file("test.md") == "# Updated"
+    result = await tool.run({"path": "README.md", "content": "# Updated"})
+    assert "Updated: README.md" in str(result.content)
+    assert temp_fs.read_file("README.md") == "# Updated"
 
 
 async def test_delete_content_tool(mcp_server, temp_fs, mock_context):
     """Test delete_content tool deletes a file."""
     tool = await mcp_server.get_tool("delete_content")
-    result = await tool.run({"path": "test.md"})
-    assert "Deleted: test.md" in str(result.content)
-    assert not temp_fs.file_exists("test.md")
+    result = await tool.run({"path": "README.md"})
+    assert "Deleted: README.md" in str(result.content)
+    assert not temp_fs.file_exists("README.md")
 
 
 async def test_list_content_tool_recursive(mcp_server):
@@ -156,8 +158,8 @@ async def test_list_content_tool_recursive(mcp_server):
     tool = await mcp_server.get_tool("list_content")
     result = await tool.run({"recursive": True})
     text = str(result.content)
-    assert "test.md" in text
-    assert "docs/readme.md" in text
+    assert "README.md" in text
+    assert "docs/README.md" in text
     assert "data.json" in text
 
 
@@ -166,109 +168,169 @@ async def test_list_content_tool_non_recursive(mcp_server):
     tool = await mcp_server.get_tool("list_content")
     result = await tool.run({"path": "", "recursive": False})
     text = str(result.content)
-    assert "test.md" in text
+    assert "README.md" in text
     assert "docs" in text
 
 
 async def test_move_content_tool(mcp_server, temp_fs, mock_context):
     """Test move_content tool moves a file."""
     tool = await mcp_server.get_tool("move_content")
-    result = await tool.run({"source_path": "test.md", "dest_path": "moved.md"})
-    assert "Moved: test.md -> moved.md" in str(result.content)
-    assert not temp_fs.file_exists("test.md")
+    result = await tool.run({"source_path": "README.md", "dest_path": "moved.md"})
+    assert "Moved: README.md -> moved.md" in str(result.content)
+    assert not temp_fs.file_exists("README.md")
     assert temp_fs.file_exists("moved.md")
-    assert temp_fs.read_file("moved.md") == "# Test Content"
+    assert temp_fs.read_file("moved.md") == "# Root README"
 
 
 # --- Notification tests ---
 
 
 async def test_create_registers_resource(temp_fs, mock_context):
-    """Test that create_content registers the new resource."""
+    """Test that create_content registers README.md files as resources."""
     mcp = create_mcp_server(temp_fs)
     tool = await mcp.get_tool("create_content")
-    await tool.run({"path": "new.md", "content": "# New"})
+    # Create a README.md file
+    await tool.run({"path": "README.md", "content": "# New"})
     resources = await mcp.get_resources()
-    assert "stash://new.md" in resources
+    assert "stash://README.md" in resources
+
+    # Create a non-README file
+    await tool.run({"path": "other.md", "content": "# Other"})
+    resources = await mcp.get_resources()
+    # Non-README files should not be registered
+    assert "stash://other.md" not in resources
 
 
 async def test_create_sends_list_changed(temp_fs, mock_context):
-    """Test that create_content sends resource_list_changed notification."""
+    """Test that create_content sends resource_list_changed only for README.md files."""
     mcp = create_mcp_server(temp_fs)
     tool = await mcp.get_tool("create_content")
-    await tool.run({"path": "new.md", "content": "# New"})
+    
+    # Creating README.md should send notification
+    await tool.run({"path": "README.md", "content": "# New"})
     mock_context.send_resource_list_changed.assert_awaited_once()
+    
+    # Reset mock
+    mock_context.send_resource_list_changed.reset_mock()
+    
+    # Creating non-README file should NOT send notification
+    await tool.run({"path": "other.md", "content": "# Other"})
+    mock_context.send_resource_list_changed.assert_not_awaited()
 
 
 async def test_update_existing_sends_resource_updated(mcp_server, mock_context):
-    """Test that updating an existing file sends resource_updated notification."""
+    """Test that updating README.md sends resource_updated notification."""
     tool = await mcp_server.get_tool("update_content")
-    await tool.run({"path": "test.md", "content": "# Changed"})
+    
+    # Update README.md should send resource_updated
+    await tool.run({"path": "README.md", "content": "# Changed"})
     mock_context.session.send_resource_updated.assert_awaited_once()
     call_kwargs = mock_context.session.send_resource_updated.call_args
-    assert str(call_kwargs.kwargs["uri"]) == "stash://test.md"
-
-
-async def test_update_new_file_registers_resource(temp_fs, mock_context):
-    """Test that updating a non-existent file registers it as a new resource."""
-    mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("update_content")
-    await tool.run({"path": "brand_new.md", "content": "# Brand New"})
-    resources = await mcp.get_resources()
-    assert "stash://brand_new.md" in resources
+    assert str(call_kwargs.kwargs["uri"]) == "stash://README.md"
+    
+    # Reset mock
+    mock_context.session.send_resource_updated.reset_mock()
+    
+    # Update non-README file should NOT send resource_updated
+    await tool.run({"path": "data.json", "content": '{"updated": true}'})
     mock_context.session.send_resource_updated.assert_not_awaited()
 
 
-async def test_update_new_file_sends_list_changed(temp_fs, mock_context):
-    """Test that updating a non-existent file sends resource_list_changed notification."""
+async def test_update_new_file_registers_resource(temp_fs, mock_context):
+    """Test that updating a non-existent README.md registers it as a resource."""
     mcp = create_mcp_server(temp_fs)
     tool = await mcp.get_tool("update_content")
-    await tool.run({"path": "brand_new.md", "content": "# Brand New"})
+    
+    # Create new README.md via update
+    await tool.run({"path": "new/README.md", "content": "# Brand New"})
+    resources = await mcp.get_resources()
+    assert "stash://new/README.md" in resources
+    mock_context.session.send_resource_updated.assert_not_awaited()
+    
+    # Create new non-README file via update
+    await tool.run({"path": "other.md", "content": "# Other"})
+    resources = await mcp.get_resources()
+    assert "stash://other.md" not in resources
+
+
+async def test_update_new_file_sends_list_changed(temp_fs, mock_context):
+    """Test that updating creates README.md sends resource_list_changed."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("update_content")
+    
+    # Creating new README.md should send notification
+    await tool.run({"path": "new/README.md", "content": "# Brand New"})
     mock_context.send_resource_list_changed.assert_awaited_once()
+    
+    # Reset mock
+    mock_context.send_resource_list_changed.reset_mock()
+    
+    # Creating new non-README file should NOT send notification
+    await tool.run({"path": "other.md", "content": "# Other"})
+    mock_context.send_resource_list_changed.assert_not_awaited()
 
 
 async def test_delete_unregisters_resource(mcp_server, temp_fs, mock_context):
-    """Test that delete_content removes the resource from registry."""
+    """Test that delete_content removes README.md from registry."""
     resources_before = await mcp_server.get_resources()
-    assert "stash://test.md" in resources_before
+    assert "stash://README.md" in resources_before
 
     tool = await mcp_server.get_tool("delete_content")
-    await tool.run({"path": "test.md"})
+    await tool.run({"path": "README.md"})
 
     resources_after = await mcp_server.get_resources()
-    assert "stash://test.md" not in resources_after
+    assert "stash://README.md" not in resources_after
 
 
 async def test_delete_sends_list_changed(mcp_server, temp_fs, mock_context):
-    """Test that delete_content sends resource_list_changed notification."""
+    """Test that delete_content sends notification only for README.md."""
     tool = await mcp_server.get_tool("delete_content")
-    await tool.run({"path": "test.md"})
+    
+    # Deleting README.md should send notification
+    await tool.run({"path": "README.md"})
     mock_context.send_resource_list_changed.assert_awaited_once()
+    
+    # Reset mock
+    mock_context.send_resource_list_changed.reset_mock()
+    
+    # Deleting non-README file should NOT send notification
+    await tool.run({"path": "data.json"})
+    mock_context.send_resource_list_changed.assert_not_awaited()
 
 
 async def test_move_updates_resources(mcp_server, temp_fs, mock_context):
-    """Test that move_content removes old resource and adds new one."""
+    """Test that move_content updates resource registry for README.md."""
     tool = await mcp_server.get_tool("move_content")
-    await tool.run({"source_path": "test.md", "dest_path": "moved.md"})
-
+    
+    # Moving README.md to another README.md location
+    await tool.run({"source_path": "README.md", "dest_path": "other/README.md"})
     resources = await mcp_server.get_resources()
-    assert "stash://test.md" not in resources
-    assert "stash://moved.md" in resources
+    assert "stash://README.md" not in resources
+    assert "stash://other/README.md" in resources
 
 
 async def test_move_sends_list_changed(mcp_server, temp_fs, mock_context):
-    """Test that move_content sends resource_list_changed notification."""
+    """Test that move_content sends notification when README.md is involved."""
     tool = await mcp_server.get_tool("move_content")
-    await tool.run({"source_path": "test.md", "dest_path": "moved.md"})
+    
+    # Moving README.md to another location should send notification
+    await tool.run({"source_path": "README.md", "dest_path": "other/README.md"})
     mock_context.send_resource_list_changed.assert_awaited_once()
+    
+    # Reset mock
+    mock_context.send_resource_list_changed.reset_mock()
+    
+    # Moving non-README file should NOT send notification
+    await tool.run({"source_path": "data.json", "dest_path": "moved.json"})
+    mock_context.send_resource_list_changed.assert_not_awaited()
 
 
 async def test_resources_filtered_by_include_patterns(temp_fs):
-    """Test that when patterns are set, only matching files are registered as MCP resources."""
+    """Test that only README.md files matching patterns are registered as MCP resources."""
     # Write files of different types
+    temp_fs.write_file("docs/README.md", "# Docs README")
     temp_fs.write_file("docs/guide.md", "# Guide")
-    temp_fs.write_file("docs/api.md", "# API")
-    temp_fs.write_file("notes/todo.txt", "todo items")
+    temp_fs.write_file("notes/README.md", "# Notes README")
     temp_fs.write_file("data.json", '{"key": "value"}')
 
     # Create a new filesystem with patterns, using the same content directory
@@ -278,13 +340,12 @@ async def test_resources_filtered_by_include_patterns(temp_fs):
     resources = await mcp.get_resources()
     uris = list(resources.keys())
 
-    # Only docs/*.md should be registered
-    assert "stash://docs/guide.md" in uris
-    assert "stash://docs/api.md" in uris
-    # These should NOT be registered
-    assert "stash://notes/todo.txt" not in uris
-    assert "stash://data.json" not in uris
-    assert "stash://test.md" not in uris
+    # Only docs/README.md should be registered (it's both README.md and matches pattern)
+    assert "stash://docs/README.md" in uris
+    # These should NOT be registered (either not README.md or don't match pattern)
+    assert "stash://docs/guide.md" not in uris  # Not README.md
+    assert "stash://notes/README.md" not in uris  # Doesn't match pattern
+    assert "stash://data.json" not in uris  # Not README.md
 
 
 async def test_tools_emit_events(mcp_server, temp_fs, mock_context):
