@@ -225,6 +225,17 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
         logger.info(f"Deleted: {path}")
         return f"Deleted: {path}"
 
+    @mcp.tool(description="Read a content file")
+    async def read_content(
+        path: str,
+    ) -> str:
+        """Read and return the contents of a file.
+
+        Args:
+            path: File path relative to content root
+        """
+        return filesystem.read_file(path)
+
     @mcp.tool(description="List files and directories")
     async def list_content(
         path: str = "",

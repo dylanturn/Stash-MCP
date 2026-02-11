@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from stash_mcp.filesystem import FileSystem
+from stash_mcp.filesystem import FileNotFoundError, FileSystem
 from stash_mcp.mcp_server import _get_mime_type, create_mcp_server
 
 
@@ -114,6 +114,7 @@ async def test_list_tools(mcp_server):
     tools = await mcp_server.get_tools()
     tool_names = list(tools.keys())
     assert "create_content" in tool_names
+    assert "read_content" in tool_names
     assert "update_content" in tool_names
     assert "delete_content" in tool_names
     assert "list_content" in tool_names
@@ -135,6 +136,20 @@ async def test_create_content_tool_existing_file(mcp_server, temp_fs, mock_conte
     tool = await mcp_server.get_tool("create_content")
     with pytest.raises(ValueError, match="already exists"):
         await tool.run({"path": "README.md", "content": "overwrite"})
+
+
+async def test_read_content_tool(mcp_server):
+    """Test read_content tool reads a file."""
+    tool = await mcp_server.get_tool("read_content")
+    result = await tool.run({"path": "README.md"})
+    assert "# Root README" in str(result.content)
+
+
+async def test_read_content_tool_not_found(mcp_server):
+    """Test read_content tool errors on missing file."""
+    tool = await mcp_server.get_tool("read_content")
+    with pytest.raises(FileNotFoundError):
+        await tool.run({"path": "nonexistent.md"})
 
 
 async def test_update_content_tool(mcp_server, temp_fs, mock_context):
