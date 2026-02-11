@@ -376,3 +376,19 @@ async def test_tools_emit_events(mcp_server, temp_fs, mock_context):
         tool = await mcp_server.get_tool("delete_content")
         await tool.run({"path": "evt2.md"})
         mock_emit.assert_called_with("content_deleted", "evt2.md")
+
+
+# --- Auth parameter tests ---
+
+
+def test_create_mcp_server_no_auth(temp_fs):
+    """Test that create_mcp_server works without auth (default)."""
+    mcp = create_mcp_server(temp_fs)
+    assert mcp.auth is None
+
+
+def test_create_mcp_server_with_auth(temp_fs):
+    """Test that create_mcp_server passes auth to FastMCP."""
+    mock_auth = MagicMock()
+    mcp = create_mcp_server(temp_fs, auth=mock_auth)
+    assert mcp.auth is mock_auth

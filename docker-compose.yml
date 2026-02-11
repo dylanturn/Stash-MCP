@@ -10,4 +10,10 @@ services:
       - STASH_CONTENT_ROOT=/data/content
       - STASH_HOST=0.0.0.0
       - STASH_PORT=8000
+      # Optional: OAuth authentication (uncomment to enable)
+      # See README.md for available providers and their env vars.
+      #- FASTMCP_SERVER_AUTH
+      #- FASTMCP_SERVER_AUTH_GITHUB_CLIENT_ID
+      #- FASTMCP_SERVER_AUTH_GITHUB_CLIENT_SECRET
+      #- FASTMCP_SERVER_AUTH_GITHUB_BASE_URL
     restart: unless-stopped
