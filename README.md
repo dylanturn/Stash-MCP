@@ -73,6 +73,9 @@
 ### Using Docker Compose (Recommended)
 
 ```bash
+# Build the image
+docker build -t stash-mcp:latest .
+
 # Start the server
 docker-compose up -d
 

@@ -11,6 +11,7 @@ authentication:
 - A Cloudflare account with Zero Trust enabled
 - An Auth0 tenant
 - Docker and Docker Compose installed on the deployment host
+- The `stash-mcp:latest` image built locally (`docker build -t stash-mcp:latest .`)
 
 ## Compose Files
 
@@ -104,7 +105,7 @@ In the Zero Trust dashboard:
    - **Auth URL**: `https://<your-tenant>.auth0.com/authorize`
    - **Token URL**: `https://<your-tenant>.auth0.com/oauth/token`
    - **Certificate URL**: `https://<your-tenant>.auth0.com/.well-known/jwks.json`
-   - **OIDC Claims**: leave defaults (sub, email, email\_verified, name)
+   - **OIDC Claims**: leave defaults (sub, email, email_verified, name)
 4. Click **Test** and **Save**
 
 ### 3. Create Access Applications
