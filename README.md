@@ -73,6 +73,9 @@
 ### Using Docker Compose (Recommended)
 
 ```bash
+# Build the image
+docker build -t stash-mcp:latest .
+
 # Start the server
 docker-compose up -d
 
@@ -242,6 +245,24 @@ default behavior). The `/ui` and `/docs` endpoints are not affected by MCP
 auth; protect those separately at the reverse proxy level if needed.
 
 See [`.env.example`](.env.example) for a complete configuration template.
+
+### Cloudflare Tunnel Deployment
+
+For production deployments you can expose Stash-MCP through a Cloudflare Tunnel
+with split authentication: FastMCP OAuth on `/mcp` and Cloudflare Access
+(backed by Auth0) on everything else.
+
+```bash
+# With Cloudflare Tunnel
+docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml up -d
+
+# Multiple stacks on one VM (each with its own .env)
+docker compose -p stash-team-a -f docker-compose.yml -f docker-compose.cloudflare.yml up -d
+```
+
+See the [Cloudflare + Auth0 deployment guide](docs/cloudflare-auth0-deployment.md)
+for full setup instructions including Auth0 configuration and Cloudflare Zero
+Trust access policies.
 
 ## License
 
