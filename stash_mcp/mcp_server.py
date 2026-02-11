@@ -3,6 +3,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import PurePosixPath
 
 from fastmcp import FastMCP
 from fastmcp.resources import FunctionResource
@@ -38,11 +39,18 @@ MIME_TYPES: dict[str, str] = {
     ".log": "text/plain",
 }
 
+# Only files matching this name are exposed as MCP resources.
+# All other files remain accessible via tools and the resource template.
+RESOURCE_FILENAME = "README.md"
+
+
+def _is_resource_file(path: str) -> bool:
+    """Check if a file should be exposed as an MCP resource."""
+    return PurePosixPath(path).name == RESOURCE_FILENAME
+
 
 def _get_mime_type(path: str) -> str:
     """Get mime type for a file path based on extension."""
-    from pathlib import PurePosixPath
-
     suffix = PurePosixPath(path).suffix.lower()
     return MIME_TYPES.get(suffix, "text/plain")
 
@@ -86,8 +94,11 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
 
     # --- Resources ---
 
-    # Register individual resources for each file (for resources/list)
+    # Register only README.md files as resources (for resources/list).
+    # All other files are accessible via tools and the resource template.
     for file_path in filesystem.list_all_files():
+        if not _is_resource_file(file_path):
+            continue
         uri = f"stash://{file_path}"
         mime = _get_mime_type(file_path)
         desc = _get_description(filesystem, file_path)
@@ -104,7 +115,9 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
         )
 
     def _register_resource(path: str) -> None:
-        """Add a file to the MCP resource registry."""
+        """Add a file to the MCP resource registry if it is a README.md."""
+        if not _is_resource_file(path):
+            return
         uri = f"stash://{path}"
         mcp.add_resource(FunctionResource(
             uri=AnyUrl(uri), name=path,
