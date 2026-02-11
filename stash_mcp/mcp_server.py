@@ -74,11 +74,12 @@ def _get_description(fs: FileSystem, path: str) -> str:
         return f"Content file: {path}"
 
 
-def create_mcp_server(filesystem: FileSystem) -> FastMCP:
+def create_mcp_server(filesystem: FileSystem, auth=None) -> FastMCP:
     """Create and configure the FastMCP server.
 
     Args:
         filesystem: Filesystem instance for content management
+        auth: Optional OAuth provider for authentication (e.g. GitHubProvider)
 
     Returns:
         Configured FastMCP server
@@ -93,6 +94,7 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
         name=Config.SERVER_NAME,
         version=Config.SERVER_VERSION,
         lifespan=lifespan,
+        auth=auth,
     )
 
     # --- Resources ---

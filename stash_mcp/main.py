@@ -25,12 +25,22 @@ def create_app():
     filesystem = FileSystem(Config.CONTENT_DIR, include_patterns=Config.CONTENT_PATHS)
 
     # Create MCP http app first so we can wire its lifespan into FastAPI
+    # FastMCP auto-detects auth from FASTMCP_SERVER_AUTH env var when auth
+    # is not explicitly provided (default NotSet sentinel).
     mcp = create_mcp_server(filesystem)
     mcp_http_app = mcp.http_app(path="/")
 
     app = create_api(filesystem, lifespan=mcp_http_app.lifespan)
     ui_router = create_ui_router(filesystem)
     app.include_router(ui_router)
+
+    # When auth is enabled, OAuth discovery endpoints (e.g.
+    # /.well-known/oauth-authorization-server) must be reachable at the
+    # domain root, not nested under /mcp.
+    if mcp.auth is not None:
+        well_known_routes = mcp.auth.get_well_known_routes(mcp_path="/mcp")
+        for route in well_known_routes:
+            app.routes.insert(0, route)
 
     # Mount FastMCP server onto FastAPI for streamable HTTP transport
     app.mount("/mcp", mcp_http_app)
