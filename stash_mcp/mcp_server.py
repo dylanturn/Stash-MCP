@@ -3,6 +3,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import PurePosixPath
 
 from fastmcp import FastMCP
 from fastmcp.resources import FunctionResource
@@ -38,11 +39,21 @@ MIME_TYPES: dict[str, str] = {
     ".log": "text/plain",
 }
 
+# Only files matching this name are exposed as MCP resources.
+# All other files remain accessible via tools and the resource template.
+RESOURCE_FILENAME = "README.md"
+
+
+def _is_resource_file(path: str) -> bool:
+    """Check if a file should be exposed as an MCP resource."""
+    # Normalize to POSIX-style path and remove trailing slashes to handle
+    # inputs with OS-native separators or accidental trailing separators.
+    normalized = path.replace("\\", "/").rstrip("/")
+    return PurePosixPath(normalized).name == RESOURCE_FILENAME
+
 
 def _get_mime_type(path: str) -> str:
     """Get mime type for a file path based on extension."""
-    from pathlib import PurePosixPath
-
     suffix = PurePosixPath(path).suffix.lower()
     return MIME_TYPES.get(suffix, "text/plain")
 
@@ -86,8 +97,11 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
 
     # --- Resources ---
 
-    # Register individual resources for each file (for resources/list)
+    # Register only README.md files as resources (for resources/list).
+    # All other files are accessible via tools and the resource template.
     for file_path in filesystem.list_all_files():
+        if not _is_resource_file(file_path):
+            continue
         uri = f"stash://{file_path}"
         mime = _get_mime_type(file_path)
         desc = _get_description(filesystem, file_path)
@@ -103,8 +117,14 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             )
         )
 
-    def _register_resource(path: str) -> None:
-        """Add a file to the MCP resource registry."""
+    def _register_resource(path: str) -> bool:
+        """Add a file to the MCP resource registry if it is a README.md.
+
+        Returns:
+            True if a resource was registered, False otherwise.
+        """
+        if not _is_resource_file(path):
+            return False
         uri = f"stash://{path}"
         mcp.add_resource(FunctionResource(
             uri=AnyUrl(uri), name=path,
@@ -112,11 +132,19 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             mime_type=_get_mime_type(path),
             fn=lambda _fp=path: filesystem.read_file(_fp),
         ))
+        return True
 
-    def _unregister_resource(path: str) -> None:
-        """Remove a file from the MCP resource registry."""
+    def _unregister_resource(path: str) -> bool:
+        """Remove a file from the MCP resource registry.
+
+        Returns:
+            True if a resource was removed, False otherwise.
+        """
+        if not _is_resource_file(path):
+            return False
         uri_key = f"stash://{path}"
-        mcp._resource_manager._resources.pop(uri_key, None)
+        removed = mcp._resource_manager._resources.pop(uri_key, None)
+        return removed is not None
 
     # Resource template for dynamic access (resources/templates/list)
     @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")
@@ -148,8 +176,8 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
                 f"File already exists: {path}. Use update_content to modify existing files."
             )
         filesystem.write_file(path, content)
-        _register_resource(path)
-        await ctx.send_resource_list_changed()
+        if _register_resource(path):
+            await ctx.send_resource_list_changed()
         emit(CONTENT_CREATED, path)
         logger.info(f"Created: {path}")
         return f"Created: {path}"
@@ -169,12 +197,13 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
         is_new = not filesystem.file_exists(path)
         filesystem.write_file(path, content)
         if is_new:
-            _register_resource(path)
-            await ctx.send_resource_list_changed()
+            if _register_resource(path):
+                await ctx.send_resource_list_changed()
             emit(CONTENT_CREATED, path)
         else:
-            uri = AnyUrl(f"stash://{path}")
-            await ctx.session.send_resource_updated(uri=uri)
+            if _is_resource_file(path):
+                uri = AnyUrl(f"stash://{path}")
+                await ctx.session.send_resource_updated(uri=uri)
             emit(CONTENT_UPDATED, path)
         logger.info(f"Updated: {path}")
         return f"Updated: {path}"
@@ -190,8 +219,8 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             path: File path relative to content root
         """
         filesystem.delete_file(path)
-        _unregister_resource(path)
-        await ctx.send_resource_list_changed()
+        if _unregister_resource(path):
+            await ctx.send_resource_list_changed()
         emit(CONTENT_DELETED, path)
         logger.info(f"Deleted: {path}")
         return f"Deleted: {path}"
@@ -235,9 +264,10 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
             dest_path: New file path relative to content root
         """
         filesystem.move_file(source_path, dest_path)
-        _unregister_resource(source_path)
-        _register_resource(dest_path)
-        await ctx.send_resource_list_changed()
+        source_was_resource = _unregister_resource(source_path)
+        dest_is_resource = _register_resource(dest_path)
+        if source_was_resource or dest_is_resource:
+            await ctx.send_resource_list_changed()
         emit(CONTENT_MOVED, dest_path, source_path=source_path)
         logger.info(f"Moved: {source_path} -> {dest_path}")
         return f"Moved: {source_path} -> {dest_path}"
