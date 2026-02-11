@@ -267,24 +267,27 @@ async def test_resources_filtered_by_include_patterns(temp_fs):
     """Test that when patterns are set, only matching README.md files are
     registered as MCP resources."""
     # Write files of different types
-    temp_fs.write_file("docs/README.md", "# Guide")
+    temp_fs.write_file("docs/README.md", "# Docs Guide")
+    temp_fs.write_file("docs/other.md", "# Other Doc")
     temp_fs.write_file("api/README.md", "# API")
     temp_fs.write_file("notes/README.md", "# Notes")
     temp_fs.write_file("data.json", '{"key": "value"}')
 
     # Create a new filesystem with patterns, using the same content directory
+    # Pattern matches docs directory, but only README.md should be registered
     filtered_fs = FileSystem(temp_fs.content_dir, include_patterns=["docs/**/*"])
     mcp = create_mcp_server(filtered_fs)
 
     resources = await mcp.get_resources()
     uris = list(resources.keys())
 
-    # Only docs/README.md should be registered (it matches the pattern and is a README.md)
+    # Only docs/README.md should be registered (matches pattern AND is README.md)
     assert "stash://docs/README.md" in uris
-    # These should NOT be registered (outside the pattern)
-    assert "stash://api/README.md" not in uris
-    assert "stash://notes/README.md" not in uris
-    assert "stash://data.json" not in uris
+    # These should NOT be registered
+    assert "stash://docs/other.md" not in uris  # matches pattern but not README.md
+    assert "stash://api/README.md" not in uris  # is README.md but outside pattern
+    assert "stash://notes/README.md" not in uris  # is README.md but outside pattern
+    assert "stash://data.json" not in uris  # outside pattern and not README.md
 
 
 async def test_tools_emit_events(mcp_server, temp_fs, mock_context):
