@@ -334,6 +334,24 @@ class SearchEngine:
         self._embedder = None
         self._filesystem = filesystem
 
+        # Validate embedding dependencies at init time so we fail fast
+        # rather than crashing on first file operation.
+        if self._embed_fn is None:
+            try:
+                import numpy as np  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "numpy is required for semantic search. "
+                    "Install with: pip install 'stash-mcp[search]'"
+                )
+            try:
+                from pydantic_ai import Embedder  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "pydantic-ai is required for semantic search. "
+                    "Install with: pip install 'stash-mcp[search]'"
+                )
+
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.store = VectorStore(index_dir / "vectors.pkl")
         self.meta = IndexMeta.load(index_dir / "index_meta.json")
