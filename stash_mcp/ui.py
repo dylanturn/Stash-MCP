@@ -9,6 +9,7 @@ import markdown as md
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileSystem
 from .mcp_server import MIME_TYPES
 
@@ -984,7 +985,9 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
         """Save file content (create or update)."""
         path = path.strip("/")
         try:
+            is_new = not filesystem.file_exists(path)
             filesystem.write_file(path, content)
+            emit(CONTENT_CREATED if is_new else CONTENT_UPDATED, path)
         except Exception as exc:
             logger.error(f"UI save error: {exc}")
             # Fall back to edit page with error shown via redirect
@@ -999,6 +1002,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
         destination = destination.strip("/")
         try:
             filesystem.move_file(path, destination)
+            emit(CONTENT_MOVED, destination, source_path=path)
         except Exception as exc:
             logger.error(f"UI move error: {exc}")
             return RedirectResponse(url=f"/ui/browse/{path}", status_code=303)
@@ -1014,6 +1018,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
             parent = ""
         try:
             filesystem.delete_file(path)
+            emit(CONTENT_DELETED, path)
         except Exception as exc:
             logger.error(f"UI delete error: {exc}")
         return RedirectResponse(url=f"/ui/browse/{parent}", status_code=303)

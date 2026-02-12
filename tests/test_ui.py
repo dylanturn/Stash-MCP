@@ -305,3 +305,78 @@ class TestUIFeatures:
         body = response.text
         assert "scrollbar-width:thin" in body
         assert "::-webkit-scrollbar" in body
+
+
+class TestUIEvents:
+    """Tests for event emission from UI mutation routes."""
+
+    @pytest.fixture
+    def ui_client_with_listener(self):
+        """Create a test client with event listener attached."""
+        from unittest.mock import MagicMock
+
+        from stash_mcp.events import _listeners, add_listener
+
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("hello.md", "# Hello World")
+
+            app = create_api(fs)
+            router = create_ui_router(fs)
+            app.include_router(router)
+            client = TestClient(app)
+
+            listener = MagicMock()
+            add_listener(listener)
+            yield client, listener
+            _listeners.remove(listener)
+
+    def test_ui_save_new_file_emits_created(self, ui_client_with_listener):
+        """POST /ui/save for a new file emits content_created event."""
+        client, listener = ui_client_with_listener
+        client.post(
+            "/ui/save",
+            data={"path": "new.md", "content": "# New"},
+            follow_redirects=False,
+        )
+        listener.assert_called_once()
+        args = listener.call_args[0]
+        assert args[0] == "content_created"
+        assert args[1] == "new.md"
+
+    def test_ui_save_existing_file_emits_updated(self, ui_client_with_listener):
+        """POST /ui/save for an existing file emits content_updated event."""
+        client, listener = ui_client_with_listener
+        client.post(
+            "/ui/save",
+            data={"path": "hello.md", "content": "# Updated"},
+            follow_redirects=False,
+        )
+        listener.assert_called_once()
+        args = listener.call_args[0]
+        assert args[0] == "content_updated"
+        assert args[1] == "hello.md"
+
+    def test_ui_delete_emits_deleted(self, ui_client_with_listener):
+        """POST /ui/delete emits content_deleted event."""
+        client, listener = ui_client_with_listener
+        client.post("/ui/delete/hello.md", follow_redirects=False)
+        listener.assert_called_once()
+        args = listener.call_args[0]
+        assert args[0] == "content_deleted"
+        assert args[1] == "hello.md"
+
+    def test_ui_move_emits_moved(self, ui_client_with_listener):
+        """POST /ui/move emits content_moved event with correct kwargs."""
+        client, listener = ui_client_with_listener
+        client.post(
+            "/ui/move/hello.md",
+            data={"destination": "renamed.md"},
+            follow_redirects=False,
+        )
+        listener.assert_called_once()
+        args = listener.call_args[0]
+        kwargs = listener.call_args[1]
+        assert args[0] == "content_moved"
+        assert args[1] == "renamed.md"
+        assert kwargs.get("source_path") == "hello.md"
