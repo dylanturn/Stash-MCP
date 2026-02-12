@@ -38,19 +38,19 @@ dev = [
     "numpy>=1.26.0",
 ]
 search = [
-    "pydantic-ai-slim[sentence-transformers]>=0.1.0",
+    "pydantic-ai-slim[sentence-transformers]>=1.56.0",
     "numpy>=1.26.0",
 ]
 search-openai = [
-    "pydantic-ai-slim[openai]>=0.1.0",
+    "pydantic-ai-slim[openai]>=1.56.0",
     "numpy>=1.26.0",
 ]
 search-cohere = [
-    "pydantic-ai-slim[cohere]>=0.1.0",
+    "pydantic-ai-slim[cohere]>=1.56.0",
     "numpy>=1.26.0",
 ]
 search-contextual = [
-    "pydantic-ai-slim[sentence-transformers]>=0.1.0",
+    "pydantic-ai-slim[sentence-transformers]>=1.56.0",
     "anthropic>=0.40.0",
     "numpy>=1.26.0",
 ]
