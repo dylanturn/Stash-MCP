@@ -11,6 +11,22 @@ from stash_mcp.filesystem import FileSystem
 from stash_mcp.ui import create_ui_router
 
 
+# Simple mock embedding for search-enabled UI tests
+async def _mock_embed(texts: list[str]) -> list[list[float]]:
+    keywords = [
+        "auth", "oauth", "flow", "meeting", "notes",
+        "config", "database", "test", "search", "content",
+        "section", "project", "file", "data", "code", "doc",
+    ]
+    embeddings = []
+    for text in texts:
+        text_lower = text.lower()
+        vec = [float(text_lower.count(kw)) for kw in keywords]
+        vec[0] += 0.1
+        embeddings.append(vec)
+    return embeddings
+
+
 @pytest.fixture
 def ui_client():
     """Create a test client with UI router and temporary filesystem."""
@@ -271,8 +287,99 @@ class TestUISearch:
         response = ui_client.get("/ui/browse/")
         body = response.text
         assert "tree-search" in body
+        assert "handleSearch" in body
+
+    def test_sidebar_without_search_engine_has_filename_filter(self, ui_client):
+        """Without search engine, sidebar uses file name placeholder."""
+        response = ui_client.get("/ui/browse/")
+        body = response.text
         assert "Search files..." in body
-        assert "filterTree" in body
+        assert 'data-vector-search="true"' not in body
+        assert 'id="search-results"' not in body
+
+    def test_sidebar_with_search_engine_has_vector_search(self):
+        """With search engine, sidebar uses vector search placeholder and container."""
+        from stash_mcp.search import SearchEngine
+
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as idx_dir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("hello.md", "# Hello World")
+            engine = SearchEngine(
+                content_dir=Path(tmpdir),
+                index_dir=Path(idx_dir),
+                embed_fn=_mock_embed,
+            )
+            app = create_api(fs)
+            router = create_ui_router(fs, search_engine=engine)
+            app.include_router(router)
+            client = TestClient(app)
+            response = client.get("/ui/browse/")
+            body = response.text
+            assert "Search content" in body
+            assert "data-vector-search" in body
+            assert 'id="search-results"' in body
+
+    def test_ui_search_endpoint_returns_results(self):
+        """GET /ui/search returns vector search results as JSON."""
+        from stash_mcp.search import SearchEngine
+
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as idx_dir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("docs/auth.md", "# Auth\n\nOAuth2 flow here.")
+            fs.write_file("notes.md", "# Meeting Notes\n\nDiscussed timeline.")
+            engine = SearchEngine(
+                content_dir=Path(tmpdir),
+                index_dir=Path(idx_dir),
+                embed_fn=_mock_embed,
+                filesystem=fs,
+            )
+            app = create_api(fs)
+            router = create_ui_router(fs, search_engine=engine)
+            app.include_router(router)
+            client = TestClient(app)
+
+            # Build index first
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(
+                engine.build_index(fs.list_all_files())
+            )
+
+            response = client.get("/ui/search", params={"q": "authentication OAuth"})
+            assert response.status_code == 200
+            data = response.json()
+            assert "results" in data
+            assert data["total"] > 0
+            result = data["results"][0]
+            assert "file_path" in result
+            assert "content" in result
+            assert "score" in result
+
+    def test_ui_search_empty_query_returns_empty(self):
+        """GET /ui/search with empty query returns empty results."""
+        from stash_mcp.search import SearchEngine
+
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as idx_dir:
+            fs = FileSystem(Path(tmpdir))
+            engine = SearchEngine(
+                content_dir=Path(tmpdir),
+                index_dir=Path(idx_dir),
+                embed_fn=_mock_embed,
+            )
+            app = create_api(fs)
+            router = create_ui_router(fs, search_engine=engine)
+            app.include_router(router)
+            client = TestClient(app)
+
+            response = client.get("/ui/search", params={"q": ""})
+            assert response.status_code == 200
+            data = response.json()
+            assert data["results"] == []
+            assert data["total"] == 0
+
+    def test_no_search_endpoint_without_engine(self, ui_client):
+        """GET /ui/search returns 404 when search engine is not enabled."""
+        response = ui_client.get("/ui/search", params={"q": "test"})
+        assert response.status_code in (404, 405)
 
 
 class TestUIFeatures:

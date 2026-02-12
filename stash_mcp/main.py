@@ -95,7 +95,7 @@ def create_app():
             yield
 
     app = create_api(filesystem, lifespan=_combined_lifespan, search_engine=search_engine)
-    ui_router = create_ui_router(filesystem)
+    ui_router = create_ui_router(filesystem, search_engine=search_engine)
     app.include_router(ui_router)
 
     # Mount FastMCP server onto FastAPI for streamable HTTP transport
