@@ -386,8 +386,8 @@ class TestSearchEngine:
         assert isinstance(result, list)
         assert len(result) == 16  # 16-dim vectors from mock_embed
 
-    async def test_stale_index_not_ready_after_model_change(self, engine_dirs):
-        """Test that changing embedder model sets _ready = False."""
+    async def test_stale_index_cleared_on_model_change(self, engine_dirs):
+        """Test that changing embedder model clears stale index for rebuild."""
         content_dir, index_dir = engine_dirs
         (content_dir / "test.md").write_text("# Test\n\nContent here.")
 
@@ -398,17 +398,27 @@ class TestSearchEngine:
         )
         await engine1.build_index(["test.md"])
         assert engine1.ready
+        assert engine1.store.count > 0
 
-        # Create engine with model B — stale index, should not be ready
+        # Create engine with model B — stale index should be cleared
         engine2 = SearchEngine(
             content_dir=content_dir, index_dir=index_dir,
             embedder_model="model-b", embed_fn=mock_embed,
         )
         assert not engine2.ready
+        assert engine2.store.count == 0
+        assert engine2.meta.file_hashes == {}
+        assert engine2.meta.embedder_model == ""
 
         # Search should return empty when not ready
         results = await engine2.search("anything")
         assert results == []
+
+        # build_index should re-embed all files (no skipping due to stale hash)
+        chunks = await engine2.build_index(["test.md"])
+        assert chunks > 0
+        assert engine2.ready
+        assert engine2.store.count > 0
 
     async def test_reindex_with_filesystem_filtering(self, engine_dirs):
         """Test that reindex uses FileSystem when provided."""

@@ -356,15 +356,17 @@ class SearchEngine:
         self.store = VectorStore(index_dir / "vectors.pkl")
         self.meta = IndexMeta.load(index_dir / "index_meta.json")
 
-        # If embedder model changed, refuse queries until reindexed
+        # If embedder model changed, clear stale index for rebuild
         if self.meta.embedder_model and self.meta.embedder_model != embedder_model:
             logger.warning(
                 f"Embedder model changed from '{self.meta.embedder_model}' "
-                f"to '{embedder_model}'. Index invalidated — reindex required."
+                f"to '{embedder_model}'. Clearing stale index for rebuild."
             )
-            self._ready = False
-        else:
-            self._ready = self.store.count > 0
+            self.store.clear()
+            self.meta = IndexMeta()
+            self.meta.save(self.index_dir / "index_meta.json")
+
+        self._ready = self.store.count > 0
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of document texts using the configured embedder.
