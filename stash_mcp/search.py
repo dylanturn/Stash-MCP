@@ -570,14 +570,12 @@ class SearchEngine:
         file_paths = []
         if self.content_dir.exists():
             for item in self.content_dir.rglob("*"):
-                if item.is_file() and not any(
-                    part.startswith(".") for part in item.relative_to(
-                        self.content_dir
-                    ).parts
-                ):
-                    file_paths.append(
-                        str(item.relative_to(self.content_dir))
-                    )
+                if not item.is_file():
+                    continue
+                rel = item.relative_to(self.content_dir)
+                if any(part.startswith(".") for part in rel.parts):
+                    continue
+                file_paths.append(str(rel))
 
         return await self.build_index(sorted(file_paths))
 

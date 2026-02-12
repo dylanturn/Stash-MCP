@@ -239,9 +239,10 @@ class TestIndexMeta:
 
     def test_load_missing_file(self):
         """Test loading from a missing file returns empty."""
-        meta = IndexMeta.load(Path("/tmp/nonexistent_meta.json"))
-        assert meta.file_hashes == {}
-        assert meta.chunk_counts == {}
+        with TemporaryDirectory() as tmpdir:
+            meta = IndexMeta.load(Path(tmpdir) / "nonexistent_meta.json")
+            assert meta.file_hashes == {}
+            assert meta.chunk_counts == {}
 
 
 # --- Content hash tests ---

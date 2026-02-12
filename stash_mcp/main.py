@@ -74,6 +74,7 @@ def create_app():
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
+                logger.debug("No running event loop; skipping search index update")
                 return
             if event_type in ("content_created", "content_updated"):
                 loop.create_task(search_engine.index_file(path))
