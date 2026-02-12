@@ -583,6 +583,9 @@ function handleSearch(query){
               +'</a>';
           });
           box.innerHTML=h;
+        }else if(data.indexing){
+          box.innerHTML='<div class="search-no-results">'
+            +'Search index is being rebuilt\u2026 please try again shortly.</div>';
         }else{
           box.innerHTML='<div class="search-no-results">No results found</div>';
         }
@@ -942,6 +945,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                         for r in results
                     ],
                     "total": len(results),
+                    "indexing": search_engine.indexing,
                 }
             )
 

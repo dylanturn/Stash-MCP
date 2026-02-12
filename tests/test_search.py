@@ -420,6 +420,21 @@ class TestSearchEngine:
         assert engine2.ready
         assert engine2.store.count > 0
 
+    async def test_indexing_flag_during_build(self, engine_dirs):
+        """Test that indexing property is True during build_index."""
+        content_dir, index_dir = engine_dirs
+        (content_dir / "test.md").write_text("# Test\n\nContent here.")
+
+        engine = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embed_fn=mock_embed,
+        )
+        assert not engine.indexing
+        await engine.build_index(["test.md"])
+        # After build completes, indexing should be False
+        assert not engine.indexing
+        assert engine.ready
+
     async def test_reindex_with_filesystem_filtering(self, engine_dirs):
         """Test that reindex uses FileSystem when provided."""
         content_dir, index_dir = engine_dirs
@@ -501,6 +516,7 @@ class TestSearchAPI:
         data = response.json()
         assert data["enabled"] is True
         assert data["ready"] is True
+        assert data["indexing"] is False
         assert "indexed_files" in data
         assert "indexed_chunks" in data
 

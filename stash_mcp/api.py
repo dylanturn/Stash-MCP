@@ -336,6 +336,7 @@ def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> Fas
             return {
                 "enabled": True,
                 "ready": search_engine.ready,
+                "indexing": search_engine.indexing,
                 "contextual_retrieval": search_engine.contextual_retrieval,
                 "embedder_model": search_engine.embedder_model,
                 "indexed_files": search_engine.indexed_files,

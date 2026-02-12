@@ -367,6 +367,7 @@ class SearchEngine:
             self.meta.save(self.index_dir / "index_meta.json")
 
         self._ready = self.store.count > 0
+        self._indexing = False
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of document texts using the configured embedder.
@@ -477,33 +478,37 @@ class SearchEngine:
         Returns:
             Total number of chunks indexed.
         """
+        self._indexing = True
         total_chunks = 0
 
-        for rel_path in file_paths:
-            full_path = self.content_dir / rel_path
-            if not full_path.is_file():
-                continue
+        try:
+            for rel_path in file_paths:
+                full_path = self.content_dir / rel_path
+                if not full_path.is_file():
+                    continue
 
-            try:
-                content = full_path.read_text(encoding="utf-8")
-            except Exception as e:
-                logger.warning(f"Could not read {rel_path}: {e}")
-                continue
+                try:
+                    content = full_path.read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.warning(f"Could not read {rel_path}: {e}")
+                    continue
 
-            content_h = _content_hash(content)
+                content_h = _content_hash(content)
 
-            # Skip if unchanged
-            if self.meta.file_hashes.get(rel_path) == content_h:
-                total_chunks += self.meta.chunk_counts.get(rel_path, 0)
-                continue
+                # Skip if unchanged
+                if self.meta.file_hashes.get(rel_path) == content_h:
+                    total_chunks += self.meta.chunk_counts.get(rel_path, 0)
+                    continue
 
-            chunks_added = await self.index_file(rel_path, content=content)
-            total_chunks += chunks_added
+                chunks_added = await self.index_file(rel_path, content=content)
+                total_chunks += chunks_added
 
-        self.meta.embedder_model = self.embedder_model
-        self.meta.save(self.index_dir / "index_meta.json")
-        self._ready = True
-        return total_chunks
+            self.meta.embedder_model = self.embedder_model
+            self.meta.save(self.index_dir / "index_meta.json")
+            self._ready = True
+            return total_chunks
+        finally:
+            self._indexing = False
 
     async def index_file(
         self, relative_path: str, *, content: str | None = None
@@ -655,6 +660,11 @@ class SearchEngine:
     def ready(self) -> bool:
         """Whether the index is built and ready for queries."""
         return self._ready
+
+    @property
+    def indexing(self) -> bool:
+        """Whether the index is currently being built."""
+        return self._indexing
 
     @property
     def indexed_files(self) -> int:
