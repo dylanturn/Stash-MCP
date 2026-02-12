@@ -11,7 +11,11 @@ COPY pyproject.toml uv.lock README.md ./
 COPY stash_mcp ./stash_mcp
 
 # Install dependencies with uv
-RUN uv sync --frozen --no-dev
+# Use --extra search to include semantic search support (numpy + pydantic-ai).
+# Override SEARCH_EXTRA at build time to use a different provider:
+#   docker build --build-arg SEARCH_EXTRA=search-openai .
+ARG SEARCH_EXTRA=search
+RUN uv sync --frozen --no-dev --extra ${SEARCH_EXTRA}
 
 # Create content directory
 RUN mkdir -p /data/content
