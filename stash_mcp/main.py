@@ -5,6 +5,7 @@ import logging
 import os
 
 import uvicorn
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api import create_api
 from .config import Config
@@ -77,6 +78,21 @@ def create_app():
 
     # Mount FastMCP server onto FastAPI for streamable HTTP transport
     app.mount("/mcp", mcp_http_app)
+
+    # Normalize /mcp → /mcp/ so the mounted sub-app handles requests to
+    # both paths without a 307 redirect.  Redirects can break MCP clients
+    # behind reverse proxies (e.g. Cloudflare) that drop the request body.
+    class _MCPSlashMiddleware:
+        def __init__(self, app: ASGIApp) -> None:
+            self.app = app
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "http" and scope["path"] == "/mcp":
+                scope = dict(scope)
+                scope["path"] = "/mcp/"
+            await self.app(scope, receive, send)
+
+    app.add_middleware(_MCPSlashMiddleware)
 
     # Wire event bus: REST mutations emit MCP resource notifications
     def on_content_changed(event_type: str, path: str, **kwargs: str) -> None:
