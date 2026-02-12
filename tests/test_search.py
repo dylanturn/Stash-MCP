@@ -425,12 +425,20 @@ class TestSearchEngine:
         content_dir, index_dir = engine_dirs
         (content_dir / "test.md").write_text("# Test\n\nContent here.")
 
+        seen_indexing = []
+
+        async def tracking_embed(texts):
+            seen_indexing.append(engine.indexing)
+            return await mock_embed(texts)
+
         engine = SearchEngine(
             content_dir=content_dir, index_dir=index_dir,
-            embed_fn=mock_embed,
+            embed_fn=tracking_embed,
         )
         assert not engine.indexing
         await engine.build_index(["test.md"])
+        # Flag was True during embedding
+        assert any(seen_indexing), "indexing should be True during build"
         # After build completes, indexing should be False
         assert not engine.indexing
         assert engine.ready
