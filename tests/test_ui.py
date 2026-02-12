@@ -320,6 +320,8 @@ class TestUISearch:
             assert 'id="search-results"' in body
             assert "data.indexing" in body
             assert "index is being rebuilt" in body
+            assert "search-spinner" in body
+            assert "search-loading" in body
 
     def test_ui_search_endpoint_returns_results(self):
         """GET /ui/search returns vector search results as JSON."""
