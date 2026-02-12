@@ -64,12 +64,13 @@ class TreeNode(BaseModel):
     children: list["TreeNode"] | None = None
 
 
-def create_api(filesystem: FileSystem, lifespan=None) -> FastAPI:
+def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> FastAPI:
     """Create FastAPI application.
 
     Args:
         filesystem: Filesystem instance
         lifespan: Optional lifespan context manager for the app
+        search_engine: Optional SearchEngine instance for semantic search
 
     Returns:
         FastAPI application
@@ -289,5 +290,65 @@ def create_api(filesystem: FileSystem, lifespan=None) -> FastAPI:
         except Exception as e:
             logger.error(f"Error moving content: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
+
+    # --- Search endpoints (only when search engine is available) ---
+
+    if search_engine is not None:
+
+        @app.get("/api/search")
+        async def search_content(
+            q: str,
+            max_results: int = 5,
+            file_types: str | None = None,
+        ):
+            """Semantic search across stashed content.
+
+            Args:
+                q: Search query.
+                max_results: Maximum number of results (default 5).
+                file_types: Comma-separated file extensions (e.g. ".md,.py").
+            """
+            types_list = None
+            if file_types:
+                types_list = [t.strip() for t in file_types.split(",") if t.strip()]
+
+            results = await search_engine.search(
+                q, max_results=max_results, file_types=types_list
+            )
+            return {
+                "query": q,
+                "results": [
+                    {
+                        "file_path": r.file_path,
+                        "chunk_index": r.chunk_index,
+                        "content": r.content,
+                        "context": r.context,
+                        "score": r.score,
+                    }
+                    for r in results
+                ],
+                "total": len(results),
+            }
+
+        @app.get("/api/search/status")
+        async def search_status():
+            """Get search engine status."""
+            return {
+                "enabled": True,
+                "ready": search_engine.ready,
+                "contextual_retrieval": search_engine.contextual_retrieval,
+                "embedder_model": search_engine.embedder_model,
+                "indexed_files": search_engine.indexed_files,
+                "indexed_chunks": search_engine.indexed_chunks,
+            }
+
+        @app.post("/api/search/reindex")
+        async def reindex():
+            """Trigger a full reindex."""
+            total = await search_engine.reindex()
+            return {
+                "message": "Reindex complete",
+                "indexed_chunks": total,
+            }
 
     return app

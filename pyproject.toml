@@ -23,6 +23,7 @@ dependencies = [
     "pydantic>=2.9.0",
     "python-multipart>=0.0.9",
     "markdown>=3.7",
+    "numpy>=1.26.0",
 ]
 
 [project.scripts]
@@ -35,6 +36,19 @@ dev = [
     "pytest-cov>=6.0.0",
     "httpx>=0.27.0",
     "ruff>=0.7.0",
+]
+search = [
+    "pydantic-ai-slim[sentence-transformers]>=0.1.0",
+]
+search-openai = [
+    "pydantic-ai-slim[openai]>=0.1.0",
+]
+search-cohere = [
+    "pydantic-ai-slim[cohere]>=0.1.0",
+]
+search-contextual = [
+    "pydantic-ai-slim[sentence-transformers]>=0.1.0",
+    "anthropic>=0.40.0",
 ]
 
 [build-system]
