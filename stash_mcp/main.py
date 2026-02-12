@@ -34,6 +34,7 @@ def _create_search_engine():
             index_dir=Config.SEARCH_INDEX_DIR,
             embedder_model=Config.SEARCH_EMBEDDER_MODEL,
             contextual_retrieval=Config.CONTEXTUAL_RETRIEVAL,
+            contextual_model=Config.CONTEXTUAL_MODEL,
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
         )
         logger.info(
@@ -46,6 +47,16 @@ def _create_search_engine():
         return None
 
 
+def _task_done_callback(task: asyncio.Task) -> None:
+    """Log exceptions from background tasks."""
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc is not None:
+        logger.error(f"Background task {task.get_name()} failed: {exc}", exc_info=exc)
+
+
 def create_app():
     """Create and configure the FastAPI application."""
     Config.ensure_content_dir()
@@ -53,6 +64,8 @@ def create_app():
 
     # Optionally create search engine
     search_engine = _create_search_engine()
+    if search_engine is not None:
+        search_engine._filesystem = filesystem
 
     # Create MCP http app first so we can wire its lifespan into FastAPI
     mcp = create_mcp_server(filesystem, search_engine=search_engine)
@@ -77,16 +90,33 @@ def create_app():
                 logger.debug("No running event loop; skipping search index update")
                 return
             if event_type in ("content_created", "content_updated"):
-                loop.create_task(search_engine.index_file(path))
+                task = loop.create_task(search_engine.index_file(path))
+                task.add_done_callback(_task_done_callback)
             elif event_type == "content_deleted":
-                loop.create_task(search_engine.remove_file(path))
+                task = loop.create_task(search_engine.remove_file(path))
+                task.add_done_callback(_task_done_callback)
             elif event_type == "content_moved":
                 source_path = kwargs.get("source_path", "")
                 if source_path:
-                    loop.create_task(search_engine.remove_file(source_path))
-                loop.create_task(search_engine.index_file(path))
+                    task = loop.create_task(search_engine.remove_file(source_path))
+                    task.add_done_callback(_task_done_callback)
+                task = loop.create_task(search_engine.index_file(path))
+                task.add_done_callback(_task_done_callback)
 
     add_listener(on_content_changed)
+
+    # Startup: build search index in background (non-blocking)
+    if search_engine is not None:
+
+        @app.on_event("startup")
+        async def _build_search_index():
+            async def _do_build():
+                files = filesystem.list_all_files()
+                total = await search_engine.build_index(files)
+                logger.info(f"Startup search index build complete: {total} chunks")
+
+            task = asyncio.create_task(_do_build())
+            task.add_done_callback(_task_done_callback)
 
     return app
 

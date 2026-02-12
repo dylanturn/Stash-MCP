@@ -318,5 +318,7 @@ def test_event_emitted_on_patch_move(test_client, event_listener):
     test_client.patch("/api/content/test.md", json={"destination": "moved.md"})
     event_listener.assert_called_once()
     args = event_listener.call_args[0]
+    kwargs = event_listener.call_args[1]
     assert args[0] == "content_moved"
-    assert args[1] == "test.md"
+    assert args[1] == "moved.md"
+    assert kwargs.get("source_path") == "test.md"

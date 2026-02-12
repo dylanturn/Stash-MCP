@@ -380,7 +380,54 @@ class TestSearchEngine:
         assert engine2.indexed_chunks > 0
         assert engine2.ready
 
-    async def test_search_result_fields(self, engine):
+    async def test_embed_query_uses_mock(self, engine):
+        """Test that _embed_query delegates to the mock embed function."""
+        result = await engine._embed_query("authentication")
+        assert isinstance(result, list)
+        assert len(result) == 16  # 16-dim vectors from mock_embed
+
+    async def test_stale_index_not_ready_after_model_change(self, engine_dirs):
+        """Test that changing embedder model sets _ready = False."""
+        content_dir, index_dir = engine_dirs
+        (content_dir / "test.md").write_text("# Test\n\nContent here.")
+
+        # Build index with model A
+        engine1 = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-a", embed_fn=mock_embed,
+        )
+        await engine1.build_index(["test.md"])
+        assert engine1.ready
+
+        # Create engine with model B — stale index, should not be ready
+        engine2 = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-b", embed_fn=mock_embed,
+        )
+        assert not engine2.ready
+
+        # Search should return empty when not ready
+        results = await engine2.search("anything")
+        assert results == []
+
+    async def test_reindex_with_filesystem_filtering(self, engine_dirs):
+        """Test that reindex uses FileSystem when provided."""
+        content_dir, index_dir = engine_dirs
+        (content_dir / "included.md").write_text("# Included\n\nMD content.")
+        (content_dir / "excluded.py").write_text("# Excluded\nprint('hello')\n")
+
+        from stash_mcp.filesystem import FileSystem
+        fs = FileSystem(content_dir, include_patterns=["*.md"])
+
+        engine = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embed_fn=mock_embed, filesystem=fs,
+        )
+        total = await engine.reindex()
+        assert total > 0
+        # Only .md files should be indexed
+        assert "included.md" in engine.meta.file_hashes
+        assert "excluded.py" not in engine.meta.file_hashes
         """Test that search results contain all expected fields."""
         await engine.build_index(["docs/auth.md", "notes.md"])
         results = await engine.search("authentication OAuth flow")
@@ -605,3 +652,4 @@ class TestSearchConfig:
         assert Config.SEARCH_INDEX_DIR == Path("/data/.stash-index")
         assert "sentence-transformers" in Config.SEARCH_EMBEDDER_MODEL
         assert Config.CONTEXTUAL_RETRIEVAL is False
+        assert Config.CONTEXTUAL_MODEL == "claude-haiku-4-5-20251001"
