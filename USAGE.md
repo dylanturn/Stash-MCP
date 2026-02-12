@@ -220,6 +220,7 @@ When search is enabled, the server:
 2. **Keeps the index up-to-date** — File creates, updates, and deletes automatically update the search index
 3. **Persists the index to disk** — The vector index is saved to `STASH_SEARCH_INDEX_DIR` and reloaded on restart
 4. **Skips unchanged files** — Incremental indexing only re-embeds files whose content has changed
+5. **Auto-reindexes on model change** — If `STASH_SEARCH_EMBEDDER_MODEL` changes between restarts, the stale index is automatically cleared and rebuilt with the new model
 
 ### Using Search via MCP
 
