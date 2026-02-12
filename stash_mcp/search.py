@@ -16,6 +16,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Maximum characters to pass to contextual retrieval model (~200k tokens ≈ 150k chars)
+MAX_CONTEXTUAL_DOCUMENT_CHARS = 150_000
+
 
 @dataclass
 class ChunkMetadata:
@@ -417,10 +420,9 @@ class SearchEngine:
         try:
             import anthropic
 
-            # Truncate document to stay within context window (~200k tokens ≈ 150k chars)
-            max_doc_chars = 150_000
-            if len(full_document) > max_doc_chars:
-                full_document = full_document[:max_doc_chars] + "\n...[truncated]"
+            # Truncate document to stay within context window
+            if len(full_document) > MAX_CONTEXTUAL_DOCUMENT_CHARS:
+                full_document = full_document[:MAX_CONTEXTUAL_DOCUMENT_CHARS] + "\n...[truncated]"
 
             client = anthropic.AsyncAnthropic(api_key=self.anthropic_api_key)
             prompt = (
