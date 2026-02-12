@@ -57,6 +57,9 @@ class Config:
     CONTEXTUAL_RETRIEVAL: bool = (
         os.getenv("STASH_CONTEXTUAL_RETRIEVAL", "false").lower() == "true"
     )
+    CONTEXTUAL_MODEL: str = os.getenv(
+        "STASH_CONTEXTUAL_MODEL", "claude-haiku-4-5-20251001"
+    )
 
     @classmethod
     def ensure_content_dir(cls) -> None:

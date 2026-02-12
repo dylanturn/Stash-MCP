@@ -9,6 +9,7 @@ import markdown as md
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileSystem
 from .mcp_server import MIME_TYPES
 
@@ -298,6 +299,17 @@ transition:background 150ms ease,transform 150ms ease}
 border:1px solid #313244;border-radius:6px;font-size:13px;outline:none;
 transition:border-color 150ms ease,box-shadow 150ms ease}
 .search-input:focus{border-color:#94e2d5;box-shadow:0 0 0 2px rgba(148,226,213,0.1)}
+.search-results{margin-top:6px;display:none}
+.search-results.active{display:block}
+.search-result{display:block;padding:6px 10px;margin:2px 0;border-radius:4px;
+color:#cdd6f4;text-decoration:none;font-size:12px;background:#1e1e2e;
+border:1px solid #313244;transition:background 150ms ease,border-color 150ms ease}
+.search-result:hover{background:#2e2e42;border-color:#94e2d5;text-decoration:none}
+.search-result-path{font-weight:600;color:#94e2d5;display:block;margin-bottom:2px}
+.search-result-snippet{color:#a6adc8;font-size:11px;line-height:1.4;
+display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.search-result-score{font-size:10px;color:#585b70;margin-top:2px}
+.search-no-results{padding:8px 10px;color:#585b70;font-size:12px;font-style:italic}
 
 .center{flex:1;overflow-y:auto;display:flex;flex-direction:column}
 .panel-toggle{background:none;border:none;color:#7f849c;cursor:pointer;
@@ -538,6 +550,48 @@ function filterTree(query){
     }else{file.style.display='none';}
   });
 }
+var _searchTimer=null;
+var _vectorEnabled=!!document.querySelector('[data-vector-search]');
+function _escHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function handleSearch(query){
+  if(!_vectorEnabled){filterTree(query);return;}
+  clearTimeout(_searchTimer);
+  var box=document.getElementById('search-results');
+  var tree=document.querySelector('.tree-root');
+  if(!query){
+    if(box)box.classList.remove('active');
+    if(tree)tree.style.display='';
+    filterTree('');
+    return;
+  }
+  _searchTimer=setTimeout(function(){
+    fetch('/ui/search?q='+encodeURIComponent(query))
+      .then(function(r){return r.json();})
+      .then(function(data){
+        if(!box)return;
+        if(data.results&&data.results.length>0){
+          var h='';
+          data.results.forEach(function(r){
+            var snippet=r.content||'';
+            if(snippet.length>120)snippet=snippet.substring(0,120)+'…';
+            h+='<a class="search-result" href="/ui/browse/'+encodeURIComponent(r.file_path)+'">'
+              +'<span class="search-result-path">'+_escHtml(r.file_path)+'</span>'
+              +'<span class="search-result-snippet">'+_escHtml(snippet)+'</span>'
+              +'</a>';
+          });
+          box.innerHTML=h;
+        }else{
+          box.innerHTML='<div class="search-no-results">No results found</div>';
+        }
+        box.classList.add('active');
+        if(tree)tree.style.display='none';
+      })
+      .catch(function(){filterTree(query);});
+  },300);
+}
 var _unsaved=false;
 (function(){
   var ta=document.querySelector('.editor-area');
@@ -645,16 +699,20 @@ def _page(
 </body></html>"""
 
 
-def _sidebar_html(filesystem: FileSystem, active: str = "") -> str:
+def _sidebar_html(filesystem: FileSystem, active: str = "", search_enabled: bool = False) -> str:
     """Build sidebar HTML with header + search + tree."""
     tree = _build_tree_html(filesystem, active=active)
+    vector_attr = ' data-vector-search="true"' if search_enabled else ""
+    placeholder = "Search content…" if search_enabled else "Search files..."
+    results_div = '<div id="search-results" class="search-results"></div>' if search_enabled else ""
     return (
         '<div class="sidebar-header">'
         f'<a href="/ui/new" class="btn-new">{_icon("plus")} New Document</a>'
-        '<div class="search-box">'
-        '<input type="text" id="tree-search" class="search-input" '
-        'placeholder="Search files..." aria-label="Search files" '
-        'oninput="filterTree(this.value)">'
+        f'<div class="search-box"{vector_attr}>'
+        f'<input type="text" id="tree-search" class="search-input" '
+        f'placeholder="{placeholder}" aria-label="Search" '
+        f'oninput="handleSearch(this.value)">'
+        f"{results_div}"
         "</div>"
         "</div>"
         f'<div class="tree-root">{tree if tree else "<p class=empty-msg>No files yet</p>"}</div>'
@@ -666,15 +724,17 @@ def _sidebar_html(filesystem: FileSystem, active: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
-def create_ui_router(filesystem: FileSystem) -> APIRouter:
+def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
     """Create UI router with content browser & editor.
 
     Args:
         filesystem: Filesystem instance
+        search_engine: Optional SearchEngine for vector search
 
     Returns:
         FastAPI router for UI
     """
+    _search_enabled = search_engine is not None
     router = APIRouter()
 
     # --- redirect /ui to /ui/browse/ ---
@@ -689,7 +749,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
         """Browse a directory or view a file."""
         # Normalise empty / trailing slashes
         path = path.strip("/")
-        sidebar = _sidebar_html(filesystem, active=path)
+        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled)
         breadcrumbs = _breadcrumbs_html(path)
 
         # Determine if path is a directory or a file
@@ -859,12 +919,38 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
         """Browse root directory."""
         return await ui_browse("")
 
+    # --- vector search (JSON for sidebar) ---
+    if search_engine is not None:
+        from fastapi.responses import JSONResponse
+
+        @router.get("/ui/search")
+        async def ui_search(q: str = "", max_results: int = 10):
+            """Search content using the vector search engine."""
+            if not q.strip():
+                return JSONResponse({"results": [], "total": 0})
+            results = await search_engine.search(
+                q.strip(), max_results=max_results
+            )
+            return JSONResponse(
+                {
+                    "results": [
+                        {
+                            "file_path": r.file_path,
+                            "content": r.content[:200] if r.content else "",
+                            "score": round(r.score, 3),
+                        }
+                        for r in results
+                    ],
+                    "total": len(results),
+                }
+            )
+
     # --- edit ---
     @router.get("/ui/edit/{path:path}", response_class=HTMLResponse)
     async def ui_edit(path: str) -> str:
         """Edit an existing file."""
         path = path.strip("/")
-        sidebar = _sidebar_html(filesystem, active=path)
+        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled)
         breadcrumbs = _breadcrumbs_html(path)
 
         try:
@@ -961,7 +1047,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
     @router.get("/ui/new", response_class=HTMLResponse)
     async def ui_new() -> str:
         """Create a new file form."""
-        sidebar = _sidebar_html(filesystem)
+        sidebar = _sidebar_html(filesystem, search_enabled=_search_enabled)
         breadcrumbs = _breadcrumbs_html("")
         center = (
             f'<div class="breadcrumbs">{breadcrumbs}</div>'
@@ -984,7 +1070,9 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
         """Save file content (create or update)."""
         path = path.strip("/")
         try:
+            is_new = not filesystem.file_exists(path)
             filesystem.write_file(path, content)
+            emit(CONTENT_CREATED if is_new else CONTENT_UPDATED, path)
         except Exception as exc:
             logger.error(f"UI save error: {exc}")
             # Fall back to edit page with error shown via redirect
@@ -999,6 +1087,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
         destination = destination.strip("/")
         try:
             filesystem.move_file(path, destination)
+            emit(CONTENT_MOVED, destination, source_path=path)
         except Exception as exc:
             logger.error(f"UI move error: {exc}")
             return RedirectResponse(url=f"/ui/browse/{path}", status_code=303)
@@ -1014,6 +1103,7 @@ def create_ui_router(filesystem: FileSystem) -> APIRouter:
             parent = ""
         try:
             filesystem.delete_file(path)
+            emit(CONTENT_DELETED, path)
         except Exception as exc:
             logger.error(f"UI delete error: {exc}")
         return RedirectResponse(url=f"/ui/browse/{parent}", status_code=303)

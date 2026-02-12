@@ -12,9 +12,10 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-import numpy as np
-
 logger = logging.getLogger(__name__)
+
+# Maximum characters to pass to contextual retrieval model (~200k tokens ≈ 150k chars)
+MAX_CONTEXTUAL_DOCUMENT_CHARS = 150_000
 
 
 @dataclass
@@ -53,7 +54,7 @@ class VectorStore:
             store_path: Path to the pickle file for persistence.
         """
         self.store_path = store_path
-        self._vectors: np.ndarray | None = None  # shape: (n, dim)
+        self._vectors = None  # np.ndarray | None, shape: (n, dim)
         self._metadata: list[dict] = []
         self._load()
 
@@ -89,6 +90,8 @@ class VectorStore:
             raise ValueError("embeddings and metadata must have the same length")
         if not embeddings:
             return
+
+        import numpy as np
 
         new_vectors = np.array(embeddings, dtype=np.float32)
         if self._vectors is None or len(self._vectors) == 0:
@@ -143,6 +146,8 @@ class VectorStore:
         """
         if self._vectors is None or len(self._vectors) == 0:
             return []
+
+        import numpy as np
 
         query = np.array(query_embedding, dtype=np.float32)
         query_norm = np.linalg.norm(query)
@@ -301,8 +306,10 @@ class SearchEngine:
         *,
         embedder_model: str = "sentence-transformers:all-MiniLM-L6-v2",
         contextual_retrieval: bool = False,
+        contextual_model: str = "claude-haiku-4-5-20251001",
         anthropic_api_key: str | None = None,
         embed_fn=None,
+        filesystem=None,
     ):
         """Initialize the search engine.
 
@@ -311,33 +318,56 @@ class SearchEngine:
             index_dir: Directory for index persistence.
             embedder_model: Pydantic AI embedder model string.
             contextual_retrieval: Whether to use Claude-powered chunk enrichment.
+            contextual_model: Model string for contextual retrieval.
             anthropic_api_key: API key for contextual retrieval (required if enabled).
             embed_fn: Optional custom embedding function for testing.
                       Signature: async (texts: list[str]) -> list[list[float]]
+            filesystem: Optional FileSystem instance for content path filtering.
         """
         self.content_dir = content_dir
         self.index_dir = index_dir
         self.embedder_model = embedder_model
         self.contextual_retrieval = contextual_retrieval
+        self.contextual_model = contextual_model
         self.anthropic_api_key = anthropic_api_key
         self._embed_fn = embed_fn
         self._embedder = None
+        self._filesystem = filesystem
+
+        # Validate embedding dependencies at init time so we fail fast
+        # rather than crashing on first file operation.
+        if self._embed_fn is None:
+            try:
+                import numpy as np  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "numpy is required for semantic search. "
+                    "Install with: pip install 'stash-mcp[search]'"
+                )
+            try:
+                from pydantic_ai import Embedder  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "pydantic-ai is required for semantic search. "
+                    "Install with: pip install 'stash-mcp[search]'"
+                )
 
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.store = VectorStore(index_dir / "vectors.pkl")
         self.meta = IndexMeta.load(index_dir / "index_meta.json")
 
-        # If embedder model changed, need full reindex
+        # If embedder model changed, refuse queries until reindexed
         if self.meta.embedder_model and self.meta.embedder_model != embedder_model:
             logger.warning(
                 f"Embedder model changed from '{self.meta.embedder_model}' "
-                f"to '{embedder_model}'. Reindex required."
+                f"to '{embedder_model}'. Index invalidated — reindex required."
             )
-
-        self._ready = self.store.count > 0
+            self._ready = False
+        else:
+            self._ready = self.store.count > 0
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of texts using the configured embedder.
+        """Embed a list of document texts using the configured embedder.
 
         Args:
             texts: Texts to embed.
@@ -350,16 +380,47 @@ class SearchEngine:
 
         if self._embedder is None:
             try:
-                from pydantic_ai.embeddings import embedding_model
+                from pydantic_ai import Embedder
 
-                self._embedder = embedding_model(self.embedder_model)
+                self._embedder = Embedder(self.embedder_model)
             except ImportError:
                 raise RuntimeError(
                     "pydantic-ai is required for semantic search. "
                     "Install with: pip install 'stash-mcp[search]'"
                 )
 
-        return await self._embedder.embed(texts)
+        result = await self._embedder.embed_documents(texts)
+        return result.embeddings
+
+    async def _embed_query(self, text: str) -> list[float]:
+        """Embed a single query text using the configured embedder.
+
+        Uses the query-specific embedding path which some providers
+        (e.g. Cohere) optimise differently from document embeddings.
+
+        Args:
+            text: Query text to embed.
+
+        Returns:
+            Single embedding vector.
+        """
+        if self._embed_fn is not None:
+            result = await self._embed_fn([text])
+            return result[0]
+
+        if self._embedder is None:
+            try:
+                from pydantic_ai import Embedder
+
+                self._embedder = Embedder(self.embedder_model)
+            except ImportError:
+                raise RuntimeError(
+                    "pydantic-ai is required for semantic search. "
+                    "Install with: pip install 'stash-mcp[search]'"
+                )
+
+        result = await self._embedder.embed_query(text)
+        return result.embeddings[0]
 
     async def _contextualise_chunk(
         self, chunk: str, full_document: str
@@ -379,6 +440,10 @@ class SearchEngine:
         try:
             import anthropic
 
+            # Truncate document to stay within context window
+            if len(full_document) > MAX_CONTEXTUAL_DOCUMENT_CHARS:
+                full_document = full_document[:MAX_CONTEXTUAL_DOCUMENT_CHARS] + "\n...[truncated]"
+
             client = anthropic.AsyncAnthropic(api_key=self.anthropic_api_key)
             prompt = (
                 f"<document>{full_document}</document>\n"
@@ -390,7 +455,7 @@ class SearchEngine:
                 f"Answer only with the succinct context and nothing else."
             )
             response = await client.messages.create(
-                model="claude-3-haiku-20240307",
+                model=self.contextual_model,
                 max_tokens=200,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -530,8 +595,7 @@ class SearchEngine:
         if not self._ready or self.store.count == 0:
             return []
 
-        query_embeddings = await self._embed([query])
-        query_embedding = query_embeddings[0]
+        query_embedding = await self._embed_query(query)
 
         # Get more results than needed so we can filter
         fetch_n = max_results * 3 if file_types else max_results
@@ -561,6 +625,10 @@ class SearchEngine:
     async def reindex(self) -> int:
         """Full reindex of all content files.
 
+        Uses the FileSystem instance (if provided) to respect
+        STASH_CONTENT_PATHS filtering, otherwise falls back to
+        discovering all files under content_dir.
+
         Returns:
             Total number of chunks indexed.
         """
@@ -568,7 +636,9 @@ class SearchEngine:
         self.meta = IndexMeta()
 
         file_paths = []
-        if self.content_dir.exists():
+        if self._filesystem is not None:
+            file_paths = self._filesystem.list_all_files()
+        elif self.content_dir.exists():
             for item in self.content_dir.rglob("*"):
                 if not item.is_file():
                     continue

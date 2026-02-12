@@ -380,6 +380,55 @@ class TestSearchEngine:
         assert engine2.indexed_chunks > 0
         assert engine2.ready
 
+    async def test_embed_query_uses_mock(self, engine):
+        """Test that _embed_query delegates to the mock embed function."""
+        result = await engine._embed_query("authentication")
+        assert isinstance(result, list)
+        assert len(result) == 16  # 16-dim vectors from mock_embed
+
+    async def test_stale_index_not_ready_after_model_change(self, engine_dirs):
+        """Test that changing embedder model sets _ready = False."""
+        content_dir, index_dir = engine_dirs
+        (content_dir / "test.md").write_text("# Test\n\nContent here.")
+
+        # Build index with model A
+        engine1 = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-a", embed_fn=mock_embed,
+        )
+        await engine1.build_index(["test.md"])
+        assert engine1.ready
+
+        # Create engine with model B — stale index, should not be ready
+        engine2 = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-b", embed_fn=mock_embed,
+        )
+        assert not engine2.ready
+
+        # Search should return empty when not ready
+        results = await engine2.search("anything")
+        assert results == []
+
+    async def test_reindex_with_filesystem_filtering(self, engine_dirs):
+        """Test that reindex uses FileSystem when provided."""
+        content_dir, index_dir = engine_dirs
+        (content_dir / "included.md").write_text("# Included\n\nMD content.")
+        (content_dir / "excluded.py").write_text("# Excluded\nprint('hello')\n")
+
+        from stash_mcp.filesystem import FileSystem
+        fs = FileSystem(content_dir, include_patterns=["*.md"])
+
+        engine = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embed_fn=mock_embed, filesystem=fs,
+        )
+        total = await engine.reindex()
+        assert total > 0
+        # Only .md files should be indexed
+        assert "included.md" in engine.meta.file_hashes
+        assert "excluded.py" not in engine.meta.file_hashes
+
     async def test_search_result_fields(self, engine):
         """Test that search results contain all expected fields."""
         await engine.build_index(["docs/auth.md", "notes.md"])
@@ -587,7 +636,81 @@ class TestMCPSearchTool:
                     _current_context.reset(token)
 
 
-# --- Config tests ---
+# --- Startup index build via lifespan ---
+
+
+class TestStartupIndexBuild:
+
+    def test_lifespan_builds_index_for_preexisting_files(self, monkeypatch):
+        """Test that create_app's lifespan builds the search index for files
+        that already exist when the server starts.
+
+        Previously this used @app.on_event('startup') which is silently
+        ignored when a lifespan handler is set on the FastAPI app.
+        """
+        import asyncio
+
+        from fastapi.testclient import TestClient
+
+        with TemporaryDirectory() as content_dir, TemporaryDirectory() as index_dir:
+            cd = Path(content_dir)
+            idx = Path(index_dir)
+
+            # Pre-populate content
+            (cd / "docs").mkdir()
+            (cd / "docs" / "auth.md").write_text(
+                "# Authentication\n\nThe OAuth2 flow begins."
+            )
+            (cd / "notes.md").write_text(
+                "# Meeting Notes\n\nDiscussed project timeline."
+            )
+
+            monkeypatch.setattr("stash_mcp.config.Config.CONTENT_DIR", cd)
+            monkeypatch.setattr("stash_mcp.config.Config.SEARCH_ENABLED", True)
+            monkeypatch.setattr("stash_mcp.config.Config.SEARCH_INDEX_DIR", idx)
+            monkeypatch.setattr("stash_mcp.config.Config.CONTENT_PATHS", None)
+
+            # Patch _create_search_engine to use mock_embed
+            from stash_mcp import main as main_mod
+
+            _original = main_mod._create_search_engine
+
+            def _patched():
+                engine = SearchEngine(
+                    content_dir=cd,
+                    index_dir=idx,
+                    embed_fn=mock_embed,
+                )
+                return engine
+
+            monkeypatch.setattr(main_mod, "_create_search_engine", _patched)
+
+            from stash_mcp.main import create_app
+
+            app = create_app()
+
+            # TestClient triggers the lifespan (startup + shutdown)
+            with TestClient(app) as client:
+                # Poll for background index build to complete
+                import time
+                for _ in range(20):
+                    resp = client.get("/api/search/status")
+                    if resp.status_code == 200 and resp.json().get("indexed_files", 0) > 0:
+                        break
+                    time.sleep(0.1)
+
+                # Verify search status shows indexed files
+                resp = client.get("/api/search/status")
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["ready"] is True
+                assert data["indexed_files"] == 2
+
+                # Verify search returns results
+                resp = client.get("/api/search", params={"q": "authentication"})
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["total"] > 0
 
 
 class TestSearchConfig:
@@ -605,3 +728,4 @@ class TestSearchConfig:
         assert Config.SEARCH_INDEX_DIR == Path("/data/.stash-index")
         assert "sentence-transformers" in Config.SEARCH_EMBEDDER_MODEL
         assert Config.CONTEXTUAL_RETRIEVAL is False
+        assert Config.CONTEXTUAL_MODEL == "claude-haiku-4-5-20251001"

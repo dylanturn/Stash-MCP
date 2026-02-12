@@ -10,4 +10,5 @@ services:
       - STASH_CONTENT_ROOT=/data/content
       - STASH_HOST=0.0.0.0
       - STASH_PORT=8000
+      - STASH_SEARCH_ENABLED=true
     restart: unless-stopped

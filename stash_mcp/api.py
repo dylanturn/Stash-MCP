@@ -273,7 +273,7 @@ def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> Fas
         """Move or rename a content file."""
         try:
             filesystem.move_file(path, data.destination)
-            emit(CONTENT_MOVED, path, destination=data.destination)
+            emit(CONTENT_MOVED, data.destination, source_path=path)
             return {
                 "message": f"File moved from '{path}' to '{data.destination}'",
                 "source": path,
