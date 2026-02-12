@@ -428,6 +428,8 @@ class TestSearchEngine:
         # Only .md files should be indexed
         assert "included.md" in engine.meta.file_hashes
         assert "excluded.py" not in engine.meta.file_hashes
+
+    async def test_search_result_fields(self, engine):
         """Test that search results contain all expected fields."""
         await engine.build_index(["docs/auth.md", "notes.md"])
         results = await engine.search("authentication OAuth flow")
