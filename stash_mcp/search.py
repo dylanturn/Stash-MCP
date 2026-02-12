@@ -12,8 +12,6 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
 # Maximum characters to pass to contextual retrieval model (~200k tokens ≈ 150k chars)
@@ -56,7 +54,7 @@ class VectorStore:
             store_path: Path to the pickle file for persistence.
         """
         self.store_path = store_path
-        self._vectors: np.ndarray | None = None  # shape: (n, dim)
+        self._vectors = None  # np.ndarray | None, shape: (n, dim)
         self._metadata: list[dict] = []
         self._load()
 
@@ -92,6 +90,8 @@ class VectorStore:
             raise ValueError("embeddings and metadata must have the same length")
         if not embeddings:
             return
+
+        import numpy as np
 
         new_vectors = np.array(embeddings, dtype=np.float32)
         if self._vectors is None or len(self._vectors) == 0:
@@ -146,6 +146,8 @@ class VectorStore:
         """
         if self._vectors is None or len(self._vectors) == 0:
             return []
+
+        import numpy as np
 
         query = np.array(query_embedding, dtype=np.float32)
         query_norm = np.linalg.norm(query)
