@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 
 import uvicorn
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -72,7 +73,28 @@ def create_app():
     mcp = create_mcp_server(filesystem, search_engine=search_engine)
     mcp_http_app = mcp.http_app(path="/")
 
-    app = create_api(filesystem, lifespan=mcp_http_app.lifespan, search_engine=search_engine)
+    # Build a combined lifespan that wraps the MCP lifespan and also
+    # triggers the search index build on startup.  Using on_event("startup")
+    # does NOT work when a lifespan handler is set on the FastAPI app.
+    mcp_lifespan = mcp_http_app.lifespan
+
+    @asynccontextmanager
+    async def _combined_lifespan(fastapi_app):
+        async with mcp_lifespan(fastapi_app):
+            # Startup: build search index in background (non-blocking)
+            if search_engine is not None:
+
+                async def _do_build():
+                    files = filesystem.list_all_files()
+                    total = await search_engine.build_index(files)
+                    logger.info(f"Startup search index build complete: {total} chunks")
+
+                task = asyncio.create_task(_do_build())
+                task.add_done_callback(_task_done_callback)
+
+            yield
+
+    app = create_api(filesystem, lifespan=_combined_lifespan, search_engine=search_engine)
     ui_router = create_ui_router(filesystem)
     app.include_router(ui_router)
 
@@ -120,19 +142,6 @@ def create_app():
                 task.add_done_callback(_task_done_callback)
 
     add_listener(on_content_changed)
-
-    # Startup: build search index in background (non-blocking)
-    if search_engine is not None:
-
-        @app.on_event("startup")
-        async def _build_search_index():
-            async def _do_build():
-                files = filesystem.list_all_files()
-                total = await search_engine.build_index(files)
-                logger.info(f"Startup search index build complete: {total} chunks")
-
-            task = asyncio.create_task(_do_build())
-            task.add_done_callback(_task_done_callback)
 
     return app
 

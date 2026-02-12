@@ -636,7 +636,81 @@ class TestMCPSearchTool:
                     _current_context.reset(token)
 
 
-# --- Config tests ---
+# --- Startup index build via lifespan ---
+
+
+class TestStartupIndexBuild:
+
+    def test_lifespan_builds_index_for_preexisting_files(self, monkeypatch):
+        """Test that create_app's lifespan builds the search index for files
+        that already exist when the server starts.
+
+        Previously this used @app.on_event('startup') which is silently
+        ignored when a lifespan handler is set on the FastAPI app.
+        """
+        import asyncio
+
+        from fastapi.testclient import TestClient
+
+        with TemporaryDirectory() as content_dir, TemporaryDirectory() as index_dir:
+            cd = Path(content_dir)
+            idx = Path(index_dir)
+
+            # Pre-populate content
+            (cd / "docs").mkdir()
+            (cd / "docs" / "auth.md").write_text(
+                "# Authentication\n\nThe OAuth2 flow begins."
+            )
+            (cd / "notes.md").write_text(
+                "# Meeting Notes\n\nDiscussed project timeline."
+            )
+
+            monkeypatch.setattr("stash_mcp.config.Config.CONTENT_DIR", cd)
+            monkeypatch.setattr("stash_mcp.config.Config.SEARCH_ENABLED", True)
+            monkeypatch.setattr("stash_mcp.config.Config.SEARCH_INDEX_DIR", idx)
+            monkeypatch.setattr("stash_mcp.config.Config.CONTENT_PATHS", None)
+
+            # Patch _create_search_engine to use mock_embed
+            from stash_mcp import main as main_mod
+
+            _original = main_mod._create_search_engine
+
+            def _patched():
+                engine = SearchEngine(
+                    content_dir=cd,
+                    index_dir=idx,
+                    embed_fn=mock_embed,
+                )
+                return engine
+
+            monkeypatch.setattr(main_mod, "_create_search_engine", _patched)
+
+            from stash_mcp.main import create_app
+
+            app = create_app()
+
+            # TestClient triggers the lifespan (startup + shutdown)
+            with TestClient(app) as client:
+                # Poll for background index build to complete
+                import time
+                for _ in range(20):
+                    resp = client.get("/api/search/status")
+                    if resp.status_code == 200 and resp.json().get("indexed_files", 0) > 0:
+                        break
+                    time.sleep(0.1)
+
+                # Verify search status shows indexed files
+                resp = client.get("/api/search/status")
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["ready"] is True
+                assert data["indexed_files"] == 2
+
+                # Verify search returns results
+                resp = client.get("/api/search", params={"q": "authentication"})
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["total"] > 0
 
 
 class TestSearchConfig:
