@@ -108,6 +108,54 @@ def test_create_content(test_client):
     assert response.json()["content"] == "# New Content"
 
 
+def test_post_create_content_nested_path(test_client):
+    """Test POST creates a file in a nested directory that doesn't exist."""
+    response = test_client.post(
+        "/api/content/a/b/c/nested.md",
+        json={"content": "# Nested Content"}
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert "created successfully" in data["message"]
+
+    # Verify content was created
+    response = test_client.get("/api/content/a/b/c/nested.md")
+    assert response.status_code == 200
+    assert response.json()["content"] == "# Nested Content"
+
+
+def test_put_create_content_nested_path(test_client):
+    """Test PUT creates a file in a nested directory that doesn't exist."""
+    response = test_client.put(
+        "/api/content/x/y/z/deep.md",
+        json={"content": "# Deep Content"}
+    )
+    assert response.status_code == 200
+
+    # Verify content was created
+    response = test_client.get("/api/content/x/y/z/deep.md")
+    assert response.status_code == 200
+    assert response.json()["content"] == "# Deep Content"
+
+
+def test_patch_move_to_nested_path(test_client):
+    """Test PATCH moves a file to a nested directory that doesn't exist."""
+    response = test_client.patch(
+        "/api/content/test.md",
+        json={"destination": "new/nested/dir/moved.md"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["destination"] == "new/nested/dir/moved.md"
+
+    # Verify old path is gone, new path exists
+    response = test_client.get("/api/content/test.md")
+    assert response.status_code == 404
+    response = test_client.get("/api/content/new/nested/dir/moved.md")
+    assert response.status_code == 200
+    assert response.json()["content"] == "# Test Content"
+
+
 def test_update_content(test_client):
     """Test updating existing content."""
     response = test_client.put(

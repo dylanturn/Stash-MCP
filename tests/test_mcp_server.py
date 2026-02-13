@@ -131,6 +131,16 @@ async def test_create_content_tool(temp_fs, mock_context):
     assert temp_fs.read_file("new.md") == "# New File"
 
 
+async def test_create_content_tool_nested_path(temp_fs, mock_context):
+    """Test create_content tool creates missing parent directories."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("create_content")
+    result = await tool.run({"path": "a/b/c/new.md", "content": "# Nested"})
+    assert "Created: a/b/c/new.md" in str(result.content)
+    assert temp_fs.file_exists("a/b/c/new.md")
+    assert temp_fs.read_file("a/b/c/new.md") == "# Nested"
+
+
 async def test_create_content_tool_existing_file(mcp_server, temp_fs, mock_context):
     """Test create_content tool errors on existing file."""
     tool = await mcp_server.get_tool("create_content")
@@ -195,6 +205,15 @@ async def test_move_content_tool(mcp_server, temp_fs, mock_context):
     assert not temp_fs.file_exists("README.md")
     assert temp_fs.file_exists("moved.md")
     assert temp_fs.read_file("moved.md") == "# Root README"
+
+
+async def test_move_content_tool_nested_dest(mcp_server, temp_fs, mock_context):
+    """Test move_content tool creates missing directories for destination."""
+    tool = await mcp_server.get_tool("move_content")
+    result = await tool.run({"source_path": "data.json", "dest_path": "x/y/z/data.json"})
+    assert "Moved: data.json -> x/y/z/data.json" in str(result.content)
+    assert not temp_fs.file_exists("data.json")
+    assert temp_fs.file_exists("x/y/z/data.json")
 
 
 # --- Notification tests ---
