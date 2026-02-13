@@ -53,6 +53,21 @@ def test_write_file_in_subdirectory(temp_fs):
     assert content == "Content"
 
 
+def test_write_file_creates_deeply_nested_directories(temp_fs):
+    """Test writing a file creates all missing parent directories."""
+    temp_fs.write_file("a/b/c/d/deep.txt", "Deep content")
+    assert temp_fs.file_exists("a/b/c/d/deep.txt")
+    assert temp_fs.read_file("a/b/c/d/deep.txt") == "Deep content"
+
+
+def test_write_file_existing_directory_no_error(temp_fs):
+    """Test writing to an existing directory does not raise an error."""
+    temp_fs.write_file("existing/file1.txt", "First")
+    temp_fs.write_file("existing/file2.txt", "Second")
+    assert temp_fs.read_file("existing/file1.txt") == "First"
+    assert temp_fs.read_file("existing/file2.txt") == "Second"
+
+
 def test_list_files(temp_fs):
     """Test listing files in a directory."""
     temp_fs.write_file("file1.txt", "Content 1")
