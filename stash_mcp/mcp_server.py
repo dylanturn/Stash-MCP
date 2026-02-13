@@ -1,5 +1,6 @@
 """MCP Server implementation for Stash using FastMCP."""
 
+import hashlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -8,13 +9,33 @@ from pathlib import PurePosixPath
 from fastmcp import FastMCP
 from fastmcp.resources import FunctionResource
 from fastmcp.server.context import Context
-from pydantic import AnyUrl
+from pydantic import AnyUrl, BaseModel, Field
 
 from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
 
 logger = logging.getLogger(__name__)
+
+
+class EditOperation(BaseModel):
+    """A single string-replacement edit."""
+
+    old_string: str = Field(description="The exact text to find in the file")
+    new_string: str = Field(description="The text to replace it with")
+    replace_all: bool = Field(
+        default=False,
+        description="Replace every occurrence (True) or require exactly one match (False)",
+    )
+
+
+class FileEditOperation(BaseModel):
+    """Edits targeting a single file, used by multi_edit_content."""
+
+    file_path: str = Field(description="File path relative to content root")
+    sha: str = Field(description="SHA-256 hex digest of the current file content")
+    edits: list[EditOperation] = Field(description="Ordered list of edits to apply")
+
 
 # Mime type mapping for common extensions
 MIME_TYPES: dict[str, str] = {
@@ -72,6 +93,31 @@ def _get_description(fs: FileSystem, path: str) -> str:
         return first_line[:100] if first_line else f"Content file: {path}"
     except Exception:
         return f"Content file: {path}"
+
+
+def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
+    """Apply a sequence of string-replacement edits to *content*.
+
+    Raises ``ValueError`` if any edit is invalid (empty old_string, not found,
+    or ambiguous when replace_all is False).
+    """
+    for edit in edits:
+        if not edit.old_string:
+            raise ValueError(f"old_string must not be empty (file: {path})")
+        if edit.old_string not in content:
+            raise ValueError(
+                f"old_string not found in '{path}'. The file content may have changed."
+            )
+        if not edit.replace_all and content.count(edit.old_string) > 1:
+            raise ValueError(
+                f"old_string appears {content.count(edit.old_string)} times in '{path}'. "
+                "Set replace_all=True or provide a more specific old_string."
+            )
+        if edit.replace_all:
+            content = content.replace(edit.old_string, edit.new_string)
+        else:
+            content = content.replace(edit.old_string, edit.new_string, 1)
+    return content
 
 
 def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
@@ -160,13 +206,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
 
     # --- Tools ---
 
-    @mcp.tool(description="Create a new content file")
+    @mcp.tool()
     async def create_content(
         path: str,
         content: str,
         ctx: Context,
     ) -> str:
-        """Create a new file. Errors if file already exists.
+        """
+        Create a new file. Errors if file already exists.
 
         Args:
             path: File path relative to content root
@@ -183,42 +230,152 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
         logger.info(f"Created: {path}")
         return f"Created: {path}"
 
-    @mcp.tool(description="Update an existing content file")
-    async def update_content(
+    @mcp.tool()
+    async def replace_content(
         path: str,
         content: str,
+        sha: str,
         ctx: Context,
     ) -> str:
-        """Update an existing file.
+        """
+        Replace the content of an existing file.
 
         Args:
             path: File path relative to content root
             content: New file content
+            sha: SHA-256 hex digest of the current file content (from read_content)
         """
-        is_new = not filesystem.file_exists(path)
-        filesystem.write_file(path, content)
-        if is_new:
-            if _register_resource(path):
-                await ctx.send_resource_list_changed()
-            emit(CONTENT_CREATED, path)
+        if filesystem.file_exists(path):
+            current = filesystem.read_file(path)
+            current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
+            if sha != current_sha:
+                raise ValueError(
+                    f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
+                    "The file may have changed since it was last read."
+                )
         else:
-            if _is_resource_file(path):
-                uri = AnyUrl(f"stash://{path}")
-                await ctx.session.send_resource_updated(uri=uri)
-            emit(CONTENT_UPDATED, path)
+            raise FileNotFoundError(
+                f"File '{path}' does not exist. Use create_content for new files."
+            )
+        filesystem.write_file(path, content)
+        if _is_resource_file(path):
+            uri = AnyUrl(f"stash://{path}")
+            await ctx.session.send_resource_updated(uri=uri)
+        emit(CONTENT_UPDATED, path)
         logger.info(f"Updated: {path}")
         return f"Updated: {path}"
 
-    @mcp.tool(description="Delete a content file")
+    @mcp.tool()
+    async def edit_content(
+        file_path: str,
+        sha: str,
+        edits: list[EditOperation],
+        ctx: Context,
+    ) -> dict:
+        """
+        Apply targeted string-replacement edits to an existing file.
+
+        Each edit replaces an exact occurrence of old_string with new_string.
+        Edits are applied sequentially — later edits see the result of earlier ones.
+
+        Args:
+            file_path: File path relative to content root
+            sha: SHA-256 hex digest of the current file content (from read_content)
+            edits: Ordered list of edit operations to apply
+        Returns:
+            A dict with path, result status, and new_sha
+        """
+        current = filesystem.read_file(file_path)
+        current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
+        if sha != current_sha:
+            raise ValueError(
+                f"SHA mismatch for '{file_path}': expected {current_sha}, got {sha}. "
+                "The file may have changed since it was last read."
+            )
+        new_content = _apply_edits(current, edits, file_path)
+        filesystem.write_file(file_path, new_content)
+        if _is_resource_file(file_path):
+            uri = AnyUrl(f"stash://{file_path}")
+            await ctx.session.send_resource_updated(uri=uri)
+        emit(CONTENT_UPDATED, file_path)
+        logger.info(f"Edited: {file_path}")
+        new_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+        return {"path": file_path, "result": "ok", "new_sha": new_sha}
+
+    @mcp.tool()
+    async def multi_edit_content(
+        edit_operations: list[FileEditOperation],
+        ctx: Context,
+    ) -> dict:
+        """
+        Atomically apply edits to multiple files.
+
+        All validations run before any writes — if any file fails validation
+        the entire operation is aborted and no files are modified.
+
+        Args:
+            edit_operations: List of per-file edit operations
+        Returns:
+            A dict with a results list containing path, result status, and new_sha per file
+        """
+        # Reject duplicate file paths
+        paths = [op.file_path for op in edit_operations]
+        if len(paths) != len(set(paths)):
+            raise ValueError("Duplicate file_path entries are not allowed in a single multi_edit_content call.")
+
+        # Phase 1: read all files and validate SHAs
+        originals: dict[str, str] = {}
+        for op in edit_operations:
+            current = filesystem.read_file(op.file_path)
+            current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
+            if op.sha != current_sha:
+                raise ValueError(
+                    f"SHA mismatch for '{op.file_path}': expected {current_sha}, got {op.sha}. "
+                    "The file may have changed since it was last read."
+                )
+            originals[op.file_path] = current
+
+        # Phase 2: apply all edits in memory
+        new_contents: dict[str, str] = {}
+        for op in edit_operations:
+            new_contents[op.file_path] = _apply_edits(originals[op.file_path], op.edits, op.file_path)
+
+        # Phase 3: write all files and send notifications
+        results = []
+        for op in edit_operations:
+            filesystem.write_file(op.file_path, new_contents[op.file_path])
+            if _is_resource_file(op.file_path):
+                uri = AnyUrl(f"stash://{op.file_path}")
+                await ctx.session.send_resource_updated(uri=uri)
+            emit(CONTENT_UPDATED, op.file_path)
+            logger.info(f"Edited: {op.file_path}")
+            new_sha = hashlib.sha256(new_contents[op.file_path].encode("utf-8")).hexdigest()
+            results.append({"path": op.file_path, "result": "ok", "new_sha": new_sha})
+
+        return {"results": results}
+
+    @mcp.tool()
     async def delete_content(
         path: str,
+        sha: str,
         ctx: Context,
     ) -> str:
-        """Delete a file.
+        """
+        Delete a content file.
 
         Args:
             path: File path relative to content root
+            sha: SHA-256 hex digest of the current file content (from read_content)
+        Returns:
+            Confirmation message
         """
+        current = filesystem.read_file(path)
+        current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
+        if sha != current_sha:
+            raise ValueError(
+                f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
+                "The file may have changed since it was last read."
+            )
         filesystem.delete_file(path)
         if _unregister_resource(path):
             await ctx.send_resource_list_changed()
@@ -226,18 +383,24 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
         logger.info(f"Deleted: {path}")
         return f"Deleted: {path}"
 
-    @mcp.tool(description="Read a content file")
+    @mcp.tool()
     async def read_content(
         path: str,
-    ) -> str:
-        """Read and return the contents of a file.
+    ) -> dict:
+        """
+        Read and return the contents of a file along with its SHA-256 hash.
+        The SHA will be required for update and delete operations to ensure the file has not changed since it was read.
 
         Args:
             path: File path relative to content root
+        Returns:
+            A dict with 'content' (file text) and 'sha' (SHA-256 hex digest)
         """
-        return filesystem.read_file(path)
+        content = filesystem.read_file(path)
+        sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        return {"content": content, "sha": sha}
 
-    @mcp.tool(description="List files and directories")
+    @mcp.tool()
     async def list_content(
         path: str = "",
         recursive: bool = False,
@@ -247,6 +410,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
         Args:
             path: Path relative to content root (defaults to root)
             recursive: If true, list all files recursively
+        Returns:
+            A formatted string listing the files and directories
         """
         if recursive:
             files = filesystem.list_all_files(path)
@@ -263,17 +428,19 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
                 return f"Empty directory: '{path or '/'}'"
             return "\n".join(lines)
 
-    @mcp.tool(description="Move or rename a content file")
+    @mcp.tool()
     async def move_content(
         source_path: str,
         dest_path: str,
         ctx: Context,
     ) -> str:
-        """Move or rename a file.
+        """Move or rename a content file.
 
         Args:
             source_path: Current file path relative to content root
             dest_path: New file path relative to content root
+        Returns:
+            Confirmation message
         """
         filesystem.move_file(source_path, dest_path)
         source_was_resource = _unregister_resource(source_path)
@@ -288,7 +455,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
 
     if search_engine is not None:
 
-        @mcp.tool(description="Semantic search across stashed content")
+        @mcp.tool()
         async def search_content(
             query: str,
             max_results: int = 5,
@@ -301,6 +468,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
                 max_results: Maximum number of results (default 5)
                 file_types: Optional comma-separated file extensions
                     (e.g. ".md,.py")
+            Returns:
+                Search results formatted as a string
             """
             types_list = None
             if file_types:

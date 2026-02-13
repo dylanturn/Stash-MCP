@@ -1,5 +1,6 @@
 """REST API implementation with FastAPI."""
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -345,11 +346,11 @@ def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> Fas
 
         @app.post("/api/search/reindex")
         async def reindex():
-            """Trigger a full reindex."""
-            total = await search_engine.reindex()
+            """Trigger a full reindex (non-blocking)."""
+            asyncio.create_task(search_engine.reindex())
             return {
-                "message": "Reindex complete",
-                "indexed_chunks": total,
+                "message": "Reindex started",
+                "status": "in_progress",
             }
 
     return app

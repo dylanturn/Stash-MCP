@@ -344,9 +344,7 @@ class TestUISearch:
 
             # Build index first
             import asyncio
-            asyncio.get_event_loop().run_until_complete(
-                engine.build_index(fs.list_all_files())
-            )
+            asyncio.run(engine.build_index(fs.list_all_files()))
 
             response = client.get("/ui/search", params={"q": "authentication OAuth"})
             assert response.status_code == 200

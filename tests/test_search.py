@@ -88,6 +88,7 @@ class TestVectorStore:
                     {"file_path": "b.md", "chunk_index": 0},
                 ],
             )
+            store.save()
 
             # Reload
             store2 = VectorStore(store_path)
@@ -482,6 +483,8 @@ class TestSearchAPI:
     @pytest.fixture
     def search_client(self):
         """Create a test client with search engine enabled."""
+        import asyncio
+
         from fastapi.testclient import TestClient
 
         from stash_mcp.api import create_api
@@ -499,12 +502,11 @@ class TestSearchAPI:
                     embed_fn=mock_embed,
                 )
 
+                # Build index directly since reindex endpoint is now non-blocking
+                asyncio.run(engine.build_index(["docs/auth.md", "notes.md"]))
+
                 app = create_api(fs, search_engine=engine)
                 client = TestClient(app)
-
-                # Build index synchronously via the reindex endpoint
-                response = client.post("/api/search/reindex")
-                assert response.status_code == 200
 
                 yield client
 
@@ -529,12 +531,12 @@ class TestSearchAPI:
         assert "indexed_chunks" in data
 
     def test_reindex_endpoint(self, search_client):
-        """Test POST /api/search/reindex triggers reindex."""
+        """Test POST /api/search/reindex returns in_progress status."""
         response = search_client.post("/api/search/reindex")
         assert response.status_code == 200
         data = response.json()
-        assert "indexed_chunks" in data
-        assert data["indexed_chunks"] > 0
+        assert data["status"] == "in_progress"
+        assert data["message"] == "Reindex started"
 
     def test_search_with_file_types(self, search_client):
         """Test search with file_types filter."""
@@ -727,9 +729,10 @@ class TestStartupIndexBuild:
             with TestClient(app) as client:
                 # Poll for background index build to complete
                 import time
-                for _ in range(20):
+                for _ in range(50):
                     resp = client.get("/api/search/status")
-                    if resp.status_code == 200 and resp.json().get("indexed_files", 0) > 0:
+                    data = resp.json()
+                    if resp.status_code == 200 and data.get("ready") is True:
                         break
                     time.sleep(0.1)
 
