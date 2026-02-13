@@ -238,6 +238,8 @@ When search is enabled, the server exposes:
 - REST endpoints at `/api/search`, `/api/search/status`, and `/api/search/reindex`
 - Vector-based search in the Web UI sidebar
 
+Changing `STASH_SEARCH_EMBEDDER_MODEL` between restarts automatically clears the stale index and triggers a full rebuild with the new model.
+
 See [USAGE.md](USAGE.md) for detailed search setup instructions.
 
 ## License

@@ -318,6 +318,10 @@ class TestUISearch:
             assert "Search content" in body
             assert "data-vector-search" in body
             assert 'id="search-results"' in body
+            assert "data.indexing" in body
+            assert "index is being rebuilt" in body
+            assert "search-spinner" in body
+            assert "search-loading" in body
 
     def test_ui_search_endpoint_returns_results(self):
         """GET /ui/search returns vector search results as JSON."""
@@ -349,6 +353,8 @@ class TestUISearch:
             data = response.json()
             assert "results" in data
             assert data["total"] > 0
+            assert "indexing" in data
+            assert data["indexing"] is False
             result = data["results"][0]
             assert "file_path" in result
             assert "content" in result

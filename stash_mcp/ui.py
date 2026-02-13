@@ -310,6 +310,10 @@ border:1px solid #313244;transition:background 150ms ease,border-color 150ms eas
 display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .search-result-score{font-size:10px;color:#585b70;margin-top:2px}
 .search-no-results{padding:8px 10px;color:#585b70;font-size:12px;font-style:italic}
+.search-loading{display:flex;align-items:center;gap:8px;padding:10px;color:#7f849c;font-size:12px}
+.search-spinner{width:16px;height:16px;border:2px solid #313244;border-top-color:#94e2d5;
+border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 .center{flex:1;overflow-y:auto;display:flex;flex-direction:column}
 .panel-toggle{background:none;border:none;color:#7f849c;cursor:pointer;
@@ -568,6 +572,12 @@ function handleSearch(query){
     return;
   }
   _searchTimer=setTimeout(function(){
+    if(box){
+      box.innerHTML='<div class="search-loading">'
+        +'<div class="search-spinner"></div>Searching\u2026</div>';
+      box.classList.add('active');
+      if(tree)tree.style.display='none';
+    }
     fetch('/ui/search?q='+encodeURIComponent(query))
       .then(function(r){return r.json();})
       .then(function(data){
@@ -583,6 +593,9 @@ function handleSearch(query){
               +'</a>';
           });
           box.innerHTML=h;
+        }else if(data.indexing){
+          box.innerHTML='<div class="search-no-results">'
+            +'Search index is being rebuilt\u2026 please try again shortly.</div>';
         }else{
           box.innerHTML='<div class="search-no-results">No results found</div>';
         }
@@ -942,6 +955,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                         for r in results
                     ],
                     "total": len(results),
+                    "indexing": search_engine.indexing,
                 }
             )
 
