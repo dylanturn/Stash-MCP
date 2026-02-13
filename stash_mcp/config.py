@@ -46,6 +46,21 @@ class Config:
     SERVER_NAME: str = "stash-mcp"
     SERVER_VERSION: str = "0.1.0"
 
+    # Search settings
+    SEARCH_ENABLED: bool = os.getenv("STASH_SEARCH_ENABLED", "false").lower() == "true"
+    SEARCH_INDEX_DIR: Path = Path(
+        os.getenv("STASH_SEARCH_INDEX_DIR", "/data/.stash-index")
+    )
+    SEARCH_EMBEDDER_MODEL: str = os.getenv(
+        "STASH_SEARCH_EMBEDDER_MODEL", "sentence-transformers:all-MiniLM-L6-v2"
+    )
+    CONTEXTUAL_RETRIEVAL: bool = (
+        os.getenv("STASH_CONTEXTUAL_RETRIEVAL", "false").lower() == "true"
+    )
+    CONTEXTUAL_MODEL: str = os.getenv(
+        "STASH_CONTEXTUAL_MODEL", "claude-haiku-4-5-20251001"
+    )
+
     @classmethod
     def ensure_content_dir(cls) -> None:
         """Ensure content directory exists."""

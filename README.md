@@ -24,6 +24,7 @@
 - **Centralized knowledge store** — A single place to stash documentation, notes, specs, and reference material that any connected agent can access
 - **File-first design** — Files on disk are the source of truth. No database layer. Inspect, edit, or manage content directly on the filesystem
 - **MCP native** — Expose content as MCP resources (read path) and provide MCP tools (write path) so agents can both consume and update documentation
+- **Semantic search** *(opt-in)* — Vector-based semantic search across all stashed content, powered by pluggable embedding providers
 - **Human-friendly UI** — A simple web browser/viewer so humans can manage content alongside agents
 - **Simple deployment** — Single Docker container with a volume mount. No external dependencies
 
@@ -44,17 +45,20 @@
 │                 │  - Resources (read)    │  │
 │                 │  - Tools (write)       │  │
 │                 │  - Notifications       │  │
+│                 │  - Search (opt-in)     │  │
 │                 └──────────┬─────────────┘  │
 │                            │                │
-│                 ┌──────────┴─────────────┐  │
-│                 │  Filesystem Layer      │  │
-│                 │  /data/content/        │  │
-│                 └────────────────────────┘  │
-│                            │                │
-└────────────────────────────┼────────────────┘
-                             │
-                    Volume Mount
-                   ./content:/data/content
+│              ┌─────────────┼─────────────┐  │
+│              │             │             │  │
+│  ┌───────────┴──────┐ ┌────┴──────────┐  │  │
+│  │  Filesystem      │ │ Search Engine │  │  │
+│  │  /data/content/  │ │ (optional)    │  │  │
+│  └──────────────────┘ └───────────────┘  │  │
+│              │                           │  │
+└──────────────┼───────────────────────────┘  │
+               │                              │
+      Volume Mount                            │
+     ./content:/data/content                  │
 ```
 
 ## Tech Stack
@@ -65,6 +69,7 @@
 | MCP server | FastMCP |
 | REST API | FastAPI |
 | Content UI | HTML/CSS (FastAPI) |
+| Semantic search | numpy + Pydantic AI (optional) |
 | Containerization | Docker + Compose |
 | Persistence | Filesystem (volume mount) |
 
@@ -202,7 +207,7 @@ Open http://localhost:8000/ui in your browser to:
 - Browse the content tree
 - View and edit documents
 - Create new files and folders
-- Search content (coming soon)
+- Search content (semantic search when enabled, filename filtering otherwise)
 
 <p align="center">
   <img src="assets/images/user-interface.png" alt="Stash-MCP Web UI" width="800">
@@ -216,6 +221,26 @@ Environment variables:
 - `STASH_HOST` - Server host (default: `0.0.0.0`)
 - `STASH_PORT` - Server port (default: `8000`)
 - `STASH_LOG_LEVEL` - Logging level (default: `info`)
+
+### Search Configuration
+
+Semantic search is **disabled by default**. Set the following to enable it:
+
+- `STASH_SEARCH_ENABLED` - Enable semantic search (default: `false`)
+- `STASH_SEARCH_INDEX_DIR` - Directory for search index persistence (default: `/data/.stash-index`)
+- `STASH_SEARCH_EMBEDDER_MODEL` - Pydantic AI embedder model (default: `sentence-transformers:all-MiniLM-L6-v2`)
+- `STASH_CONTEXTUAL_RETRIEVAL` - Enable Claude-powered contextual chunk enrichment (default: `false`)
+- `STASH_CONTEXTUAL_MODEL` - Model for contextual retrieval (default: `claude-haiku-4-5-20251001`)
+- `ANTHROPIC_API_KEY` - Required when contextual retrieval is enabled
+
+When search is enabled, the server exposes:
+- An MCP `search_content` tool for agents
+- REST endpoints at `/api/search`, `/api/search/status`, and `/api/search/reindex`
+- Vector-based search in the Web UI sidebar
+
+Changing `STASH_SEARCH_EMBEDDER_MODEL` between restarts automatically clears the stale index and triggers a full rebuild with the new model.
+
+See [USAGE.md](USAGE.md) for detailed search setup instructions.
 
 ## License
 

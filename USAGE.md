@@ -55,6 +55,7 @@ The UI allows you to:
 - Browse all your content files
 - View file contents
 - Navigate through directories
+- Search content (semantic search when enabled, filename filtering otherwise)
 
 ## Using the REST API
 
@@ -147,6 +148,124 @@ Tools allow agents to create, update, and delete content:
 }
 ```
 
+**search_content** *(available when search is enabled)* - Semantic search:
+```json
+{
+  "query": "authentication flow",
+  "max_results": 5,
+  "file_types": ".md,.py"
+}
+```
+
+## Semantic Search
+
+Stash-MCP includes an optional semantic search feature that lets agents and users find content by meaning rather than exact keywords. Search is **disabled by default** and must be explicitly enabled.
+
+### Enabling Search
+
+#### With Docker Compose
+
+Add the search environment variable to your `docker-compose.yml`:
+
+```yaml
+services:
+  stash-mcp:
+    build: .
+    environment:
+      - STASH_SEARCH_ENABLED=true
+```
+
+The default Docker image includes the `sentence-transformers` embedding provider. To use a different provider, override the build argument:
+
+```bash
+# OpenAI embeddings
+docker build --build-arg SEARCH_EXTRA=search-openai -t stash-mcp .
+
+# Cohere embeddings
+docker build --build-arg SEARCH_EXTRA=search-cohere -t stash-mcp .
+
+# Sentence-transformers + Anthropic contextual retrieval
+docker build --build-arg SEARCH_EXTRA=search-contextual -t stash-mcp .
+```
+
+#### Local Development
+
+Install the search dependencies for your preferred embedding provider:
+
+```bash
+# Sentence-transformers (local, no API key needed)
+pip install -e ".[search]"
+
+# OpenAI embeddings
+pip install -e ".[search-openai]"
+
+# Cohere embeddings
+pip install -e ".[search-cohere]"
+
+# Sentence-transformers + Anthropic contextual retrieval
+pip install -e ".[search-contextual]"
+```
+
+Then enable search by setting the environment variable:
+
+```bash
+export STASH_SEARCH_ENABLED=true
+```
+
+### How Search Works
+
+When search is enabled, the server:
+
+1. **Indexes content at startup** — All files are chunked (using markdown-aware splitting) and embedded into vectors
+2. **Keeps the index up-to-date** — File creates, updates, and deletes automatically update the search index
+3. **Persists the index to disk** — The vector index is saved to `STASH_SEARCH_INDEX_DIR` and reloaded on restart
+4. **Skips unchanged files** — Incremental indexing only re-embeds files whose content has changed
+5. **Auto-reindexes on model change** — If `STASH_SEARCH_EMBEDDER_MODEL` changes between restarts, the stale index is automatically cleared and rebuilt with the new model
+
+### Using Search via MCP
+
+When search is enabled, a `search_content` tool is registered in the MCP server:
+
+```python
+# Search for content by meaning
+result = await client.call_tool("search_content", {
+    "query": "authentication flow",
+    "max_results": 5,
+    "file_types": ".md,.py"  # optional: filter by extension
+})
+```
+
+### Using Search via REST API
+
+Three search endpoints are available when search is enabled:
+
+```bash
+# Semantic search
+curl "http://localhost:8000/api/search?q=authentication+flow&max_results=5"
+
+# Check search engine status
+curl http://localhost:8000/api/search/status
+
+# Trigger a full reindex
+curl -X POST http://localhost:8000/api/search/reindex
+```
+
+### Using Search in the Web UI
+
+When search is enabled, the sidebar search box uses vector-based semantic search with debounced queries. Results link directly to the matching files. When search is disabled, the sidebar provides client-side filename filtering instead.
+
+### Contextual Retrieval
+
+For higher quality search results, enable contextual retrieval. This uses Claude to generate a short contextual preamble for each chunk before embedding, improving retrieval accuracy:
+
+```bash
+export STASH_SEARCH_ENABLED=true
+export STASH_CONTEXTUAL_RETRIEVAL=true
+export ANTHROPIC_API_KEY=your-api-key
+```
+
+> **Note:** Contextual retrieval requires the `search-contextual` dependency group and an Anthropic API key. It increases indexing time and cost but improves search relevance.
+
 ## Content Organization
 
 Organize your content in a way that makes sense for your use case:
@@ -174,6 +293,12 @@ Environment variables:
 | `STASH_HOST` | Server host address | `0.0.0.0` |
 | `STASH_PORT` | Server port | `8000` |
 | `STASH_LOG_LEVEL` | Log level (debug, info, warning, error) | `info` |
+| `STASH_SEARCH_ENABLED` | Enable semantic search | `false` |
+| `STASH_SEARCH_INDEX_DIR` | Search index directory | `/data/.stash-index` |
+| `STASH_SEARCH_EMBEDDER_MODEL` | Embedder model string | `sentence-transformers:all-MiniLM-L6-v2` |
+| `STASH_CONTEXTUAL_RETRIEVAL` | Enable contextual chunk enrichment | `false` |
+| `STASH_CONTEXTUAL_MODEL` | Model for contextual retrieval | `claude-haiku-4-5-20251001` |
+| `ANTHROPIC_API_KEY` | API key for contextual retrieval | *(none)* |
 
 ## Development
 

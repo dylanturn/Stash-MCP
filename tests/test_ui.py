@@ -11,6 +11,22 @@ from stash_mcp.filesystem import FileSystem
 from stash_mcp.ui import create_ui_router
 
 
+# Simple mock embedding for search-enabled UI tests
+async def _mock_embed(texts: list[str]) -> list[list[float]]:
+    keywords = [
+        "auth", "oauth", "flow", "meeting", "notes",
+        "config", "database", "test", "search", "content",
+        "section", "project", "file", "data", "code", "doc",
+    ]
+    embeddings = []
+    for text in texts:
+        text_lower = text.lower()
+        vec = [float(text_lower.count(kw)) for kw in keywords]
+        vec[0] += 0.1
+        embeddings.append(vec)
+    return embeddings
+
+
 @pytest.fixture
 def ui_client():
     """Create a test client with UI router and temporary filesystem."""
@@ -271,8 +287,105 @@ class TestUISearch:
         response = ui_client.get("/ui/browse/")
         body = response.text
         assert "tree-search" in body
+        assert "handleSearch" in body
+
+    def test_sidebar_without_search_engine_has_filename_filter(self, ui_client):
+        """Without search engine, sidebar uses file name placeholder."""
+        response = ui_client.get("/ui/browse/")
+        body = response.text
         assert "Search files..." in body
-        assert "filterTree" in body
+        assert 'data-vector-search="true"' not in body
+        assert 'id="search-results"' not in body
+
+    def test_sidebar_with_search_engine_has_vector_search(self):
+        """With search engine, sidebar uses vector search placeholder and container."""
+        from stash_mcp.search import SearchEngine
+
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as idx_dir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("hello.md", "# Hello World")
+            engine = SearchEngine(
+                content_dir=Path(tmpdir),
+                index_dir=Path(idx_dir),
+                embed_fn=_mock_embed,
+            )
+            app = create_api(fs)
+            router = create_ui_router(fs, search_engine=engine)
+            app.include_router(router)
+            client = TestClient(app)
+            response = client.get("/ui/browse/")
+            body = response.text
+            assert "Search content" in body
+            assert "data-vector-search" in body
+            assert 'id="search-results"' in body
+            assert "data.indexing" in body
+            assert "index is being rebuilt" in body
+            assert "search-spinner" in body
+            assert "search-loading" in body
+
+    def test_ui_search_endpoint_returns_results(self):
+        """GET /ui/search returns vector search results as JSON."""
+        from stash_mcp.search import SearchEngine
+
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as idx_dir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("docs/auth.md", "# Auth\n\nOAuth2 flow here.")
+            fs.write_file("notes.md", "# Meeting Notes\n\nDiscussed timeline.")
+            engine = SearchEngine(
+                content_dir=Path(tmpdir),
+                index_dir=Path(idx_dir),
+                embed_fn=_mock_embed,
+                filesystem=fs,
+            )
+            app = create_api(fs)
+            router = create_ui_router(fs, search_engine=engine)
+            app.include_router(router)
+            client = TestClient(app)
+
+            # Build index first
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(
+                engine.build_index(fs.list_all_files())
+            )
+
+            response = client.get("/ui/search", params={"q": "authentication OAuth"})
+            assert response.status_code == 200
+            data = response.json()
+            assert "results" in data
+            assert data["total"] > 0
+            assert "indexing" in data
+            assert data["indexing"] is False
+            result = data["results"][0]
+            assert "file_path" in result
+            assert "content" in result
+            assert "score" in result
+
+    def test_ui_search_empty_query_returns_empty(self):
+        """GET /ui/search with empty query returns empty results."""
+        from stash_mcp.search import SearchEngine
+
+        with TemporaryDirectory() as tmpdir, TemporaryDirectory() as idx_dir:
+            fs = FileSystem(Path(tmpdir))
+            engine = SearchEngine(
+                content_dir=Path(tmpdir),
+                index_dir=Path(idx_dir),
+                embed_fn=_mock_embed,
+            )
+            app = create_api(fs)
+            router = create_ui_router(fs, search_engine=engine)
+            app.include_router(router)
+            client = TestClient(app)
+
+            response = client.get("/ui/search", params={"q": ""})
+            assert response.status_code == 200
+            data = response.json()
+            assert data["results"] == []
+            assert data["total"] == 0
+
+    def test_no_search_endpoint_without_engine(self, ui_client):
+        """GET /ui/search returns 404 when search engine is not enabled."""
+        response = ui_client.get("/ui/search", params={"q": "test"})
+        assert response.status_code in (404, 405)
 
 
 class TestUIFeatures:
@@ -305,3 +418,78 @@ class TestUIFeatures:
         body = response.text
         assert "scrollbar-width:thin" in body
         assert "::-webkit-scrollbar" in body
+
+
+class TestUIEvents:
+    """Tests for event emission from UI mutation routes."""
+
+    @pytest.fixture
+    def ui_client_with_listener(self):
+        """Create a test client with event listener attached."""
+        from unittest.mock import MagicMock
+
+        from stash_mcp.events import _listeners, add_listener
+
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("hello.md", "# Hello World")
+
+            app = create_api(fs)
+            router = create_ui_router(fs)
+            app.include_router(router)
+            client = TestClient(app)
+
+            listener = MagicMock()
+            add_listener(listener)
+            yield client, listener
+            _listeners.remove(listener)
+
+    def test_ui_save_new_file_emits_created(self, ui_client_with_listener):
+        """POST /ui/save for a new file emits content_created event."""
+        client, listener = ui_client_with_listener
+        client.post(
+            "/ui/save",
+            data={"path": "new.md", "content": "# New"},
+            follow_redirects=False,
+        )
+        listener.assert_called_once()
+        args = listener.call_args[0]
+        assert args[0] == "content_created"
+        assert args[1] == "new.md"
+
+    def test_ui_save_existing_file_emits_updated(self, ui_client_with_listener):
+        """POST /ui/save for an existing file emits content_updated event."""
+        client, listener = ui_client_with_listener
+        client.post(
+            "/ui/save",
+            data={"path": "hello.md", "content": "# Updated"},
+            follow_redirects=False,
+        )
+        listener.assert_called_once()
+        args = listener.call_args[0]
+        assert args[0] == "content_updated"
+        assert args[1] == "hello.md"
+
+    def test_ui_delete_emits_deleted(self, ui_client_with_listener):
+        """POST /ui/delete emits content_deleted event."""
+        client, listener = ui_client_with_listener
+        client.post("/ui/delete/hello.md", follow_redirects=False)
+        listener.assert_called_once()
+        args = listener.call_args[0]
+        assert args[0] == "content_deleted"
+        assert args[1] == "hello.md"
+
+    def test_ui_move_emits_moved(self, ui_client_with_listener):
+        """POST /ui/move emits content_moved event with correct kwargs."""
+        client, listener = ui_client_with_listener
+        client.post(
+            "/ui/move/hello.md",
+            data={"destination": "renamed.md"},
+            follow_redirects=False,
+        )
+        listener.assert_called_once()
+        args = listener.call_args[0]
+        kwargs = listener.call_args[1]
+        assert args[0] == "content_moved"
+        assert args[1] == "renamed.md"
+        assert kwargs.get("source_path") == "hello.md"

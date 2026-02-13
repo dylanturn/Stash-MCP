@@ -74,11 +74,12 @@ def _get_description(fs: FileSystem, path: str) -> str:
         return f"Content file: {path}"
 
 
-def create_mcp_server(filesystem: FileSystem) -> FastMCP:
+def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
     """Create and configure the FastMCP server.
 
     Args:
         filesystem: Filesystem instance for content management
+        search_engine: Optional SearchEngine instance for semantic search
 
     Returns:
         Configured FastMCP server
@@ -282,5 +283,48 @@ def create_mcp_server(filesystem: FileSystem) -> FastMCP:
         emit(CONTENT_MOVED, dest_path, source_path=source_path)
         logger.info(f"Moved: {source_path} -> {dest_path}")
         return f"Moved: {source_path} -> {dest_path}"
+
+    # --- Search tool (conditional) ---
+
+    if search_engine is not None:
+
+        @mcp.tool(description="Semantic search across stashed content")
+        async def search_content(
+            query: str,
+            max_results: int = 5,
+            file_types: str | None = None,
+        ) -> str:
+            """Search for content by meaning using semantic similarity.
+
+            Args:
+                query: Natural language search query
+                max_results: Maximum number of results (default 5)
+                file_types: Optional comma-separated file extensions
+                    (e.g. ".md,.py")
+            """
+            types_list = None
+            if file_types:
+                types_list = [
+                    t.strip() for t in file_types.split(",") if t.strip()
+                ]
+
+            results = await search_engine.search(
+                query, max_results=max_results, file_types=types_list
+            )
+
+            if not results:
+                return "No results found."
+
+            lines = []
+            for r in results:
+                lines.append(f"📄 {r.file_path} (score: {r.score:.2f})")
+                if r.context:
+                    lines.append(f"   Context: {r.context}")
+                snippet = r.content[:200]
+                if len(r.content) > 200:
+                    snippet += "..."
+                lines.append(f"   {snippet}")
+                lines.append("")
+            return "\n".join(lines)
 
     return mcp
