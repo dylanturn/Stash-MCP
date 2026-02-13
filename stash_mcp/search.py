@@ -4,6 +4,7 @@ Provides VectorStore (numpy-based cosine similarity search with pickle persisten
 and SearchEngine (chunking → optional contextual enrichment → embedding → storage → query).
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -79,8 +80,14 @@ class VectorStore:
         with open(self.store_path, "wb") as f:
             pickle.dump({"vectors": self._vectors, "metadata": self._metadata}, f)
 
+    async def save_async(self) -> None:
+        """Persist vectors and metadata to disk without blocking the event loop."""
+        await asyncio.to_thread(self.save)
+
     def add(self, embeddings: list[list[float]], metadata: list[dict]) -> None:
-        """Append vectors and metadata. Auto-saves to disk.
+        """Append vectors and metadata.
+
+        Note: caller is responsible for persistence (call save/save_async).
 
         Args:
             embeddings: List of embedding vectors.
@@ -99,10 +106,11 @@ class VectorStore:
         else:
             self._vectors = np.vstack([self._vectors, new_vectors])
         self._metadata.extend(metadata)
-        self.save()
 
     def remove_by_file(self, file_path: str) -> int:
         """Remove all vectors belonging to a file.
+
+        Note: caller is responsible for persistence (call save/save_async).
 
         Args:
             file_path: Relative file path to remove.
@@ -128,7 +136,6 @@ class VectorStore:
             self._vectors = None
             self._metadata = []
 
-        self.save()
         return removed
 
     def search(
@@ -275,6 +282,10 @@ class IndexMeta:
                 indent=2,
             )
 
+    async def save_async(self, path: Path) -> None:
+        """Persist to JSON file without blocking the event loop."""
+        await asyncio.to_thread(self.save, path)
+
     @classmethod
     def load(cls, path: Path) -> "IndexMeta":
         """Load from JSON file, or return empty if not found."""
@@ -368,6 +379,7 @@ class SearchEngine:
 
         self._ready = self.store.count > 0
         self._indexing = False
+        self._lock = asyncio.Lock()
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of document texts using the configured embedder.
@@ -471,6 +483,8 @@ class SearchEngine:
         """Build or rebuild the index for the given files.
 
         Only re-embeds files whose content has changed (hash-detected).
+        Yields to the event loop between files and batches persistence
+        every 10 files to avoid blocking.
 
         Args:
             file_paths: List of relative file paths to index.
@@ -480,6 +494,8 @@ class SearchEngine:
         """
         self._indexing = True
         total_chunks = 0
+        files_since_save = 0
+        _SAVE_BATCH_SIZE = 10
 
         try:
             for rel_path in file_paths:
@@ -488,7 +504,9 @@ class SearchEngine:
                     continue
 
                 try:
-                    content = full_path.read_text(encoding="utf-8")
+                    content = await asyncio.to_thread(
+                        full_path.read_text, encoding="utf-8"
+                    )
                 except Exception as e:
                     logger.warning(f"Could not read {rel_path}: {e}")
                     continue
@@ -500,20 +518,38 @@ class SearchEngine:
                     total_chunks += self.meta.chunk_counts.get(rel_path, 0)
                     continue
 
-                chunks_added = await self.index_file(rel_path, content=content)
+                async with self._lock:
+                    chunks_added = await self._index_file_locked(
+                        rel_path, content=content
+                    )
                 total_chunks += chunks_added
+                files_since_save += 1
 
+                # Batch persistence
+                if files_since_save >= _SAVE_BATCH_SIZE:
+                    await self.store.save_async()
+                    await self.meta.save_async(self.index_dir / "index_meta.json")
+                    files_since_save = 0
+
+                # Yield to the event loop between files
+                await asyncio.sleep(0)
+
+            # Final save
             self.meta.embedder_model = self.embedder_model
-            self.meta.save(self.index_dir / "index_meta.json")
+            await self.store.save_async()
+            await self.meta.save_async(self.index_dir / "index_meta.json")
             self._ready = True
             return total_chunks
         finally:
             self._indexing = False
 
-    async def index_file(
+    async def _index_file_locked(
         self, relative_path: str, *, content: str | None = None
     ) -> int:
-        """Index or re-index a single file.
+        """Index or re-index a single file (no persistence, no lock acquisition).
+
+        Must be called while holding ``self._lock``. Used by ``build_index()``
+        which manages its own lock and batched saves.
 
         Args:
             relative_path: Relative path to the file.
@@ -530,7 +566,9 @@ class SearchEngine:
             if not full_path.is_file():
                 return 0
             try:
-                content = full_path.read_text(encoding="utf-8")
+                content = await asyncio.to_thread(
+                    full_path.read_text, encoding="utf-8"
+                )
             except Exception as e:
                 logger.warning(f"Could not read {relative_path}: {e}")
                 return 0
@@ -565,9 +603,29 @@ class SearchEngine:
 
         self.meta.file_hashes[relative_path] = content_h
         self.meta.chunk_counts[relative_path] = len(chunks)
-        self.meta.save(self.index_dir / "index_meta.json")
 
         return len(chunks)
+
+    async def index_file(
+        self, relative_path: str, *, content: str | None = None
+    ) -> int:
+        """Index or re-index a single file (public API).
+
+        Acquires the lock, indexes the file, and persists to disk.
+        Used for incremental updates from event listeners.
+
+        Args:
+            relative_path: Relative path to the file.
+            content: Optional file content (read from disk if not provided).
+
+        Returns:
+            Number of chunks indexed.
+        """
+        async with self._lock:
+            chunks = await self._index_file_locked(relative_path, content=content)
+        await self.store.save_async()
+        await self.meta.save_async(self.index_dir / "index_meta.json")
+        return chunks
 
     async def remove_file(self, relative_path: str) -> None:
         """Remove a file from the index.
@@ -575,10 +633,12 @@ class SearchEngine:
         Args:
             relative_path: Relative path to the file.
         """
-        removed = self.store.remove_by_file(relative_path)
-        self.meta.file_hashes.pop(relative_path, None)
-        self.meta.chunk_counts.pop(relative_path, None)
-        self.meta.save(self.index_dir / "index_meta.json")
+        async with self._lock:
+            removed = self.store.remove_by_file(relative_path)
+            self.meta.file_hashes.pop(relative_path, None)
+            self.meta.chunk_counts.pop(relative_path, None)
+        await self.store.save_async()
+        await self.meta.save_async(self.index_dir / "index_meta.json")
         if removed:
             logger.info(f"Removed {removed} chunks for {relative_path}")
 
@@ -606,7 +666,8 @@ class SearchEngine:
 
         # Get more results than needed so we can filter
         fetch_n = max_results * 3 if file_types else max_results
-        raw_results = self.store.search(query_embedding, top_n=fetch_n)
+        async with self._lock:
+            raw_results = self.store.search(query_embedding, top_n=fetch_n)
 
         results: list[SearchResult] = []
         for r in raw_results:
@@ -639,8 +700,9 @@ class SearchEngine:
         Returns:
             Total number of chunks indexed.
         """
-        self.store.clear()
-        self.meta = IndexMeta()
+        async with self._lock:
+            self.store.clear()
+            self.meta = IndexMeta()
 
         file_paths = []
         if self._filesystem is not None:
