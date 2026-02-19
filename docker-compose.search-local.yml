@@ -1,0 +1,17 @@
+services:
+  stash-mcp:
+    build: .
+    container_name: stash-mcp
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./content:/data/content
+      - ./stash-index:/data/stash-index
+    environment:
+      - STASH_CONTENT_ROOT=/data/content
+      - STASH_HOST=0.0.0.0
+      - STASH_PORT=8000
+      - STASH_SEARCH_ENABLED=true
+      - STASH_SEARCH_INDEX_DIR=/data/stash-index
+      - STASH_SEARCH_EMBEDDER_MODEL=sentence-transformers:all-mpnet-base-v2
+    restart: unless-stopped
