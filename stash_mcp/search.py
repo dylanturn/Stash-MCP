@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 # Maximum characters to pass to contextual retrieval model (~200k tokens ≈ 150k chars)
 MAX_CONTEXTUAL_DOCUMENT_CHARS = 150_000
 
+# Content-driven chunking tuning knobs
+_TARGET_MULTIPLIER = 1.5       # chunk target = avg_paragraph_tokens × this factor
+_MIN_TARGET_TOKENS = 100       # floor to prevent absurdly small chunks
+_MAX_TOKENS_UTILIZATION = 0.8  # cap chunk target at this fraction of model's max
+_CHARS_PER_TOKEN = 4           # approximate character-to-token ratio for char budgets
+_OVERLAP_FRACTION = 0.1        # fraction of chunk target to use as section overlap
+
 
 @dataclass
 class ChunkMetadata:
@@ -255,6 +262,89 @@ def _chunk_text(text: str, max_chunk_size: int = 1500) -> list[str]:
     return chunks if chunks else [text.strip()]
 
 
+def _split_on_boundaries(content: str) -> list[str]:
+    """Split content on natural boundaries: markdown headings then paragraphs.
+
+    First splits on markdown headings (keeping the heading with its section),
+    then further splits each section on paragraph breaks (double newline).
+
+    Args:
+        content: The text to split.
+
+    Returns:
+        List of non-empty sections in document order.
+    """
+    if not content or not content.strip():
+        return []
+
+    # Split on markdown headings (keep heading with its section)
+    heading_pattern = re.compile(r"(?=^#{1,6}\s)", re.MULTILINE)
+    heading_sections = heading_pattern.split(content)
+
+    result: list[str] = []
+    for section in heading_sections:
+        if not section.strip():
+            continue
+        # Further split on paragraph boundaries
+        paragraphs = re.split(r"\n\s*\n", section)
+        for para in paragraphs:
+            para = para.strip()
+            if para:
+                result.append(para)
+
+    return result
+
+
+def _select_overlap(sections: list[str], budget_chars: int) -> list[str]:
+    """Select trailing sections to carry over as overlap into the next chunk.
+
+    Walks backwards through ``sections`` accumulating sections until the
+    character budget is exhausted.
+
+    Args:
+        sections: The sections that form the current chunk.
+        budget_chars: Maximum total characters to include in the overlap.
+
+    Returns:
+        A (possibly empty) prefix of overlap sections in original order.
+    """
+    result: list[str] = []
+    total = 0
+    for section in reversed(sections):
+        if total + len(section) > budget_chars:
+            break
+        result.insert(0, section)
+        total += len(section)
+    return result
+
+
+def _force_split_section(section: str, target_chars: int) -> list[str]:
+    """Force-split a section that exceeds ``target_chars`` on sentence boundaries.
+
+    Falls back to returning the whole section as-is if no sentence boundaries
+    are found.
+
+    Args:
+        section: The oversized section text.
+        target_chars: Target maximum characters per piece.
+
+    Returns:
+        List of pieces, each ideally ≤ ``target_chars`` characters.
+    """
+    sentences = re.split(r"(?<=[.!?])\s+", section)
+    chunks: list[str] = []
+    current = ""
+    for sent in sentences:
+        if len(current) + len(sent) + 1 > target_chars and current:
+            chunks.append(current)
+            current = sent
+        else:
+            current = f"{current} {sent}" if current else sent
+    if current:
+        chunks.append(current)
+    return chunks if chunks else [section]
+
+
 def _content_hash(content: str) -> str:
     """Compute SHA-256 hash of content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -437,6 +527,135 @@ class SearchEngine:
         result = await self._embedder.embed_query(text)
         return result.embeddings[0]
 
+    async def _compute_chunk_target(self, sections: list[str]) -> int | None:
+        """Derive chunk target (in tokens) from average section size.
+
+        Samples up to 20 sections to estimate average token count, then targets
+        ~1.5× that average, capped at 80 % of the model's maximum input tokens.
+
+        Returns ``None`` when token introspection is unavailable (caller should
+        fall back to character-based chunking via ``_chunk_text``).
+
+        Args:
+            sections: The boundary-split sections of the document.
+
+        Returns:
+            Target chunk size in tokens, or ``None`` to signal fallback.
+        """
+        if not sections:
+            return _MIN_TARGET_TOKENS
+
+        sample = sections[:20]
+        token_counts: list[int] = []
+        for section in sample:
+            try:
+                count = await self._embedder.count_tokens(section)
+                if count is not None:
+                    token_counts.append(count)
+            except Exception:
+                pass
+
+        if not token_counts:
+            return None
+
+        avg_tokens = sum(token_counts) / len(token_counts)
+        target = int(avg_tokens * _TARGET_MULTIPLIER)
+
+        try:
+            max_tokens = await self._embedder.max_input_tokens()
+            if max_tokens is not None:
+                target = min(target, int(max_tokens * _MAX_TOKENS_UTILIZATION))
+        except Exception:
+            pass
+
+        return max(target, _MIN_TARGET_TOKENS)
+
+    async def _chunk_file(self, content: str) -> list[str]:
+        """Chunk content using content-driven sizing.
+
+        Derives the chunk target from the average paragraph/section size in the
+        document, capped at the model's token limit (as a guardrail, not a goal).
+        Falls back to character-based chunking via ``_chunk_text`` when:
+
+        * ``embed_fn`` is injected (test mode — no real embedder available), or
+        * the embedder does not support token introspection.
+
+        Args:
+            content: Full document text to chunk.
+
+        Returns:
+            List of non-empty chunk strings.
+        """
+        # Test path: embed_fn is a mock — no real embedder for introspection
+        if self._embed_fn is not None:
+            return _chunk_text(content)
+
+        # Ensure the embedder is initialised so we can call count_tokens
+        if self._embedder is None:
+            try:
+                from pydantic_ai import Embedder
+
+                self._embedder = Embedder(self.embedder_model)
+            except ImportError:
+                return _chunk_text(content)
+
+        sections = _split_on_boundaries(content)
+        if not sections:
+            stripped = content.strip()
+            return [stripped] if stripped else []
+
+        target_tokens = await self._compute_chunk_target(sections)
+        if target_tokens is None:
+            # Introspection unavailable — fall back to character-based chunking
+            return _chunk_text(content)
+
+        # Convert token target to approximate character target
+        target_chars = target_tokens * _CHARS_PER_TOKEN
+        overlap_chars = int(target_chars * _OVERLAP_FRACTION)
+
+        chunks: list[str] = []
+        current_sections: list[str] = []
+        current_chars = 0
+
+        for section in sections:
+            section_chars = len(section)
+
+            if section_chars > target_chars:
+                # Flush current accumulation first
+                if current_sections:
+                    chunks.append("\n\n".join(current_sections))
+                    overlap_sections = _select_overlap(current_sections, overlap_chars)
+                    current_sections = overlap_sections
+                    current_chars = sum(len(s) for s in current_sections)
+
+                # Force-split the oversized section on sentence boundaries
+                sub_sections = _force_split_section(section, target_chars)
+                for sub in sub_sections[:-1]:
+                    chunks.append(sub)
+                # Seed next accumulation with the last sub-section
+                last = sub_sections[-1]
+                current_sections.append(last)
+                current_chars += len(last)
+
+            elif current_chars + section_chars > target_chars and current_sections:
+                # Current chunk is full — flush and start a new one with overlap
+                chunks.append("\n\n".join(current_sections))
+                overlap_sections = _select_overlap(current_sections, overlap_chars)
+                current_sections = overlap_sections + [section]
+                current_chars = sum(len(s) for s in current_sections)
+
+            else:
+                current_sections.append(section)
+                current_chars += section_chars
+
+        if current_sections:
+            chunks.append("\n\n".join(current_sections))
+
+        if not chunks:
+            stripped = content.strip()
+            return [stripped] if stripped else []
+        return chunks
+
     async def _contextualise_chunk(
         self, chunk: str, full_document: str
     ) -> str | None:
@@ -573,7 +792,7 @@ class SearchEngine:
                 logger.warning(f"Could not read {relative_path}: {e}")
                 return 0
 
-        chunks = _chunk_text(content)
+        chunks = await self._chunk_file(content)
         if not chunks:
             return 0
 

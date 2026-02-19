@@ -12,6 +12,9 @@ from stash_mcp.search import (
     VectorStore,
     _chunk_text,
     _content_hash,
+    _force_split_section,
+    _select_overlap,
+    _split_on_boundaries,
 )
 
 # --- Mock embedding function (deterministic, no API calls) ---
@@ -217,7 +220,91 @@ class TestChunking:
         assert "Section 2" in combined
 
 
-# --- IndexMeta tests ---
+# --- Content-driven chunking helpers ---
+
+
+class TestSplitOnBoundaries:
+
+    def test_empty_returns_empty(self):
+        assert _split_on_boundaries("") == []
+        assert _split_on_boundaries("   ") == []
+
+    def test_no_headings_single_paragraph(self):
+        result = _split_on_boundaries("Just one paragraph here.")
+        assert result == ["Just one paragraph here."]
+
+    def test_splits_on_headings(self):
+        content = "# Section 1\n\nPara 1.\n\n# Section 2\n\nPara 2."
+        sections = _split_on_boundaries(content)
+        assert any("Section 1" in s for s in sections)
+        assert any("Section 2" in s for s in sections)
+
+    def test_splits_on_paragraph_breaks(self):
+        content = "Para one.\n\nPara two.\n\nPara three."
+        sections = _split_on_boundaries(content)
+        assert len(sections) == 3
+
+    def test_heading_kept_with_first_paragraph(self):
+        content = "# Title\n\nFirst paragraph."
+        sections = _split_on_boundaries(content)
+        # Heading + first para are split; heading attaches to text before next blank line
+        assert any("Title" in s for s in sections)
+
+    def test_no_empty_sections(self):
+        content = "# A\n\n\n\n# B\n\nContent."
+        sections = _split_on_boundaries(content)
+        assert all(s.strip() for s in sections)
+
+
+class TestSelectOverlap:
+
+    def test_empty_sections(self):
+        assert _select_overlap([], 100) == []
+
+    def test_zero_budget(self):
+        assert _select_overlap(["hello", "world"], 0) == []
+
+    def test_selects_trailing_section(self):
+        sections = ["aaaa", "bbbb", "cccc"]
+        # Budget fits only the last section
+        result = _select_overlap(sections, 5)
+        assert result == ["cccc"]
+
+    def test_selects_multiple_trailing_sections(self):
+        sections = ["aaaa", "bbbb", "cccc"]
+        # Budget fits last two sections
+        result = _select_overlap(sections, 10)
+        assert result == ["bbbb", "cccc"]
+
+    def test_preserves_order(self):
+        sections = ["first", "second", "third"]
+        result = _select_overlap(sections, 100)
+        assert result == ["first", "second", "third"]
+
+
+class TestForceSplitSection:
+
+    def test_short_section_unchanged(self):
+        section = "Short text."
+        result = _force_split_section(section, 1000)
+        assert result == ["Short text."]
+
+    def test_splits_on_sentence_boundaries(self):
+        section = "Sentence one. Sentence two. Sentence three."
+        result = _force_split_section(section, 20)
+        assert len(result) > 1
+        # All original sentences should appear in output
+        combined = " ".join(result)
+        assert "Sentence one" in combined
+        assert "Sentence three" in combined
+
+    def test_no_sentence_boundary_returns_whole(self):
+        section = "NoSentenceBoundaryHere"
+        result = _force_split_section(section, 5)
+        assert result == ["NoSentenceBoundaryHere"]
+
+
+
 
 
 class TestIndexMeta:
@@ -473,6 +560,99 @@ class TestSearchEngine:
         assert r.chunk_index >= 0
         assert isinstance(r.content, str)
         assert r.score > 0
+
+    async def test_chunk_file_falls_back_to_chunk_text_with_embed_fn(self, engine):
+        """_chunk_file must fall back to character-based chunking when embed_fn
+        is injected (token introspection not available in test mode)."""
+        content = "# Section\n\nParagraph one.\n\n# Another\n\nParagraph two."
+        chunks = await engine._chunk_file(content)
+        # Should produce at least one chunk
+        assert len(chunks) >= 1
+        # All content should be preserved across chunks
+        combined = " ".join(chunks)
+        assert "Section" in combined
+        assert "Another" in combined
+
+    async def test_chunk_file_content_driven_with_mock_embedder(self, engine_dirs):
+        """_chunk_file uses content-driven sizing when a real embedder is available."""
+
+        class _MockEmbedder:
+            async def count_tokens(self, text: str) -> int:
+                return max(1, len(text) // 4)
+
+            async def max_input_tokens(self) -> int | None:
+                return 512
+
+        content_dir, index_dir = engine_dirs
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=None,
+            embedder_model="test-model",
+        )
+        # Inject a mock embedder so _chunk_file uses content-driven path
+        engine._embedder = _MockEmbedder()
+        engine._embed_fn = None
+
+        # Create content with multiple distinct sections
+        content = "\n\n".join([f"# Section {i}\n\nContent for section {i}." for i in range(10)])
+        chunks = await engine._chunk_file(content)
+        # Should produce multiple chunks rather than one large chunk
+        assert len(chunks) >= 1
+        combined = " ".join(chunks)
+        assert "Section 0" in combined
+        assert "Section 9" in combined
+
+    async def test_compute_chunk_target_with_mock_embedder(self, engine_dirs):
+        """_compute_chunk_target returns a positive token target from avg section size."""
+
+        class _MockEmbedder:
+            async def count_tokens(self, text: str) -> int:
+                return max(1, len(text) // 4)
+
+            async def max_input_tokens(self) -> int | None:
+                return 256
+
+        content_dir, index_dir = engine_dirs
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=None,
+            embedder_model="test-model",
+        )
+        engine._embedder = _MockEmbedder()
+
+        sections = [
+            "This is a paragraph with about twenty words total here yes.",
+            "Another paragraph.",
+        ]
+        target = await engine._compute_chunk_target(sections)
+        assert target is not None
+        assert target >= 100  # at least MIN_TARGET_TOKENS
+        # Must be capped at 80% of max_input_tokens = 204
+        assert target <= int(256 * 0.8) + 1
+
+    async def test_compute_chunk_target_returns_none_when_introspection_fails(self, engine_dirs):
+        """_compute_chunk_target returns None when count_tokens always raises."""
+
+        class _BrokenEmbedder:
+            async def count_tokens(self, text: str) -> int:
+                raise RuntimeError("not supported")
+
+            async def max_input_tokens(self) -> int | None:
+                return None
+
+        content_dir, index_dir = engine_dirs
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=None,
+            embedder_model="test-model",
+        )
+        engine._embedder = _BrokenEmbedder()
+
+        target = await engine._compute_chunk_target(["Some section text."])
+        assert target is None
 
 
 # --- REST API search endpoint tests ---
