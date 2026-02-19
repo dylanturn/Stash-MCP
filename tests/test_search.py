@@ -6,12 +6,14 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from stash_mcp.search import (
+    ChunkMetadata,
     IndexMeta,
     SearchEngine,
     SearchResult,
     VectorStore,
     _chunk_text,
     _content_hash,
+    _split_on_boundaries,
 )
 
 # --- Mock embedding function (deterministic, no API calls) ---
@@ -217,7 +219,200 @@ class TestChunking:
         assert "Section 2" in combined
 
 
-# --- IndexMeta tests ---
+# --- _split_on_boundaries tests ---
+
+
+class TestSplitOnBoundaries:
+
+    def test_empty_text(self):
+        """Test empty text returns empty list."""
+        assert _split_on_boundaries("") == []
+        assert _split_on_boundaries("   ") == []
+
+    def test_plain_paragraph(self):
+        """Test plain text with no headings returns paragraphs."""
+        text = "First paragraph.\n\nSecond paragraph."
+        result = _split_on_boundaries(text)
+        assert len(result) == 2
+        assert result[0] == "First paragraph."
+        assert result[1] == "Second paragraph."
+
+    def test_heading_splits(self):
+        """Test that markdown headings produce separate sections."""
+        text = "# Title\n\nIntro.\n\n## Subsection\n\nBody."
+        result = _split_on_boundaries(text)
+        assert any("Title" in s for s in result)
+        assert any("Subsection" in s for s in result)
+        assert any("Body" in s for s in result)
+
+    def test_strips_whitespace(self):
+        """Test that sections are stripped of surrounding whitespace."""
+        text = "  para one  \n\n  para two  "
+        result = _split_on_boundaries(text)
+        assert result == ["para one", "para two"]
+
+    def test_no_empty_sections(self):
+        """Test that empty sections are excluded."""
+        text = "# Heading\n\n\n\n# Another\n\nContent"
+        result = _split_on_boundaries(text)
+        assert all(s.strip() for s in result)
+
+
+# --- Adaptive chunking tests ---
+
+
+class TestAdaptiveChunking:
+    """Test _chunk_file, _split_with_overlap, _select_overlap, _force_split_section."""
+
+    def _make_mock_embedder(self, max_tokens: int | None = 100, chars_per_token: int = 4):
+        """Return a simple mock embedder with configurable token counts."""
+
+        class MockEmbedder:
+            async def max_input_tokens(self):
+                return max_tokens
+
+            async def count_tokens(self, text: str):
+                return len(text) // chars_per_token
+
+        return MockEmbedder()
+
+    def _make_engine(self, content_dir, index_dir):
+        return SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,  # use mock so no real embedder needed
+        )
+
+    async def test_chunk_file_whole_file_when_small(self, tmp_path):
+        """Files that fit within 90% of token limit are embedded whole."""
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        engine._embedder = self._make_mock_embedder(max_tokens=1000)
+
+        # 10 chars → ~2 tokens, well within 90% of 1000
+        result = await engine._chunk_file("hello world", "test.md")
+        assert len(result) == 1
+        assert result[0].content == "hello world"
+        assert result[0].chunk_index == 0
+        assert result[0].file_path == "test.md"
+
+    async def test_chunk_file_whole_file_when_introspection_unavailable(self, tmp_path):
+        """When max_input_tokens/count_tokens returns None, embed whole file."""
+
+        class NullEmbedder:
+            async def max_input_tokens(self):
+                return None
+
+            async def count_tokens(self, text):
+                return None
+
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        engine._embedder = NullEmbedder()
+
+        result = await engine._chunk_file("some content", "test.md")
+        assert len(result) == 1
+        assert result[0].content == "some content"
+
+    async def test_chunk_file_splits_large_file(self, tmp_path):
+        """Files exceeding 90% of token limit are split into multiple chunks."""
+        # max_tokens=10 so threshold is 9; each 4 chars = 1 token
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        engine._embedder = self._make_mock_embedder(max_tokens=10, chars_per_token=4)
+
+        # Build content that is clearly too large: 4 sections × 20 chars each = ~5 tokens each
+        text = "# A\n\n" + "x" * 20 + "\n\n# B\n\n" + "y" * 20
+        result = await engine._chunk_file(text, "big.md")
+        assert len(result) > 1
+
+    async def test_chunk_file_content_hash_matches_full_content(self, tmp_path):
+        """All chunks from the same file share the same content_hash."""
+        from stash_mcp.search import _content_hash
+
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        engine._embedder = self._make_mock_embedder(max_tokens=10, chars_per_token=4)
+
+        text = "# A\n\n" + "x" * 20 + "\n\n# B\n\n" + "y" * 20
+        result = await engine._chunk_file(text, "big.md")
+        expected_hash = _content_hash(text)
+        for chunk in result:
+            assert chunk.content_hash == expected_hash
+
+    async def test_split_with_overlap_chunk_indices_sequential(self, tmp_path):
+        """Chunk indices are sequential starting from 0."""
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        engine._embedder = self._make_mock_embedder(max_tokens=10, chars_per_token=4)
+
+        text = "\n\n".join(f"Para {i}: " + "word " * 5 for i in range(10))
+        chunks = await engine._split_with_overlap(text, "doc.md", max_tokens=10)
+        indices = [c.chunk_index for c in chunks]
+        assert indices == list(range(len(chunks)))
+
+    def test_select_overlap_empty_input(self, tmp_path):
+        """_select_overlap with empty sections returns empty list."""
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        result, tokens = engine._select_overlap([], 50)
+        assert result == []
+        assert tokens == 0
+
+    def test_select_overlap_respects_budget(self, tmp_path):
+        """_select_overlap does not exceed overlap_tokens budget."""
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        # Each "word" section ≈ 1 token (4 chars ÷ 4); budget = 2 tokens
+        sections = ["aaaa", "bbbb", "cccc", "dddd"]
+        result, tokens = engine._select_overlap(sections, overlap_tokens=2)
+        assert tokens <= 2
+        # Should have carried forward at most 2 sections
+        assert len(result) <= 2
+
+    async def test_force_split_section_returns_nonempty(self, tmp_path):
+        """_force_split_section always returns at least one part."""
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        engine._embedder = self._make_mock_embedder(max_tokens=100, chars_per_token=4)
+
+        result = await engine._force_split_section(
+            "Short text.", target_tokens=50, overlap_tokens=5
+        )
+        assert len(result) >= 1
+        assert all(isinstance(p, str) for p in result)
+
+    async def test_force_split_section_splits_long_text(self, tmp_path):
+        """_force_split_section splits text exceeding target_tokens."""
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        engine._embedder = self._make_mock_embedder(max_tokens=100, chars_per_token=4)
+
+        # 5 sentences × 40 chars each = ~10 tokens each; target = 15 tokens
+        sentences = ["Word " * 8 + "end." for _ in range(5)]
+        text = " ".join(sentences)
+        result = await engine._force_split_section(text, target_tokens=15, overlap_tokens=2)
+        assert len(result) > 1
+
+    async def test_index_file_locked_uses_chunk_metadata_with_embed_fn(self, tmp_path):
+        """With embed_fn, _index_file_locked uses _chunk_text fallback."""
+        content_dir = tmp_path / "content"
+        content_dir.mkdir()
+        index_dir = tmp_path / "index"
+        (content_dir / "test.md").write_text("# Title\n\nSome content.")
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+        )
+        async with engine._lock:
+            count = await engine._index_file_locked("test.md")
+        assert count > 0
+        assert engine.indexed_files == 1
+        assert engine.indexed_chunks > 0
+
+    async def test_chunk_file_metadata_fields(self, tmp_path):
+        """_chunk_file results have correct file_path and non-empty content."""
+        engine = self._make_engine(tmp_path / "content", tmp_path / "index")
+        engine._embedder = self._make_mock_embedder(max_tokens=1000)
+
+        result = await engine._chunk_file("Hello, world!", "notes/test.md")
+        assert len(result) == 1
+        assert result[0].file_path == "notes/test.md"
+        assert result[0].content == "Hello, world!"
+        assert isinstance(result[0], ChunkMetadata)
 
 
 class TestIndexMeta:

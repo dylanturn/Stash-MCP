@@ -193,6 +193,29 @@ class VectorStore:
         return len(self._metadata)
 
 
+def _split_on_boundaries(text: str) -> list[str]:
+    """Split text on markdown headings and paragraph boundaries.
+
+    Splits first on markdown headings (keeping heading with its section), then
+    further splits each section on paragraph boundaries (blank lines).
+
+    Args:
+        text: The text to split.
+
+    Returns:
+        List of non-empty sections/paragraphs.
+    """
+    heading_pattern = re.compile(r"(?=^#{1,6}\s)", re.MULTILINE)
+    sections = heading_pattern.split(text)
+    sections = [s.strip() for s in sections if s.strip()]
+
+    result = []
+    for section in sections:
+        paragraphs = re.split(r"\n\s*\n", section)
+        result.extend(p.strip() for p in paragraphs if p.strip())
+    return result
+
+
 def _chunk_text(text: str, max_chunk_size: int = 1500) -> list[str]:
     """Split text into chunks using a markdown-aware strategy.
 
@@ -479,6 +502,201 @@ class SearchEngine:
             logger.warning(f"Contextual retrieval failed: {e}")
             return None
 
+    async def _chunk_file(self, content: str, relative_path: str) -> list[ChunkMetadata]:
+        """Decide between whole-file embedding and adaptive chunking.
+
+        If the file fits within 90% of the model's token limit, it is embedded
+        as a single chunk for maximum coherence. Otherwise, it is split into
+        overlapping chunks sized to the model's actual token window.
+
+        Falls back to whole-file embedding when the embedder does not support
+        token introspection (``max_input_tokens`` or ``count_tokens`` returns
+        ``None``).
+
+        Args:
+            content: The file content to chunk.
+            relative_path: Relative path used as ``file_path`` metadata.
+
+        Returns:
+            List of ``ChunkMetadata`` objects (at least one).
+        """
+        if self._embedder is None:
+            try:
+                from pydantic_ai import Embedder
+
+                self._embedder = Embedder(self.embedder_model)
+            except ImportError:
+                raise RuntimeError(
+                    "pydantic-ai is required for semantic search. "
+                    "Install with: pip install 'stash-mcp[search]'"
+                )
+
+        max_tokens = await self._embedder.max_input_tokens()
+        file_tokens = await self._embedder.count_tokens(content)
+
+        if max_tokens is None or file_tokens is None or file_tokens <= int(max_tokens * 0.9):
+            return [
+                ChunkMetadata(
+                    file_path=relative_path,
+                    chunk_index=0,
+                    content=content,
+                    content_hash=_content_hash(content),
+                )
+            ]
+
+        return await self._split_with_overlap(content, relative_path, max_tokens=max_tokens)
+
+    async def _split_with_overlap(
+        self,
+        text: str,
+        relative_path: str,
+        *,
+        max_tokens: int,
+        overlap_ratio: float = 0.1,
+    ) -> list[ChunkMetadata]:
+        """Split text into overlapping chunks sized to the model's token window.
+
+        Splits on markdown heading and paragraph boundaries first, accumulating
+        sections until the target token budget is reached. When a chunk is
+        emitted, trailing sections carry forward as overlap so context at
+        boundaries is preserved.
+
+        Args:
+            text: The text to split.
+            relative_path: Relative path used as ``file_path`` metadata.
+            max_tokens: Model's maximum input token count.
+            overlap_ratio: Fraction of ``target_tokens`` to carry forward as overlap.
+
+        Returns:
+            List of ``ChunkMetadata`` objects.
+        """
+        target_tokens = int(max_tokens * 0.8)
+        overlap_tokens = int(target_tokens * overlap_ratio)
+
+        sections = _split_on_boundaries(text)
+        content_h = _content_hash(text)
+        chunks: list[ChunkMetadata] = []
+        current_sections: list[str] = []
+        current_tokens = 0
+
+        for section in sections:
+            section_tokens = await self._embedder.count_tokens(section) or 0
+
+            if section_tokens > target_tokens and not current_sections:
+                # Section alone exceeds target — force-split on sentences
+                forced = await self._force_split_section(section, target_tokens, overlap_tokens)
+                for part in forced:
+                    chunks.append(
+                        ChunkMetadata(
+                            file_path=relative_path,
+                            chunk_index=len(chunks),
+                            content=part,
+                            content_hash=content_h,
+                        )
+                    )
+                continue
+
+            if current_tokens + section_tokens > target_tokens and current_sections:
+                chunks.append(
+                    ChunkMetadata(
+                        file_path=relative_path,
+                        chunk_index=len(chunks),
+                        content="\n\n".join(current_sections),
+                        content_hash=content_h,
+                    )
+                )
+                # Carry trailing sections forward as overlap
+                current_sections, current_tokens = self._select_overlap(
+                    current_sections, overlap_tokens
+                )
+
+            current_sections.append(section)
+            current_tokens += section_tokens
+
+        if current_sections:
+            chunks.append(
+                ChunkMetadata(
+                    file_path=relative_path,
+                    chunk_index=len(chunks),
+                    content="\n\n".join(current_sections),
+                    content_hash=content_h,
+                )
+            )
+
+        return chunks
+
+    def _select_overlap(
+        self, sections: list[str], overlap_tokens: int
+    ) -> tuple[list[str], int]:
+        """Select trailing sections to carry forward as overlap.
+
+        Uses a character-based token estimate (``len // 4``) rather than
+        ``count_tokens`` to avoid async overhead at every chunk boundary —
+        the overlap budget is approximate by design.
+
+        Args:
+            sections: Sections from the current chunk.
+            overlap_tokens: Approximate token budget for overlap.
+
+        Returns:
+            Tuple of (overlap sections, estimated token count).
+        """
+        overlap_sections: list[str] = []
+        token_budget = 0
+        for section in reversed(sections):
+            est_tokens = len(section) // 4
+            if token_budget + est_tokens > overlap_tokens:
+                break
+            overlap_sections.insert(0, section)
+            token_budget += est_tokens
+        return overlap_sections, token_budget
+
+    async def _force_split_section(
+        self, section: str, target_tokens: int, overlap_tokens: int
+    ) -> list[str]:
+        """Last-resort sentence-level split for an oversized paragraph.
+
+        Used when a single section (paragraph) exceeds the chunk token target.
+        Applies the same overlap logic as ``_split_with_overlap``.
+
+        Args:
+            section: The oversized section text.
+            target_tokens: Token budget per output part.
+            overlap_tokens: Approximate token budget for overlap between parts.
+
+        Returns:
+            List of text parts (at least one).
+        """
+        sentences = re.split(r"(?<=[.!?])\s+", section)
+        parts: list[str] = []
+        current_sentences: list[str] = []
+        current_tokens = 0
+
+        for sent in sentences:
+            sent_tokens = await self._embedder.count_tokens(sent) or 0
+
+            if current_tokens + sent_tokens > target_tokens and current_sentences:
+                parts.append(" ".join(current_sentences))
+                # Carry overlap forward using character estimate
+                overlap_sents: list[str] = []
+                overlap_tok = 0
+                for s in reversed(current_sentences):
+                    est = len(s) // 4
+                    if overlap_tok + est > overlap_tokens:
+                        break
+                    overlap_sents.insert(0, s)
+                    overlap_tok += est
+                current_sentences = overlap_sents
+                current_tokens = overlap_tok
+
+            current_sentences.append(sent)
+            current_tokens += sent_tokens
+
+        if current_sentences:
+            parts.append(" ".join(current_sentences))
+
+        return parts if parts else [section]
+
     async def build_index(self, file_paths: list[str]) -> int:
         """Build or rebuild the index for the given files.
 
@@ -573,38 +791,50 @@ class SearchEngine:
                 logger.warning(f"Could not read {relative_path}: {e}")
                 return 0
 
-        chunks = _chunk_text(content)
-        if not chunks:
+        content_h = _content_hash(content)
+
+        # Use adaptive chunking when a real embedder is present;
+        # fall back to character-based chunking for injected embed_fn (tests).
+        if self._embed_fn is None:
+            chunk_metadata = await self._chunk_file(content, relative_path)
+        else:
+            raw_chunks = _chunk_text(content)
+            if not raw_chunks:
+                return 0
+            chunk_metadata = [
+                ChunkMetadata(
+                    file_path=relative_path,
+                    chunk_index=i,
+                    content=chunk,
+                    content_hash=content_h,
+                )
+                for i, chunk in enumerate(raw_chunks)
+            ]
+
+        if not chunk_metadata:
             return 0
 
-        content_h = _content_hash(content)
         metadata_list: list[dict] = []
         texts_to_embed: list[str] = []
 
-        for i, chunk in enumerate(chunks):
+        for chunk_meta in chunk_metadata:
             context = None
             if self.contextual_retrieval:
-                context = await self._contextualise_chunk(chunk, content)
+                context = await self._contextualise_chunk(chunk_meta.content, content)
 
-            embed_text = f"{context}\n\n{chunk}" if context else chunk
+            embed_text = f"{context}\n\n{chunk_meta.content}" if context else chunk_meta.content
             texts_to_embed.append(embed_text)
 
-            meta = ChunkMetadata(
-                file_path=relative_path,
-                chunk_index=i,
-                content=chunk,
-                context=context,
-                content_hash=content_h,
-            )
-            metadata_list.append(asdict(meta))
+            chunk_meta.context = context
+            metadata_list.append(asdict(chunk_meta))
 
         embeddings = await self._embed(texts_to_embed)
         self.store.add(embeddings, metadata_list)
 
         self.meta.file_hashes[relative_path] = content_h
-        self.meta.chunk_counts[relative_path] = len(chunks)
+        self.meta.chunk_counts[relative_path] = len(chunk_metadata)
 
-        return len(chunks)
+        return len(chunk_metadata)
 
     async def index_file(
         self, relative_path: str, *, content: str | None = None
