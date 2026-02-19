@@ -38,6 +38,8 @@ def _create_search_engine():
             contextual_retrieval=Config.CONTEXTUAL_RETRIEVAL,
             contextual_model=Config.CONTEXTUAL_MODEL,
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            chunk_size=Config.SEARCH_CHUNK_SIZE,
+            chunk_overlap=Config.SEARCH_CHUNK_OVERLAP,
         )
         logger.info(
             f"Search engine initialised (model={Config.SEARCH_EMBEDDER_MODEL}, "

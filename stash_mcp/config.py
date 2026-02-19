@@ -60,6 +60,8 @@ class Config:
     CONTEXTUAL_MODEL: str = os.getenv(
         "STASH_CONTEXTUAL_MODEL", "claude-haiku-4-5-20251001"
     )
+    SEARCH_CHUNK_SIZE: int = int(os.getenv("STASH_SEARCH_CHUNK_SIZE", "1000"))
+    SEARCH_CHUNK_OVERLAP: int = int(os.getenv("STASH_SEARCH_CHUNK_OVERLAP", "100"))
 
     @classmethod
     def ensure_content_dir(cls) -> None:
