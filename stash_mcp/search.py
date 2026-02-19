@@ -193,8 +193,47 @@ class VectorStore:
         return len(self._metadata)
 
 
+def _chunk_text_sliding_window(
+    text: str,
+    chunk_size: int = 1500,
+    chunk_overlap: int = 200,
+) -> list[str]:
+    """Split text into fixed-size overlapping chunks.
+
+    Simple sliding window — no structural parsing, no boundary detection.
+
+    Args:
+        text: The text to chunk.
+        chunk_size: Number of characters per chunk.
+        chunk_overlap: Number of characters to overlap between adjacent chunks.
+
+    Returns:
+        List of text chunks.
+    """
+    if not text or not text.strip():
+        return []
+
+    text = text.strip()
+
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end].strip())
+        start += chunk_size - chunk_overlap
+
+    # Drop any trailing empty chunk
+    return [c for c in chunks if c.strip()]
+
+
 def _chunk_text(text: str, max_chunk_size: int = 1500) -> list[str]:
     """Split text into chunks using a markdown-aware strategy.
+
+    .. deprecated::
+        Use :func:`_chunk_text_sliding_window` instead.
 
     Splitting priority:
     1. Markdown headings (``#``, ``##``, etc.)
@@ -321,6 +360,8 @@ class SearchEngine:
         anthropic_api_key: str | None = None,
         embed_fn=None,
         filesystem=None,
+        chunk_size: int = 1500,
+        chunk_overlap: int = 200,
     ):
         """Initialize the search engine.
 
@@ -334,6 +375,8 @@ class SearchEngine:
             embed_fn: Optional custom embedding function for testing.
                       Signature: async (texts: list[str]) -> list[list[float]]
             filesystem: Optional FileSystem instance for content path filtering.
+            chunk_size: Number of characters per chunk for the sliding window.
+            chunk_overlap: Number of characters to overlap between adjacent chunks.
         """
         self.content_dir = content_dir
         self.index_dir = index_dir
@@ -344,6 +387,8 @@ class SearchEngine:
         self._embed_fn = embed_fn
         self._embedder = None
         self._filesystem = filesystem
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
 
         # Validate embedding dependencies at init time so we fail fast
         # rather than crashing on first file operation.
@@ -573,7 +618,7 @@ class SearchEngine:
                 logger.warning(f"Could not read {relative_path}: {e}")
                 return 0
 
-        chunks = _chunk_text(content)
+        chunks = _chunk_text_sliding_window(content, self.chunk_size, self.chunk_overlap)
         if not chunks:
             return 0
 

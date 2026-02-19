@@ -11,6 +11,7 @@ from stash_mcp.search import (
     SearchResult,
     VectorStore,
     _chunk_text,
+    _chunk_text_sliding_window,
     _content_hash,
 )
 
@@ -185,36 +186,71 @@ class TestChunking:
 
     def test_empty_text(self):
         """Test chunking empty text."""
+        assert _chunk_text_sliding_window("") == []
+        assert _chunk_text_sliding_window("   ") == []
+
+    def test_short_text_single_chunk(self):
+        """Test that text shorter than chunk_size returns a single chunk."""
+        text = "Hello world"
+        result = _chunk_text_sliding_window(text, chunk_size=1500)
+        assert result == [text]
+
+    def test_small_file_single_chunk(self):
+        """Test that files smaller than chunk_size produce a single chunk naturally."""
+        text = "A" * 100
+        result = _chunk_text_sliding_window(text, chunk_size=1500)
+        assert len(result) == 1
+        assert result[0] == text
+
+    def test_correct_number_of_chunks(self):
+        """Test that the sliding window produces the correct number of chunks.
+
+        With text=3000, chunk_size=1500, overlap=200 (step=1300):
+        chunk 1: [0:1500], chunk 2: [1300:2800], chunk 3: [2600:3000]
+        """
+        text = "A" * 3000
+        chunks = _chunk_text_sliding_window(text, chunk_size=1500, chunk_overlap=200)
+        assert len(chunks) == 3
+
+    def test_overlap_present(self):
+        """Test that adjacent chunks share overlapping content."""
+        # Place a distinctive string at the overlap boundary
+        text = "X" * 1300 + "OVERLAP_MARKER" + "Y" * 1300
+        chunks = _chunk_text_sliding_window(text, chunk_size=1500, chunk_overlap=200)
+        # OVERLAP_MARKER should appear in at least two chunks
+        overlap_count = sum(1 for c in chunks if "OVERLAP_MARKER" in c)
+        assert overlap_count >= 2
+
+    def test_chunks_cover_full_document(self):
+        """Test that beginning and end of document appear in chunks."""
+        # Use distinct start/end markers so we can verify full coverage
+        text = "START " + "middle " * 250 + "END"
+        chunks = _chunk_text_sliding_window(text, chunk_size=1000, chunk_overlap=100)
+        assert len(chunks) > 1
+        # The first chunk must contain the document start
+        assert "START" in chunks[0]
+        # The last chunk must contain the document end
+        assert "END" in chunks[-1]
+
+    def test_configurable_chunk_size(self):
+        """Test that chunk_size parameter controls the chunk size."""
+        text = "A" * 1000
+        chunks = _chunk_text_sliding_window(text, chunk_size=400, chunk_overlap=50)
+        assert len(chunks) > 1
+        # Each chunk (except possibly the last) should be at most chunk_size chars
+        for chunk in chunks[:-1]:
+            assert len(chunk) <= 400
+
+    def test_no_empty_chunks(self):
+        """Test that no empty chunks are returned."""
+        text = "A" * 3000
+        chunks = _chunk_text_sliding_window(text, chunk_size=1500, chunk_overlap=200)
+        assert all(c for c in chunks)
+
+    def test_backward_compat_chunk_text(self):
+        """Test that the legacy _chunk_text function still works."""
         assert _chunk_text("") == []
-        assert _chunk_text("   ") == []
-
-    def test_short_text(self):
-        """Test that short text returns a single chunk."""
-        result = _chunk_text("Hello world")
-        assert result == ["Hello world"]
-
-    def test_markdown_heading_split(self):
-        """Test splitting on markdown headings."""
-        text = "# Section 1\nContent for section one.\n\n# Section 2\nContent for section two."
-        chunks = _chunk_text(text, max_chunk_size=40)
-        assert len(chunks) == 2
-        assert "Section 1" in chunks[0]
-        assert "Section 2" in chunks[1]
-
-    def test_paragraph_split(self):
-        """Test splitting on paragraph boundaries."""
-        text = "Paragraph one. " * 20 + "\n\n" + "Paragraph two. " * 20
-        chunks = _chunk_text(text, max_chunk_size=200)
-        assert len(chunks) >= 2
-
-    def test_preserves_content(self):
-        """Test that chunking preserves all content."""
-        text = "# Title\n\nParagraph 1\n\nParagraph 2\n\n# Section 2\n\nContent"
-        chunks = _chunk_text(text, max_chunk_size=50)
-        combined = " ".join(chunks)
-        assert "Title" in combined
-        assert "Paragraph 1" in combined
-        assert "Section 2" in combined
+        assert _chunk_text("Hello world") == ["Hello world"]
 
 
 # --- IndexMeta tests ---
@@ -473,6 +509,23 @@ class TestSearchEngine:
         assert r.chunk_index >= 0
         assert isinstance(r.content, str)
         assert r.score > 0
+
+    async def test_chunk_size_param(self, engine_dirs):
+        """Test that chunk_size and chunk_overlap params are respected."""
+        content_dir, index_dir = engine_dirs
+        # Write a file larger than a small chunk_size
+        (content_dir / "large.md").write_text("Word " * 400)  # ~2000 chars
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            chunk_size=500,
+            chunk_overlap=50,
+        )
+        chunks = await engine.index_file("large.md")
+        # With chunk_size=500, overlap=50, step=450, ~2000 chars => more than 1 chunk
+        assert chunks > 1
 
 
 # --- REST API search endpoint tests ---
