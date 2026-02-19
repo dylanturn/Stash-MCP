@@ -195,8 +195,8 @@ class VectorStore:
 
 def _chunk_text_sliding_window(
     text: str,
-    chunk_size: int = 1500,
-    chunk_overlap: int = 200,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 100,
 ) -> list[str]:
     """Split text into fixed-size overlapping chunks.
 
@@ -360,8 +360,8 @@ class SearchEngine:
         anthropic_api_key: str | None = None,
         embed_fn=None,
         filesystem=None,
-        chunk_size: int = 1500,
-        chunk_overlap: int = 200,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 100,
     ):
         """Initialize the search engine.
 

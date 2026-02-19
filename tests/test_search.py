@@ -819,5 +819,5 @@ class TestSearchConfig:
         assert "sentence-transformers" in Config.SEARCH_EMBEDDER_MODEL
         assert Config.CONTEXTUAL_RETRIEVAL is False
         assert Config.CONTEXTUAL_MODEL == "claude-haiku-4-5-20251001"
-        assert Config.SEARCH_CHUNK_SIZE == 1500
-        assert Config.SEARCH_CHUNK_OVERLAP == 200
+        assert Config.SEARCH_CHUNK_SIZE == 1000
+        assert Config.SEARCH_CHUNK_OVERLAP == 100
