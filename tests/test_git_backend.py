@@ -12,6 +12,7 @@ from stash_mcp.git_backend import (
     GitBackend,
     LogEntry,
     PullResult,
+    _parse_author_string,
     _parse_blame_porcelain,
     _parse_pull_file_statuses,
 )
@@ -46,6 +47,33 @@ def _init_repo(path: Path, *, initial_commit: bool = True) -> None:
             check=True,
             capture_output=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# _parse_author_string
+# ---------------------------------------------------------------------------
+
+
+class TestParseAuthorString:
+    def test_standard_format(self):
+        name, email = _parse_author_string("Alice <alice@example.com>")
+        assert name == "Alice"
+        assert email == "alice@example.com"
+
+    def test_name_with_spaces(self):
+        name, email = _parse_author_string("stash-mcp <stash@local>")
+        assert name == "stash-mcp"
+        assert email == "stash@local"
+
+    def test_no_angle_brackets_returns_full_string_as_name(self):
+        name, email = _parse_author_string("noemail")
+        assert name == "noemail"
+        assert email == ""
+
+    def test_strips_surrounding_whitespace(self):
+        name, email = _parse_author_string("  Bot  <bot@host>  ")
+        assert name == "Bot"
+        assert email == "bot@host"
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +172,35 @@ class TestGitBackendValidate:
             _init_repo(repo)
             backend = GitBackend(repo)
             backend.validate()  # Should not raise
+
+    def test_validate_sets_committer_identity_when_not_configured_locally(self):
+        """validate() writes local user.name/user.email from author_default."""
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            # No local user.name/user.email
+            backend = GitBackend(repo, author_default="Stash Bot <stash@example.com>")
+            backend.validate()
+            name = subprocess.check_output(
+                ["git", "-C", str(repo), "config", "--local", "user.name"], text=True
+            ).strip()
+            email = subprocess.check_output(
+                ["git", "-C", str(repo), "config", "--local", "user.email"], text=True
+            ).strip()
+            assert name == "Stash Bot"
+            assert email == "stash@example.com"
+
+    def test_validate_does_not_overwrite_existing_local_identity(self):
+        """validate() leaves user.name/user.email alone when already set locally."""
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)  # sets user.name="Test User", user.email="test@example.com"
+            backend = GitBackend(repo, author_default="Bot <bot@example.com>")
+            backend.validate()
+            name = subprocess.check_output(
+                ["git", "-C", str(repo), "config", "--local", "user.name"], text=True
+            ).strip()
+            assert name == "Test User"  # unchanged
 
 
 # ---------------------------------------------------------------------------

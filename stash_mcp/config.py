@@ -74,6 +74,7 @@ class Config:
     GIT_SYNC_INTERVAL: int = int(os.getenv("STASH_GIT_SYNC_INTERVAL", "60"))
     GIT_SYNC_RECURSIVE: bool = os.getenv("STASH_GIT_SYNC_RECURSIVE", "false").lower() == "true"
     GIT_SYNC_TOKEN: str | None = os.getenv("STASH_GIT_SYNC_TOKEN")
+    GIT_AUTHOR_DEFAULT: str = os.getenv("STASH_GIT_AUTHOR_DEFAULT", "stash-mcp <stash@local>")
 
     # Transaction settings (only relevant when GIT_TRACKING=true and READ_ONLY=false)
     TRANSACTION_TIMEOUT: int = int(os.getenv("STASH_TRANSACTION_TIMEOUT", "300"))

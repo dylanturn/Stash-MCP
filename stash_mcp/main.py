@@ -68,7 +68,11 @@ def _create_git_backend():
 
     from .git_backend import GitBackend
 
-    backend = GitBackend(Config.CONTENT_DIR, sync_token=Config.GIT_SYNC_TOKEN)
+    backend = GitBackend(
+        Config.CONTENT_DIR,
+        sync_token=Config.GIT_SYNC_TOKEN,
+        author_default=Config.GIT_AUTHOR_DEFAULT,
+    )
 
     try:
         backend.validate()
