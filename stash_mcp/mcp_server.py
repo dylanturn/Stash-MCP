@@ -120,12 +120,13 @@ def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
     return content
 
 
-def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
+def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=None) -> FastMCP:
     """Create and configure the FastMCP server.
 
     Args:
         filesystem: Filesystem instance for content management
         search_engine: Optional SearchEngine instance for semantic search
+        git_backend: Optional GitBackend instance for git tools
 
     Returns:
         Configured FastMCP server
@@ -497,11 +498,91 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
                 lines.append(f"📄 {r.file_path} (score: {r.score:.2f})")
                 if r.context:
                     lines.append(f"   Context: {r.context}")
+                if r.last_changed_at:
+                    lines.append(f"   Last changed: {r.last_changed_at} by {r.changed_by}")
+                if r.commit_message:
+                    lines.append(f"   Commit: {r.commit_message}")
                 snippet = r.content[:200]
                 if len(r.content) > 200:
                     snippet += "..."
                 lines.append(f"   {snippet}")
                 lines.append("")
+            return "\n".join(lines)
+
+    # --- Git tools (registered only when GIT_TRACKING is enabled) ---
+
+    if git_backend is not None:
+
+        @mcp.tool()
+        async def history_content(
+            path: str,
+            max_count: int = 20,
+        ) -> str:
+            """Return recent git commits touching a file.
+
+            Args:
+                path: File path relative to content root
+                max_count: Maximum number of commits to return (default 20)
+            Returns:
+                Commit history formatted as a string
+            """
+            import asyncio
+
+            entries = await asyncio.to_thread(git_backend.log, path, max_count)
+            if not entries:
+                return f"No git history found for '{path}'."
+            lines = []
+            for e in entries:
+                lines.append(
+                    f"{e.commit_hash[:8]}  {e.timestamp.isoformat()}  {e.author}  {e.message}"
+                )
+            return "\n".join(lines)
+
+        @mcp.tool()
+        async def diff_content(
+            path: str,
+            ref: str | None = None,
+        ) -> str:
+            """Show what changed in a file since a given git ref.
+
+            Args:
+                path: File path relative to content root
+                ref: Git ref to diff against (default: HEAD~1)
+            Returns:
+                Unified diff as a string
+            """
+            import asyncio
+
+            return await asyncio.to_thread(git_backend.diff, path, ref)
+
+        @mcp.tool()
+        async def blame_content(
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
+            """Return line-level authorship and timestamps for a file.
+
+            Args:
+                path: File path relative to content root
+                start_line: Optional 1-based start line
+                end_line: Optional 1-based end line
+            Returns:
+                Blame information formatted as a string
+            """
+            import asyncio
+
+            blame_lines = await asyncio.to_thread(
+                git_backend.blame, path, start_line, end_line
+            )
+            if not blame_lines:
+                return f"No blame data available for '{path}'."
+            lines = []
+            for bl in blame_lines:
+                lines.append(
+                    f"{bl.line_number:4d}  {bl.commit_hash[:8]}  "
+                    f"{bl.timestamp.isoformat()}  {bl.author}  {bl.content}"
+                )
             return "\n".join(lines)
 
     return mcp
