@@ -1,6 +1,7 @@
 """Git backend for Stash-MCP: blame, log, diff, and periodic pull operations."""
 
 import logging
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -132,11 +133,29 @@ def _parse_pull_file_statuses(
     return added, modified, deleted
 
 
+def _parse_author_string(author: str) -> tuple[str, str]:
+    """Parse a ``"Name <email>"`` string into ``(name, email)``.
+
+    Returns the original string as the name and an empty email if the
+    format does not match.
+    """
+    match = re.match(r"^(.*?)\s*<([^>]*)>\s*$", author)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return author.strip(), ""
+
+
 class GitBackend:
     """Wraps git CLI operations used by Stash-MCP."""
 
-    def __init__(self, content_dir: Path, sync_token: str | None = None) -> None:
+    def __init__(
+        self,
+        content_dir: Path,
+        sync_token: str | None = None,
+        author_default: str = "stash-mcp <stash@local>",
+    ) -> None:
         self.content_dir = content_dir
+        self.author_default = author_default
         if sync_token:
             self._configure_credentials(sync_token)
 
@@ -200,7 +219,13 @@ class GitBackend:
     # ------------------------------------------------------------------
 
     def validate(self) -> None:
-        """Verify that *content_dir* is a git repository.
+        """Verify that *content_dir* is a git repository and ensure a
+        committer identity is configured.
+
+        When no local ``user.name`` is set (typical in container environments
+        with no global git config), the identity is set from
+        :attr:`author_default` so that commits never fail with "Please tell me
+        who you are".
 
         Raises:
             RuntimeError: If the directory is not a git repository.
@@ -210,6 +235,19 @@ class GitBackend:
             raise RuntimeError(
                 f"Content directory '{self.content_dir}' is not a git repository. "
                 "Initialise it with 'git init' or set STASH_GIT_TRACKING=false."
+            )
+
+        # Ensure a valid committer identity is present.  Check only the local
+        # repo config so we don't override a developer's global identity.
+        name_result = self._run(["git", "config", "--local", "user.name"])
+        if not name_result.stdout.strip():
+            name, email = _parse_author_string(self.author_default)
+            self._run(["git", "config", "user.name", name])
+            self._run(["git", "config", "user.email", email])
+            logger.info(
+                "Set git committer identity from STASH_GIT_AUTHOR_DEFAULT: %s <%s>",
+                name,
+                email,
             )
 
     def validate_remote(self, remote: str) -> bool:
@@ -312,6 +350,57 @@ class GitBackend:
             logger.warning("git diff failed for %s: %s", path, result.stderr.strip())
             return result.stderr or "diff unavailable"
         return result.stdout
+
+    def commit(self, message: str, author: str | None = None) -> None:
+        """Stage all changes and create a commit with *message*.
+
+        Args:
+            message: Commit message.
+            author: Optional author string in ``"Name <email>"`` format.
+                When provided, the commit is recorded with this author identity
+                instead of the repository's configured ``user.name``/``user.email``.
+
+        Raises:
+            RuntimeError: If staging or committing fails.
+        """
+        add_result = self._run(["git", "add", "-A"])
+        if add_result.returncode != 0:
+            raise RuntimeError(f"git add -A failed: {add_result.stderr.strip()}")
+
+        commit_args = ["git", "commit", "-m", message]
+        if author:
+            commit_args.extend(["--author", author])
+        commit_result = self._run(commit_args)
+        if commit_result.returncode != 0:
+            raise RuntimeError(f"git commit failed: {commit_result.stderr.strip()}")
+
+        logger.info("Committed: %s", message)
+
+    def reset_hard(self) -> None:
+        """Discard all uncommitted changes with ``git reset --hard HEAD``.
+
+        Raises:
+            RuntimeError: If the reset fails.
+        """
+        result = self._run(["git", "reset", "--hard", "HEAD"])
+        if result.returncode != 0:
+            raise RuntimeError(f"git reset --hard failed: {result.stderr.strip()}")
+        logger.info("Hard reset to HEAD completed.")
+
+    def push(self, remote: str, branch: str) -> None:
+        """Push *branch* to *remote*.
+
+        Args:
+            remote: Remote name (e.g. ``"origin"``).
+            branch: Branch name (e.g. ``"main"``).
+
+        Raises:
+            RuntimeError: If the push fails.
+        """
+        result = self._run(["git", "push", remote, branch])
+        if result.returncode != 0:
+            raise RuntimeError(f"git push failed: {result.stderr.strip()}")
+        logger.info("Pushed %s to %s/%s.", branch, remote, branch)
 
     def pull(self, remote: str, branch: str, recursive: bool = False) -> PullResult:
         """Pull from *remote*/*branch* and return a :class:`PullResult`.

@@ -585,4 +585,85 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 )
             return "\n".join(lines)
 
+    # --- Transaction tools (only when write mode + git tracking are both active) ---
+
+    if not Config.READ_ONLY and git_backend is not None:
+        from .transactions import TransactionError, TransactionManager
+
+        tm = filesystem if isinstance(filesystem, TransactionManager) else None
+
+        if tm is not None:
+
+            @mcp.tool()
+            async def start_content_transaction(ctx: Context) -> str:
+                """Begin a write transaction and return its UUID.
+
+                Acquires the global transaction lock.  All subsequent mutating
+                tool calls (create_content, replace_content, edit_content,
+                multi_edit_content, delete_content, move_content) on this
+                session will be part of the transaction.  Call
+                end_content_transaction to commit or abort_content_transaction
+                to discard.
+
+                Returns:
+                    Transaction UUID string
+                """
+                session_id = str(id(ctx.session))
+                try:
+                    txn_id = await tm.start_transaction(
+                        session_id,
+                        Config.TRANSACTION_TIMEOUT,
+                        Config.TRANSACTION_LOCK_WAIT,
+                    )
+                except TransactionError as exc:
+                    raise ValueError(str(exc))
+                return txn_id
+
+            @mcp.tool()
+            async def end_content_transaction(
+                message: str,
+                ctx: Context,
+                author: str | None = None,
+            ) -> str:
+                """Commit all changes in the active transaction.
+
+                Runs ``git add -A && git commit -m <message>`` and, when
+                GIT_SYNC_ENABLED is true, pushes to the configured remote.
+                Releases the transaction lock so other sessions may proceed.
+
+                Args:
+                    message: Commit message describing the changes
+                    author: Optional commit author in ``"Name <email>"`` format.
+                        Defaults to the repository's configured identity.
+                Returns:
+                    Confirmation string
+                """
+                session_id = str(id(ctx.session))
+                sync_remote = Config.GIT_SYNC_REMOTE if Config.GIT_SYNC_ENABLED else None
+                sync_branch = Config.GIT_SYNC_BRANCH if Config.GIT_SYNC_ENABLED else None
+                try:
+                    await tm.end_transaction(
+                        session_id, message, author, sync_remote, sync_branch
+                    )
+                except TransactionError as exc:
+                    raise ValueError(str(exc))
+                return f"Transaction committed: {message}"
+
+            @mcp.tool()
+            async def abort_content_transaction(ctx: Context) -> str:
+                """Abort the active transaction and discard all uncommitted changes.
+
+                Runs ``git reset --hard HEAD``, resumes git sync, and releases
+                the transaction lock.
+
+                Returns:
+                    Confirmation string
+                """
+                session_id = str(id(ctx.session))
+                try:
+                    await tm.abort_transaction(session_id)
+                except TransactionError as exc:
+                    raise ValueError(str(exc))
+                return "Transaction aborted."
+
     return mcp
