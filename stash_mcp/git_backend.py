@@ -163,6 +163,9 @@ class GitBackend:
         Writes a small shell script into the repository's .git directory so
         the token is not embedded on the git config command line (which would
         be visible in process listings).
+
+        Security note: The token is stored in plaintext in the .git directory.
+        Ensure the repository directory has appropriate filesystem permissions.
         """
         result = self._run(["git", "rev-parse", "--git-dir"])
         if result.returncode != 0:

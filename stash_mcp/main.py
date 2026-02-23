@@ -113,7 +113,6 @@ async def _git_sync_loop(git_backend, search_engine) -> None:
     recursive = Config.GIT_SYNC_RECURSIVE
 
     while True:
-        await asyncio.sleep(interval)
         try:
             result = await asyncio.to_thread(git_backend.pull, remote, branch, recursive)
             if result.success:
@@ -128,6 +127,7 @@ async def _git_sync_loop(git_backend, search_engine) -> None:
                 logger.warning("Git sync pull failed: %s", result.message)
         except Exception as exc:
             logger.warning("Git sync error: %s", exc)
+        await asyncio.sleep(interval)
 
 
 def create_app():
