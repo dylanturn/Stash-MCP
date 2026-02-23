@@ -666,4 +666,21 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     raise ValueError(str(exc))
                 return "Transaction aborted."
 
+            @mcp.tool()
+            async def list_content_transactions(ctx: Context) -> dict:
+                """List active content transactions.
+
+                Returns the current transaction state including whether a
+                transaction is active, its ID, which session owns it, and
+                whether this session is the owner.  Useful for agent
+                retry/recovery scenarios where the agent needs to know if a
+                transaction is still open before attempting to start a new one.
+
+                Returns:
+                    A dict with 'has_active_transaction' (bool) and optional
+                    transaction details.
+                """
+                session_id = str(id(ctx.session))
+                return tm.get_transaction_status(session_id)
+
     return mcp

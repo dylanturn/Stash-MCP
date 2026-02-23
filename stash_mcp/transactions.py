@@ -224,6 +224,29 @@ class TransactionManager:
                 "No active transaction. Call start_content_transaction first."
             )
 
+    def get_transaction_status(self, session_id: str | None = None) -> dict:
+        """Return the current transaction state.
+
+        Args:
+            session_id: Optional calling session identity.  When provided,
+                ``owned_by_current_session`` is included in the result.
+
+        Returns:
+            A dict with ``has_active_transaction`` (bool) and, when a
+            transaction is active, ``transaction_id``, ``session_id``, and
+            optionally ``owned_by_current_session``.
+        """
+        if self._active_id is None:
+            return {"has_active_transaction": False}
+        result: dict = {
+            "has_active_transaction": True,
+            "transaction_id": self._active_id,
+            "session_id": self._active_session,
+        }
+        if session_id is not None:
+            result["owned_by_current_session"] = self._active_session == session_id
+        return result
+
     # ------------------------------------------------------------------
     # FileSystem delegation — reads pass through, writes are gated
     # ------------------------------------------------------------------
