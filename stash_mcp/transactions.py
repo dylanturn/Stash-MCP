@@ -127,6 +127,7 @@ class TransactionManager:
         self,
         session_id: str,
         message: str,
+        author: str | None = None,
         sync_remote: str | None = None,
         sync_branch: str | None = None,
     ) -> None:
@@ -135,6 +136,7 @@ class TransactionManager:
         Args:
             session_id: Must match the session that started the transaction.
             message: Commit message.
+            author: Optional author string in ``"Name <email>"`` format.
             sync_remote: If set, push to this remote after committing.
             sync_branch: Branch to push to (required when *sync_remote* is set).
 
@@ -146,7 +148,7 @@ class TransactionManager:
         self._cancel_timeout()
 
         try:
-            await asyncio.to_thread(self.git.commit, message)
+            await asyncio.to_thread(self.git.commit, message, author)
             if sync_remote and sync_branch:
                 await asyncio.to_thread(self.git.push, sync_remote, sync_branch)
         finally:

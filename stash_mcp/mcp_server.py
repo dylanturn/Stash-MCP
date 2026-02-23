@@ -620,7 +620,11 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 return txn_id
 
             @mcp.tool()
-            async def end_content_transaction(message: str, ctx: Context) -> str:
+            async def end_content_transaction(
+                message: str,
+                ctx: Context,
+                author: str | None = None,
+            ) -> str:
                 """Commit all changes in the active transaction.
 
                 Runs ``git add -A && git commit -m <message>`` and, when
@@ -629,6 +633,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
                 Args:
                     message: Commit message describing the changes
+                    author: Optional commit author in ``"Name <email>"`` format.
+                        Defaults to the repository's configured identity.
                 Returns:
                     Confirmation string
                 """
@@ -637,7 +643,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 sync_branch = Config.GIT_SYNC_BRANCH if Config.GIT_SYNC_ENABLED else None
                 try:
                     await tm.end_transaction(
-                        session_id, message, sync_remote, sync_branch
+                        session_id, message, author, sync_remote, sync_branch
                     )
                 except TransactionError as exc:
                     raise ValueError(str(exc))

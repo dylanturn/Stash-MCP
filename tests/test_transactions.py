@@ -215,6 +215,26 @@ class TestTransactionManagerLifecycle:
             assert "Add committed.txt" in result.stdout
 
     @pytest.mark.asyncio
+    async def test_end_transaction_commits_with_author(self):
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir)
+            tm, fs = _make_tm(path)
+            await tm.start_transaction("session-1", timeout=30, lock_wait=5)
+            tm.write_file("authored.txt", "content")
+            await tm.end_transaction(
+                "session-1",
+                "Add authored file",
+                author="Agent Smith <agent@example.com>",
+            )
+            result = subprocess.run(
+                ["git", "-C", tmpdir, "log", "--format=%an <%ae>", "-1"],
+                capture_output=True,
+                text=True,
+            )
+            assert "Agent Smith" in result.stdout
+            assert "agent@example.com" in result.stdout
+
+    @pytest.mark.asyncio
     async def test_abort_transaction_resets(self):
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir)
