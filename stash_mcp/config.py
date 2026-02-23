@@ -75,6 +75,10 @@ class Config:
     GIT_SYNC_RECURSIVE: bool = os.getenv("STASH_GIT_SYNC_RECURSIVE", "false").lower() == "true"
     GIT_SYNC_TOKEN: str | None = os.getenv("STASH_GIT_SYNC_TOKEN")
 
+    # Transaction settings (only relevant when GIT_TRACKING=true and READ_ONLY=false)
+    TRANSACTION_TIMEOUT: int = int(os.getenv("STASH_TRANSACTION_TIMEOUT", "300"))
+    TRANSACTION_LOCK_WAIT: int = int(os.getenv("STASH_TRANSACTION_LOCK_WAIT", "120"))
+
     @classmethod
     def ensure_content_dir(cls) -> None:
         """Ensure content directory exists."""

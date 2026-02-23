@@ -105,7 +105,9 @@ def _task_done_callback(task: asyncio.Task) -> None:
         logger.error(f"Background task {task.get_name()} failed: {exc}", exc_info=exc)
 
 
-async def _git_sync_loop(git_backend, search_engine) -> None:
+async def _git_sync_loop(
+    git_backend, search_engine, sync_event: asyncio.Event | None = None
+) -> None:
     """Periodic git pull task.  Runs until cancelled."""
     remote = Config.GIT_SYNC_REMOTE
     branch = Config.GIT_SYNC_BRANCH
@@ -114,17 +116,20 @@ async def _git_sync_loop(git_backend, search_engine) -> None:
 
     while True:
         try:
-            result = await asyncio.to_thread(git_backend.pull, remote, branch, recursive)
-            if result.success:
-                logger.info("Git sync: %s", result.message or "up to date")
-                for path in result.added_files:
-                    emit(CONTENT_CREATED, path)
-                for path in result.modified_files:
-                    emit(CONTENT_UPDATED, path)
-                for path in result.deleted_files:
-                    emit(CONTENT_DELETED, path)
+            if sync_event is None or sync_event.is_set():
+                result = await asyncio.to_thread(git_backend.pull, remote, branch, recursive)
+                if result.success:
+                    logger.info("Git sync: %s", result.message or "up to date")
+                    for path in result.added_files:
+                        emit(CONTENT_CREATED, path)
+                    for path in result.modified_files:
+                        emit(CONTENT_UPDATED, path)
+                    for path in result.deleted_files:
+                        emit(CONTENT_DELETED, path)
+                else:
+                    logger.warning("Git sync pull failed: %s", result.message)
             else:
-                logger.warning("Git sync pull failed: %s", result.message)
+                logger.debug("Git sync skipped: transaction in progress")
         except Exception as exc:
             logger.warning("Git sync error: %s", exc)
         await asyncio.sleep(interval)
@@ -145,8 +150,19 @@ def create_app():
     if git_backend is not None and search_engine is not None:
         search_engine._git_backend = git_backend
 
+    # When git tracking and writes are both active, wrap the filesystem in a
+    # TransactionManager so that all mutating MCP tool calls are gated behind
+    # an active transaction.
+    transaction_manager = None
+    fs_for_mcp = filesystem
+    if not Config.READ_ONLY and git_backend is not None:
+        from .transactions import TransactionManager
+
+        transaction_manager = TransactionManager(filesystem, git_backend)
+        fs_for_mcp = transaction_manager
+
     # Create MCP http app first so we can wire its lifespan into FastAPI
-    mcp = create_mcp_server(filesystem, search_engine=search_engine, git_backend=git_backend)
+    mcp = create_mcp_server(fs_for_mcp, search_engine=search_engine, git_backend=git_backend)
     mcp_http_app = mcp.http_app(path="/")
 
     # Build a combined lifespan that wraps the MCP lifespan and also
@@ -156,6 +172,16 @@ def create_app():
 
     @asynccontextmanager
     async def _combined_lifespan(fastapi_app):
+        # Set up a sync-pause event and register callbacks on the TransactionManager
+        # so that git sync is suspended for the duration of any active transaction.
+        sync_event = asyncio.Event()
+        sync_event.set()  # set = sync allowed; cleared = sync paused during a transaction
+        if transaction_manager is not None:
+            transaction_manager.set_sync_callbacks(
+                pause=lambda: sync_event.clear(),
+                resume=lambda: sync_event.set(),
+            )
+
         async with mcp_lifespan(fastapi_app):
             # Startup: build search index in background (non-blocking)
             if search_engine is not None:
@@ -172,7 +198,7 @@ def create_app():
             sync_task = None
             if git_backend is not None and Config.GIT_SYNC_ENABLED:
                 sync_task = asyncio.create_task(
-                    _git_sync_loop(git_backend, search_engine),
+                    _git_sync_loop(git_backend, search_engine, sync_event),
                     name="git-sync",
                 )
                 sync_task.add_done_callback(_task_done_callback)

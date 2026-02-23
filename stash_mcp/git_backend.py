@@ -313,6 +313,51 @@ class GitBackend:
             return result.stderr or "diff unavailable"
         return result.stdout
 
+    def commit(self, message: str) -> None:
+        """Stage all changes and create a commit with *message*.
+
+        Args:
+            message: Commit message.
+
+        Raises:
+            RuntimeError: If staging or committing fails.
+        """
+        add_result = self._run(["git", "add", "-A"])
+        if add_result.returncode != 0:
+            raise RuntimeError(f"git add -A failed: {add_result.stderr.strip()}")
+
+        commit_result = self._run(["git", "commit", "-m", message])
+        if commit_result.returncode != 0:
+            raise RuntimeError(f"git commit failed: {commit_result.stderr.strip()}")
+
+        logger.info("Committed: %s", message)
+
+    def reset_hard(self) -> None:
+        """Discard all uncommitted changes with ``git reset --hard HEAD``.
+
+        Raises:
+            RuntimeError: If the reset fails.
+        """
+        result = self._run(["git", "reset", "--hard", "HEAD"])
+        if result.returncode != 0:
+            raise RuntimeError(f"git reset --hard failed: {result.stderr.strip()}")
+        logger.info("Hard reset to HEAD completed.")
+
+    def push(self, remote: str, branch: str) -> None:
+        """Push *branch* to *remote*.
+
+        Args:
+            remote: Remote name (e.g. ``"origin"``).
+            branch: Branch name (e.g. ``"main"``).
+
+        Raises:
+            RuntimeError: If the push fails.
+        """
+        result = self._run(["git", "push", remote, branch])
+        if result.returncode != 0:
+            raise RuntimeError(f"git push failed: {result.stderr.strip()}")
+        logger.info("Pushed %s to %s/%s.", branch, remote, branch)
+
     def pull(self, remote: str, branch: str, recursive: bool = False) -> PullResult:
         """Pull from *remote*/*branch* and return a :class:`PullResult`.
 
