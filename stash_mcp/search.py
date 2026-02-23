@@ -39,6 +39,9 @@ class SearchResult:
     content: str
     context: str | None
     score: float
+    last_changed_at: str | None = None
+    changed_by: str | None = None
+    commit_message: str | None = None
 
 
 class VectorStore:
@@ -360,6 +363,7 @@ class SearchEngine:
         anthropic_api_key: str | None = None,
         embed_fn=None,
         filesystem=None,
+        git_backend=None,
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
     ):
@@ -375,6 +379,7 @@ class SearchEngine:
             embed_fn: Optional custom embedding function for testing.
                       Signature: async (texts: list[str]) -> list[list[float]]
             filesystem: Optional FileSystem instance for content path filtering.
+            git_backend: Optional GitBackend instance for blame-enriched results.
             chunk_size: Number of characters per chunk for the sliding window.
             chunk_overlap: Number of characters to overlap between adjacent chunks.
         """
@@ -387,6 +392,7 @@ class SearchEngine:
         self._embed_fn = embed_fn
         self._embedder = None
         self._filesystem = filesystem
+        self._git_backend = git_backend
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
@@ -733,7 +739,60 @@ class SearchEngine:
             if len(results) >= max_results:
                 break
 
+        # Lazy blame enrichment: annotate each result when git_backend is set
+        if self._git_backend is not None:
+            for result in results:
+                await self._enrich_with_blame(result)
+
         return results
+
+    async def _enrich_with_blame(self, result: "SearchResult") -> None:
+        """Populate blame fields on *result* using the configured git backend.
+
+        Uses the chunk's text content to locate its approximate line range,
+        then picks the most recently changed line's metadata.
+        """
+        try:
+            blame_lines = await asyncio.to_thread(
+                self._git_backend.blame, result.file_path
+            )
+        except Exception as e:
+            logger.debug("blame enrichment failed for %s: %s", result.file_path, e)
+            return
+
+        if not blame_lines:
+            return
+
+        # Find the chunk in the file to determine its line range
+        relevant = blame_lines  # default: all lines
+        try:
+            full_path = self.content_dir / result.file_path
+            file_content = await asyncio.to_thread(
+                full_path.read_text, encoding="utf-8"
+            )
+            chunk_start = file_content.find(result.content)
+            if chunk_start != -1:
+                chunk_end = chunk_start + len(result.content)
+                start_line = file_content[:chunk_start].count("\n") + 1
+                end_line = file_content[:chunk_end].count("\n") + 1
+                scoped = [
+                    bl
+                    for bl in blame_lines
+                    if start_line <= bl.line_number <= end_line
+                ]
+                if scoped:
+                    relevant = scoped
+        except Exception as e:
+            logger.debug(
+                "Could not scope blame to chunk lines for %s: %s",
+                result.file_path,
+                e,
+            )
+
+        most_recent = max(relevant, key=lambda bl: bl.timestamp)
+        result.last_changed_at = most_recent.timestamp.isoformat()
+        result.changed_by = most_recent.author
+        result.commit_message = most_recent.summary
 
     async def reindex(self) -> int:
         """Full reindex of all content files.

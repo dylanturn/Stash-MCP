@@ -120,12 +120,13 @@ def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
     return content
 
 
-def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
+def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=None) -> FastMCP:
     """Create and configure the FastMCP server.
 
     Args:
         filesystem: Filesystem instance for content management
         search_engine: Optional SearchEngine instance for semantic search
+        git_backend: Optional GitBackend instance for git tools
 
     Returns:
         Configured FastMCP server
@@ -206,46 +207,173 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
 
     # --- Tools ---
 
-    @mcp.tool()
-    async def create_content(
-        path: str,
-        content: str,
-        ctx: Context,
-    ) -> str:
-        """
-        Create a new file. Errors if file already exists.
+    # --- Write tools (only registered when not in read-only mode) ---
 
-        Args:
-            path: File path relative to content root
-            content: File content
-        """
-        if filesystem.file_exists(path):
-            raise ValueError(
-                f"File already exists: {path}. Use update_content to modify existing files."
-            )
-        filesystem.write_file(path, content)
-        if _register_resource(path):
-            await ctx.send_resource_list_changed()
-        emit(CONTENT_CREATED, path)
-        logger.info(f"Created: {path}")
-        return f"Created: {path}"
+    if not Config.READ_ONLY:
 
-    @mcp.tool()
-    async def replace_content(
-        path: str,
-        content: str,
-        sha: str,
-        ctx: Context,
-    ) -> str:
-        """
-        Replace the content of an existing file.
+        @mcp.tool()
+        async def create_content(
+            path: str,
+            content: str,
+            ctx: Context,
+        ) -> str:
+            """
+            Create a new file. Errors if file already exists.
 
-        Args:
-            path: File path relative to content root
-            content: New file content
-            sha: SHA-256 hex digest of the current file content (from read_content)
-        """
-        if filesystem.file_exists(path):
+            Args:
+                path: File path relative to content root
+                content: File content
+            """
+            if filesystem.file_exists(path):
+                raise ValueError(
+                    f"File already exists: {path}. Use update_content to modify existing files."
+                )
+            filesystem.write_file(path, content)
+            if _register_resource(path):
+                await ctx.send_resource_list_changed()
+            emit(CONTENT_CREATED, path)
+            logger.info(f"Created: {path}")
+            return f"Created: {path}"
+
+        @mcp.tool()
+        async def replace_content(
+            path: str,
+            content: str,
+            sha: str,
+            ctx: Context,
+        ) -> str:
+            """
+            Replace the content of an existing file.
+
+            Args:
+                path: File path relative to content root
+                content: New file content
+                sha: SHA-256 hex digest of the current file content (from read_content)
+            """
+            if filesystem.file_exists(path):
+                current = filesystem.read_file(path)
+                current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
+                if sha != current_sha:
+                    raise ValueError(
+                        f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
+                        "The file may have changed since it was last read."
+                    )
+            else:
+                raise FileNotFoundError(
+                    f"File '{path}' does not exist. Use create_content for new files."
+                )
+            filesystem.write_file(path, content)
+            if _is_resource_file(path):
+                uri = AnyUrl(f"stash://{path}")
+                await ctx.session.send_resource_updated(uri=uri)
+            emit(CONTENT_UPDATED, path)
+            logger.info(f"Updated: {path}")
+            return f"Updated: {path}"
+
+        @mcp.tool()
+        async def edit_content(
+            file_path: str,
+            sha: str,
+            edits: list[EditOperation],
+            ctx: Context,
+        ) -> dict:
+            """
+            Apply targeted string-replacement edits to an existing file.
+
+            Each edit replaces an exact occurrence of old_string with new_string.
+            Edits are applied sequentially — later edits see the result of earlier ones.
+
+            Args:
+                file_path: File path relative to content root
+                sha: SHA-256 hex digest of the current file content (from read_content)
+                edits: Ordered list of edit operations to apply
+            Returns:
+                A dict with path, result status, and new_sha
+            """
+            current = filesystem.read_file(file_path)
+            current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
+            if sha != current_sha:
+                raise ValueError(
+                    f"SHA mismatch for '{file_path}': expected {current_sha}, got {sha}. "
+                    "The file may have changed since it was last read."
+                )
+            new_content = _apply_edits(current, edits, file_path)
+            filesystem.write_file(file_path, new_content)
+            if _is_resource_file(file_path):
+                uri = AnyUrl(f"stash://{file_path}")
+                await ctx.session.send_resource_updated(uri=uri)
+            emit(CONTENT_UPDATED, file_path)
+            logger.info(f"Edited: {file_path}")
+            new_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+            return {"path": file_path, "result": "ok", "new_sha": new_sha}
+
+        @mcp.tool()
+        async def multi_edit_content(
+            edit_operations: list[FileEditOperation],
+            ctx: Context,
+        ) -> dict:
+            """
+            Atomically apply edits to multiple files.
+
+            All validations run before any writes — if any file fails validation
+            the entire operation is aborted and no files are modified.
+
+            Args:
+                edit_operations: List of per-file edit operations
+            Returns:
+                A dict with a results list containing path, result status, and new_sha per file
+            """
+            # Reject duplicate file paths
+            paths = [op.file_path for op in edit_operations]
+            if len(paths) != len(set(paths)):
+                raise ValueError("Duplicate file_path entries are not allowed in a single multi_edit_content call.")
+
+            # Phase 1: read all files and validate SHAs
+            originals: dict[str, str] = {}
+            for op in edit_operations:
+                current = filesystem.read_file(op.file_path)
+                current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
+                if op.sha != current_sha:
+                    raise ValueError(
+                        f"SHA mismatch for '{op.file_path}': expected {current_sha}, got {op.sha}. "
+                        "The file may have changed since it was last read."
+                    )
+                originals[op.file_path] = current
+
+            # Phase 2: apply all edits in memory
+            new_contents: dict[str, str] = {}
+            for op in edit_operations:
+                new_contents[op.file_path] = _apply_edits(originals[op.file_path], op.edits, op.file_path)
+
+            # Phase 3: write all files and send notifications
+            results = []
+            for op in edit_operations:
+                filesystem.write_file(op.file_path, new_contents[op.file_path])
+                if _is_resource_file(op.file_path):
+                    uri = AnyUrl(f"stash://{op.file_path}")
+                    await ctx.session.send_resource_updated(uri=uri)
+                emit(CONTENT_UPDATED, op.file_path)
+                logger.info(f"Edited: {op.file_path}")
+                new_sha = hashlib.sha256(new_contents[op.file_path].encode("utf-8")).hexdigest()
+                results.append({"path": op.file_path, "result": "ok", "new_sha": new_sha})
+
+            return {"results": results}
+
+        @mcp.tool()
+        async def delete_content(
+            path: str,
+            sha: str,
+            ctx: Context,
+        ) -> str:
+            """
+            Delete a content file.
+
+            Args:
+                path: File path relative to content root
+                sha: SHA-256 hex digest of the current file content (from read_content)
+            Returns:
+                Confirmation message
+            """
             current = filesystem.read_file(path)
             current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
             if sha != current_sha:
@@ -253,135 +381,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
                     f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
                     "The file may have changed since it was last read."
                 )
-        else:
-            raise FileNotFoundError(
-                f"File '{path}' does not exist. Use create_content for new files."
-            )
-        filesystem.write_file(path, content)
-        if _is_resource_file(path):
-            uri = AnyUrl(f"stash://{path}")
-            await ctx.session.send_resource_updated(uri=uri)
-        emit(CONTENT_UPDATED, path)
-        logger.info(f"Updated: {path}")
-        return f"Updated: {path}"
+            filesystem.delete_file(path)
+            if _unregister_resource(path):
+                await ctx.send_resource_list_changed()
+            emit(CONTENT_DELETED, path)
+            logger.info(f"Deleted: {path}")
+            return f"Deleted: {path}"
 
-    @mcp.tool()
-    async def edit_content(
-        file_path: str,
-        sha: str,
-        edits: list[EditOperation],
-        ctx: Context,
-    ) -> dict:
-        """
-        Apply targeted string-replacement edits to an existing file.
-
-        Each edit replaces an exact occurrence of old_string with new_string.
-        Edits are applied sequentially — later edits see the result of earlier ones.
-
-        Args:
-            file_path: File path relative to content root
-            sha: SHA-256 hex digest of the current file content (from read_content)
-            edits: Ordered list of edit operations to apply
-        Returns:
-            A dict with path, result status, and new_sha
-        """
-        current = filesystem.read_file(file_path)
-        current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
-        if sha != current_sha:
-            raise ValueError(
-                f"SHA mismatch for '{file_path}': expected {current_sha}, got {sha}. "
-                "The file may have changed since it was last read."
-            )
-        new_content = _apply_edits(current, edits, file_path)
-        filesystem.write_file(file_path, new_content)
-        if _is_resource_file(file_path):
-            uri = AnyUrl(f"stash://{file_path}")
-            await ctx.session.send_resource_updated(uri=uri)
-        emit(CONTENT_UPDATED, file_path)
-        logger.info(f"Edited: {file_path}")
-        new_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
-        return {"path": file_path, "result": "ok", "new_sha": new_sha}
-
-    @mcp.tool()
-    async def multi_edit_content(
-        edit_operations: list[FileEditOperation],
-        ctx: Context,
-    ) -> dict:
-        """
-        Atomically apply edits to multiple files.
-
-        All validations run before any writes — if any file fails validation
-        the entire operation is aborted and no files are modified.
-
-        Args:
-            edit_operations: List of per-file edit operations
-        Returns:
-            A dict with a results list containing path, result status, and new_sha per file
-        """
-        # Reject duplicate file paths
-        paths = [op.file_path for op in edit_operations]
-        if len(paths) != len(set(paths)):
-            raise ValueError("Duplicate file_path entries are not allowed in a single multi_edit_content call.")
-
-        # Phase 1: read all files and validate SHAs
-        originals: dict[str, str] = {}
-        for op in edit_operations:
-            current = filesystem.read_file(op.file_path)
-            current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
-            if op.sha != current_sha:
-                raise ValueError(
-                    f"SHA mismatch for '{op.file_path}': expected {current_sha}, got {op.sha}. "
-                    "The file may have changed since it was last read."
-                )
-            originals[op.file_path] = current
-
-        # Phase 2: apply all edits in memory
-        new_contents: dict[str, str] = {}
-        for op in edit_operations:
-            new_contents[op.file_path] = _apply_edits(originals[op.file_path], op.edits, op.file_path)
-
-        # Phase 3: write all files and send notifications
-        results = []
-        for op in edit_operations:
-            filesystem.write_file(op.file_path, new_contents[op.file_path])
-            if _is_resource_file(op.file_path):
-                uri = AnyUrl(f"stash://{op.file_path}")
-                await ctx.session.send_resource_updated(uri=uri)
-            emit(CONTENT_UPDATED, op.file_path)
-            logger.info(f"Edited: {op.file_path}")
-            new_sha = hashlib.sha256(new_contents[op.file_path].encode("utf-8")).hexdigest()
-            results.append({"path": op.file_path, "result": "ok", "new_sha": new_sha})
-
-        return {"results": results}
-
-    @mcp.tool()
-    async def delete_content(
-        path: str,
-        sha: str,
-        ctx: Context,
-    ) -> str:
-        """
-        Delete a content file.
-
-        Args:
-            path: File path relative to content root
-            sha: SHA-256 hex digest of the current file content (from read_content)
-        Returns:
-            Confirmation message
-        """
-        current = filesystem.read_file(path)
-        current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
-        if sha != current_sha:
-            raise ValueError(
-                f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
-                "The file may have changed since it was last read."
-            )
-        filesystem.delete_file(path)
-        if _unregister_resource(path):
-            await ctx.send_resource_list_changed()
-        emit(CONTENT_DELETED, path)
-        logger.info(f"Deleted: {path}")
-        return f"Deleted: {path}"
+    # --- Read-only tools (always registered) ---
 
     @mcp.tool()
     async def read_content(
@@ -428,28 +435,30 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
                 return f"Empty directory: '{path or '/'}'"
             return "\n".join(lines)
 
-    @mcp.tool()
-    async def move_content(
-        source_path: str,
-        dest_path: str,
-        ctx: Context,
-    ) -> str:
-        """Move or rename a content file.
+    if not Config.READ_ONLY:
 
-        Args:
-            source_path: Current file path relative to content root
-            dest_path: New file path relative to content root
-        Returns:
-            Confirmation message
-        """
-        filesystem.move_file(source_path, dest_path)
-        source_was_resource = _unregister_resource(source_path)
-        dest_is_resource = _register_resource(dest_path)
-        if source_was_resource or dest_is_resource:
-            await ctx.send_resource_list_changed()
-        emit(CONTENT_MOVED, dest_path, source_path=source_path)
-        logger.info(f"Moved: {source_path} -> {dest_path}")
-        return f"Moved: {source_path} -> {dest_path}"
+        @mcp.tool()
+        async def move_content(
+            source_path: str,
+            dest_path: str,
+            ctx: Context,
+        ) -> str:
+            """Move or rename a content file.
+
+            Args:
+                source_path: Current file path relative to content root
+                dest_path: New file path relative to content root
+            Returns:
+                Confirmation message
+            """
+            filesystem.move_file(source_path, dest_path)
+            source_was_resource = _unregister_resource(source_path)
+            dest_is_resource = _register_resource(dest_path)
+            if source_was_resource or dest_is_resource:
+                await ctx.send_resource_list_changed()
+            emit(CONTENT_MOVED, dest_path, source_path=source_path)
+            logger.info(f"Moved: {source_path} -> {dest_path}")
+            return f"Moved: {source_path} -> {dest_path}"
 
     # --- Search tool (conditional) ---
 
@@ -489,11 +498,172 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None) -> FastMCP:
                 lines.append(f"📄 {r.file_path} (score: {r.score:.2f})")
                 if r.context:
                     lines.append(f"   Context: {r.context}")
+                if r.last_changed_at:
+                    lines.append(f"   Last changed: {r.last_changed_at} by {r.changed_by}")
+                if r.commit_message:
+                    lines.append(f"   Commit: {r.commit_message}")
                 snippet = r.content[:200]
                 if len(r.content) > 200:
                     snippet += "..."
                 lines.append(f"   {snippet}")
                 lines.append("")
             return "\n".join(lines)
+
+    # --- Git tools (registered only when GIT_TRACKING is enabled) ---
+
+    if git_backend is not None:
+
+        @mcp.tool()
+        async def history_content(
+            path: str,
+            max_count: int = 20,
+        ) -> str:
+            """Return recent git commits touching a file.
+
+            Args:
+                path: File path relative to content root
+                max_count: Maximum number of commits to return (default 20)
+            Returns:
+                Commit history formatted as a string
+            """
+            import asyncio
+
+            entries = await asyncio.to_thread(git_backend.log, path, max_count)
+            if not entries:
+                return f"No git history found for '{path}'."
+            lines = []
+            for e in entries:
+                lines.append(
+                    f"{e.commit_hash[:8]}  {e.timestamp.isoformat()}  {e.author}  {e.message}"
+                )
+            return "\n".join(lines)
+
+        @mcp.tool()
+        async def diff_content(
+            path: str,
+            ref: str | None = None,
+        ) -> str:
+            """Show what changed in a file since a given git ref.
+
+            Args:
+                path: File path relative to content root
+                ref: Git ref to diff against (default: HEAD~1)
+            Returns:
+                Unified diff as a string
+            """
+            import asyncio
+
+            return await asyncio.to_thread(git_backend.diff, path, ref)
+
+        @mcp.tool()
+        async def blame_content(
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
+            """Return line-level authorship and timestamps for a file.
+
+            Args:
+                path: File path relative to content root
+                start_line: Optional 1-based start line
+                end_line: Optional 1-based end line
+            Returns:
+                Blame information formatted as a string
+            """
+            import asyncio
+
+            blame_lines = await asyncio.to_thread(
+                git_backend.blame, path, start_line, end_line
+            )
+            if not blame_lines:
+                return f"No blame data available for '{path}'."
+            lines = []
+            for bl in blame_lines:
+                lines.append(
+                    f"{bl.line_number:4d}  {bl.commit_hash[:8]}  "
+                    f"{bl.timestamp.isoformat()}  {bl.author}  {bl.content}"
+                )
+            return "\n".join(lines)
+
+    # --- Transaction tools (only when write mode + git tracking are both active) ---
+
+    if not Config.READ_ONLY and git_backend is not None:
+        from .transactions import TransactionError, TransactionManager
+
+        tm = filesystem if isinstance(filesystem, TransactionManager) else None
+
+        if tm is not None:
+
+            @mcp.tool()
+            async def start_content_transaction(ctx: Context) -> str:
+                """Begin a write transaction and return its UUID.
+
+                Acquires the global transaction lock.  All subsequent mutating
+                tool calls (create_content, replace_content, edit_content,
+                multi_edit_content, delete_content, move_content) on this
+                session will be part of the transaction.  Call
+                end_content_transaction to commit or abort_content_transaction
+                to discard.
+
+                Returns:
+                    Transaction UUID string
+                """
+                session_id = str(id(ctx.session))
+                try:
+                    txn_id = await tm.start_transaction(
+                        session_id,
+                        Config.TRANSACTION_TIMEOUT,
+                        Config.TRANSACTION_LOCK_WAIT,
+                    )
+                except TransactionError as exc:
+                    raise ValueError(str(exc))
+                return txn_id
+
+            @mcp.tool()
+            async def end_content_transaction(
+                message: str,
+                ctx: Context,
+                author: str | None = None,
+            ) -> str:
+                """Commit all changes in the active transaction.
+
+                Runs ``git add -A && git commit -m <message>`` and, when
+                GIT_SYNC_ENABLED is true, pushes to the configured remote.
+                Releases the transaction lock so other sessions may proceed.
+
+                Args:
+                    message: Commit message describing the changes
+                    author: Optional commit author in ``"Name <email>"`` format.
+                        Defaults to the repository's configured identity.
+                Returns:
+                    Confirmation string
+                """
+                session_id = str(id(ctx.session))
+                sync_remote = Config.GIT_SYNC_REMOTE if Config.GIT_SYNC_ENABLED else None
+                sync_branch = Config.GIT_SYNC_BRANCH if Config.GIT_SYNC_ENABLED else None
+                try:
+                    await tm.end_transaction(
+                        session_id, message, author, sync_remote, sync_branch
+                    )
+                except TransactionError as exc:
+                    raise ValueError(str(exc))
+                return f"Transaction committed: {message}"
+
+            @mcp.tool()
+            async def abort_content_transaction(ctx: Context) -> str:
+                """Abort the active transaction and discard all uncommitted changes.
+
+                Runs ``git reset --hard HEAD``, resumes git sync, and releases
+                the transaction lock.
+
+                Returns:
+                    Confirmation string
+                """
+                session_id = str(id(ctx.session))
+                try:
+                    await tm.abort_transaction(session_id)
+                except TransactionError as exc:
+                    raise ValueError(str(exc))
+                return "Transaction aborted."
 
     return mcp

@@ -10,7 +10,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api import create_api
 from .config import Config
-from .events import add_listener
+from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_UPDATED, add_listener, emit
 from .filesystem import FileSystem
 from .mcp_server import create_mcp_server
 from .ui import create_ui_router
@@ -51,6 +51,54 @@ def _create_search_engine():
         return None
 
 
+def _create_git_backend():
+    """Validate git config and return a GitBackend, or None if tracking is off.
+
+    Raises SystemExit on misconfiguration so the server fails fast.
+    """
+    if Config.GIT_SYNC_ENABLED and not Config.GIT_TRACKING:
+        logger.error(
+            "STASH_GIT_SYNC_ENABLED=true requires STASH_GIT_TRACKING=true. "
+            "Set STASH_GIT_TRACKING=true or disable sync."
+        )
+        raise SystemExit(1)
+
+    if not Config.GIT_TRACKING:
+        return None
+
+    from .git_backend import GitBackend
+
+    backend = GitBackend(
+        Config.CONTENT_DIR,
+        sync_token=Config.GIT_SYNC_TOKEN,
+        author_default=Config.GIT_AUTHOR_DEFAULT,
+    )
+
+    try:
+        backend.validate()
+    except RuntimeError as exc:
+        logger.error("Git tracking enabled but validation failed: %s", exc)
+        raise SystemExit(1) from exc
+
+    logger.info("Git tracking active (content_dir=%s)", Config.CONTENT_DIR)
+
+    if Config.GIT_SYNC_ENABLED:
+        if not backend.validate_remote(Config.GIT_SYNC_REMOTE):
+            logger.error(
+                "Git sync remote '%s' is not configured in the repository.",
+                Config.GIT_SYNC_REMOTE,
+            )
+            raise SystemExit(1)
+        logger.info(
+            "Git sync enabled (remote=%s branch=%s interval=%ds)",
+            Config.GIT_SYNC_REMOTE,
+            Config.GIT_SYNC_BRANCH,
+            Config.GIT_SYNC_INTERVAL,
+        )
+
+    return backend
+
+
 def _task_done_callback(task: asyncio.Task) -> None:
     """Log exceptions from background tasks."""
     try:
@@ -59,6 +107,36 @@ def _task_done_callback(task: asyncio.Task) -> None:
         return
     if exc is not None:
         logger.error(f"Background task {task.get_name()} failed: {exc}", exc_info=exc)
+
+
+async def _git_sync_loop(
+    git_backend, search_engine, sync_event: asyncio.Event | None = None
+) -> None:
+    """Periodic git pull task.  Runs until cancelled."""
+    remote = Config.GIT_SYNC_REMOTE
+    branch = Config.GIT_SYNC_BRANCH
+    interval = Config.GIT_SYNC_INTERVAL
+    recursive = Config.GIT_SYNC_RECURSIVE
+
+    while True:
+        try:
+            if sync_event is None or sync_event.is_set():
+                result = await asyncio.to_thread(git_backend.pull, remote, branch, recursive)
+                if result.success:
+                    logger.info("Git sync: %s", result.message or "up to date")
+                    for path in result.added_files:
+                        emit(CONTENT_CREATED, path)
+                    for path in result.modified_files:
+                        emit(CONTENT_UPDATED, path)
+                    for path in result.deleted_files:
+                        emit(CONTENT_DELETED, path)
+                else:
+                    logger.warning("Git sync pull failed: %s", result.message)
+            else:
+                logger.debug("Git sync skipped: transaction in progress")
+        except Exception as exc:
+            logger.warning("Git sync error: %s", exc)
+        await asyncio.sleep(interval)
 
 
 def create_app():
@@ -71,8 +149,24 @@ def create_app():
     if search_engine is not None:
         search_engine._filesystem = filesystem
 
+    # Optionally create git backend (may raise SystemExit on misconfiguration)
+    git_backend = _create_git_backend()
+    if git_backend is not None and search_engine is not None:
+        search_engine._git_backend = git_backend
+
+    # When git tracking and writes are both active, wrap the filesystem in a
+    # TransactionManager so that all mutating MCP tool calls are gated behind
+    # an active transaction.
+    transaction_manager = None
+    fs_for_mcp = filesystem
+    if not Config.READ_ONLY and git_backend is not None:
+        from .transactions import TransactionManager
+
+        transaction_manager = TransactionManager(filesystem, git_backend)
+        fs_for_mcp = transaction_manager
+
     # Create MCP http app first so we can wire its lifespan into FastAPI
-    mcp = create_mcp_server(filesystem, search_engine=search_engine)
+    mcp = create_mcp_server(fs_for_mcp, search_engine=search_engine, git_backend=git_backend)
     mcp_http_app = mcp.http_app(path="/")
 
     # Build a combined lifespan that wraps the MCP lifespan and also
@@ -82,6 +176,16 @@ def create_app():
 
     @asynccontextmanager
     async def _combined_lifespan(fastapi_app):
+        # Set up a sync-pause event and register callbacks on the TransactionManager
+        # so that git sync is suspended for the duration of any active transaction.
+        sync_event = asyncio.Event()
+        sync_event.set()  # set = sync allowed; cleared = sync paused during a transaction
+        if transaction_manager is not None:
+            transaction_manager.set_sync_callbacks(
+                pause=lambda: sync_event.clear(),
+                resume=lambda: sync_event.set(),
+            )
+
         async with mcp_lifespan(fastapi_app):
             # Startup: build search index in background (non-blocking)
             if search_engine is not None:
@@ -94,7 +198,24 @@ def create_app():
                 task = asyncio.create_task(_do_build())
                 task.add_done_callback(_task_done_callback)
 
+            # Start periodic git sync task if configured
+            sync_task = None
+            if git_backend is not None and Config.GIT_SYNC_ENABLED:
+                sync_task = asyncio.create_task(
+                    _git_sync_loop(git_backend, search_engine, sync_event),
+                    name="git-sync",
+                )
+                sync_task.add_done_callback(_task_done_callback)
+
             yield
+
+            # Shutdown: cancel the sync task gracefully
+            if sync_task is not None and not sync_task.done():
+                sync_task.cancel()
+                try:
+                    await sync_task
+                except asyncio.CancelledError:
+                    pass
 
     app = create_api(filesystem, lifespan=_combined_lifespan, search_engine=search_engine)
     ui_router = create_ui_router(filesystem, search_engine=search_engine)
@@ -151,6 +272,16 @@ def create_app():
 def main():
     """Run the Stash-MCP web server."""
     logger.info("Starting Stash-MCP server...")
+    logger.info(f"Server name: {Config.SERVER_NAME}")
+    if Config.READ_ONLY:
+        logger.info("Read-only mode enabled — write tools will not be registered")
+    if Config.GIT_TRACKING:
+        logger.info("Git tracking enabled")
+    if Config.GIT_SYNC_ENABLED:
+        logger.info(
+            f"Git sync enabled: remote={Config.GIT_SYNC_REMOTE} "
+            f"branch={Config.GIT_SYNC_BRANCH} interval={Config.GIT_SYNC_INTERVAL}s"
+        )
 
     app = create_app()
 

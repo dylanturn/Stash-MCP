@@ -43,7 +43,8 @@ class Config:
     )
 
     # MCP settings
-    SERVER_NAME: str = "stash-mcp"
+    SERVER_NAME: str = os.getenv("STASH_SERVER_NAME", "stash-mcp")
+    READ_ONLY: bool = os.getenv("STASH_READ_ONLY", "false").lower() == "true"
     SERVER_VERSION: str = "0.1.0"
 
     # Search settings
@@ -62,6 +63,22 @@ class Config:
     )
     SEARCH_CHUNK_SIZE: int = int(os.getenv("STASH_SEARCH_CHUNK_SIZE", "1000"))
     SEARCH_CHUNK_OVERLAP: int = int(os.getenv("STASH_SEARCH_CHUNK_OVERLAP", "100"))
+
+    # Git tracking
+    GIT_TRACKING: bool = os.getenv("STASH_GIT_TRACKING", "false").lower() == "true"
+
+    # Git sync (requires GIT_TRACKING=true)
+    GIT_SYNC_ENABLED: bool = os.getenv("STASH_GIT_SYNC_ENABLED", "false").lower() == "true"
+    GIT_SYNC_REMOTE: str = os.getenv("STASH_GIT_SYNC_REMOTE", "origin")
+    GIT_SYNC_BRANCH: str = os.getenv("STASH_GIT_SYNC_BRANCH", "main")
+    GIT_SYNC_INTERVAL: int = int(os.getenv("STASH_GIT_SYNC_INTERVAL", "60"))
+    GIT_SYNC_RECURSIVE: bool = os.getenv("STASH_GIT_SYNC_RECURSIVE", "false").lower() == "true"
+    GIT_SYNC_TOKEN: str | None = os.getenv("STASH_GIT_SYNC_TOKEN")
+    GIT_AUTHOR_DEFAULT: str = os.getenv("STASH_GIT_AUTHOR_DEFAULT", "stash-mcp <stash@local>")
+
+    # Transaction settings (only relevant when GIT_TRACKING=true and READ_ONLY=false)
+    TRANSACTION_TIMEOUT: int = int(os.getenv("STASH_TRANSACTION_TIMEOUT", "300"))
+    TRANSACTION_LOCK_WAIT: int = int(os.getenv("STASH_TRANSACTION_LOCK_WAIT", "120"))
 
     @classmethod
     def ensure_content_dir(cls) -> None:
