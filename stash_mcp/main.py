@@ -151,6 +151,9 @@ def create_app():
 def main():
     """Run the Stash-MCP web server."""
     logger.info("Starting Stash-MCP server...")
+    logger.info(f"Server name: {Config.SERVER_NAME}")
+    if Config.READ_ONLY:
+        logger.info("Read-only mode enabled — write tools will not be registered")
 
     app = create_app()
 
