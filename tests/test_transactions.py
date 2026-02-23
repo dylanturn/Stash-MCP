@@ -71,6 +71,23 @@ class TestGitBackendNewMethods:
             )
             assert "Add new.txt" in result.stdout
 
+    def test_commit_with_author(self):
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir)
+            _init_repo(path)
+            from stash_mcp.git_backend import GitBackend
+
+            git = GitBackend(path)
+            (path / "authored.txt").write_text("authored content")
+            git.commit("Add authored file", author="Custom Author <custom@example.com>")
+            result = subprocess.run(
+                ["git", "-C", tmpdir, "log", "--format=%an <%ae>", "-1"],
+                capture_output=True,
+                text=True,
+            )
+            assert "Custom Author" in result.stdout
+            assert "custom@example.com" in result.stdout
+
     def test_reset_hard_discards_changes(self):
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir)

@@ -313,11 +313,14 @@ class GitBackend:
             return result.stderr or "diff unavailable"
         return result.stdout
 
-    def commit(self, message: str) -> None:
+    def commit(self, message: str, author: str | None = None) -> None:
         """Stage all changes and create a commit with *message*.
 
         Args:
             message: Commit message.
+            author: Optional author string in ``"Name <email>"`` format.
+                When provided, the commit is recorded with this author identity
+                instead of the repository's configured ``user.name``/``user.email``.
 
         Raises:
             RuntimeError: If staging or committing fails.
@@ -326,7 +329,10 @@ class GitBackend:
         if add_result.returncode != 0:
             raise RuntimeError(f"git add -A failed: {add_result.stderr.strip()}")
 
-        commit_result = self._run(["git", "commit", "-m", message])
+        commit_args = ["git", "commit", "-m", message]
+        if author:
+            commit_args.extend(["--author", author])
+        commit_result = self._run(commit_args)
         if commit_result.returncode != 0:
             raise RuntimeError(f"git commit failed: {commit_result.stderr.strip()}")
 
