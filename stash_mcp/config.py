@@ -43,7 +43,8 @@ class Config:
     )
 
     # MCP settings
-    SERVER_NAME: str = "stash-mcp"
+    SERVER_NAME: str = os.getenv("STASH_SERVER_NAME", "stash-mcp")
+    READ_ONLY: bool = os.getenv("STASH_READ_ONLY", "false").lower() == "true"
     SERVER_VERSION: str = "0.1.0"
 
     # Search settings

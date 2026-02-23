@@ -646,3 +646,76 @@ async def test_multi_edit_content_returns_per_file_results(mcp_server, temp_fs, 
     assert "data.json" in text
     assert _sha("# Result README") in text
     assert _sha('{"key": "done"}') in text
+
+
+# --- Read-only mode tests ---
+
+WRITE_TOOL_NAMES = {
+    "create_content",
+    "replace_content",
+    "edit_content",
+    "multi_edit_content",
+    "delete_content",
+    "move_content",
+}
+# search_content is omitted here because it is only registered when a
+# search_engine is passed to create_mcp_server(); it is not a write tool.
+READ_TOOL_NAMES = {"read_content", "list_content"}
+
+
+async def test_read_only_mode_omits_write_tools(temp_fs):
+    """Test that write tools are not registered when READ_ONLY=True."""
+    with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
+        mcp = create_mcp_server(temp_fs)
+        tools = await mcp.list_tools()
+        tool_names = {t.name for t in tools}
+        for name in WRITE_TOOL_NAMES:
+            assert name not in tool_names, f"Write tool '{name}' should not be in read-only mode"
+        for name in READ_TOOL_NAMES:
+            assert name in tool_names, f"Read tool '{name}' should be registered in read-only mode"
+
+
+async def test_default_mode_includes_all_tools(temp_fs):
+    """Test that all tools are registered when READ_ONLY=False (default)."""
+    with patch("stash_mcp.mcp_server.Config.READ_ONLY", False):
+        mcp = create_mcp_server(temp_fs)
+        tools = await mcp.list_tools()
+        tool_names = {t.name for t in tools}
+        for name in WRITE_TOOL_NAMES | READ_TOOL_NAMES:
+            assert name in tool_names, f"Tool '{name}' should be registered in default mode"
+
+
+# --- Server name config tests ---
+
+
+def test_server_name_from_env():
+    """Test that STASH_SERVER_NAME env var is reflected in Config.SERVER_NAME."""
+    import importlib
+
+    import stash_mcp.config as config_module
+
+    with patch.dict("os.environ", {"STASH_SERVER_NAME": "my-custom-server"}):
+        importlib.reload(config_module)
+        assert config_module.Config.SERVER_NAME == "my-custom-server"
+    importlib.reload(config_module)
+
+
+def test_server_name_default():
+    """Test that SERVER_NAME defaults to 'stash-mcp' when env var is not set."""
+    import importlib
+    import os
+
+    import stash_mcp.config as config_module
+
+    env = {k: v for k, v in os.environ.items() if k != "STASH_SERVER_NAME"}
+    with patch.dict("os.environ", env, clear=True):
+        importlib.reload(config_module)
+        assert config_module.Config.SERVER_NAME == "stash-mcp"
+    importlib.reload(config_module)
+
+
+async def test_server_name_used_in_mcp_server(temp_fs):
+    """Test that the MCP server uses Config.SERVER_NAME."""
+    with patch("stash_mcp.mcp_server.Config.SERVER_NAME", "test-server"):
+        mcp = create_mcp_server(temp_fs)
+        assert mcp.name == "test-server"
