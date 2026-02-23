@@ -408,6 +408,38 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         return {"content": content, "sha": sha}
 
     @mcp.tool()
+    async def read_content_batch(
+        paths: list[str],
+    ) -> dict:
+        """Read multiple files and return their contents with SHA-256 hashes.
+
+        Reads up to 10 files in a single call. Each file's content and SHA
+        are returned so they can be used with update/delete operations.
+
+        Args:
+            paths: List of file paths relative to content root (max 10)
+        Returns:
+            A dict with 'results' list, each containing 'path', 'content',
+            'sha', and 'error' (null on success)
+        """
+        if not paths:
+            raise ValueError("At least one path is required.")
+        if len(paths) > 10:
+            raise ValueError(f"Maximum 10 files per batch read. Got {len(paths)}.")
+        if len(paths) != len(set(paths)):
+            raise ValueError("Duplicate paths are not allowed in a single batch read.")
+
+        results = []
+        for path in paths:
+            try:
+                content = filesystem.read_file(path)
+                sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                results.append({"path": path, "content": content, "sha": sha, "error": None})
+            except (FileNotFoundError, InvalidPathError) as exc:
+                results.append({"path": path, "content": None, "sha": None, "error": str(exc)})
+        return {"results": results}
+
+    @mcp.tool()
     async def list_content(
         path: str = "",
         recursive: bool = False,

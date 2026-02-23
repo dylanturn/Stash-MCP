@@ -125,6 +125,7 @@ async def test_list_tools(mcp_server):
     assert "multi_edit_content" in tool_names
     assert "delete_content" in tool_names
     assert "list_content" in tool_names
+    assert "read_content_batch" in tool_names
     assert "move_content" in tool_names
 
 
@@ -169,6 +170,77 @@ async def test_read_content_tool_not_found(mcp_server):
     tool = await mcp_server.get_tool("read_content")
     with pytest.raises(FileNotFoundError):
         await tool.run({"path": "nonexistent.md"})
+
+
+# --- read_content_batch tests ---
+
+
+async def test_read_content_batch_happy_path(mcp_server):
+    """Test read_content_batch returns content and sha for multiple files."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["README.md", "data.json"]})
+    text = str(result.content)
+    assert "# Root README" in text
+    assert _sha("# Root README") in text
+    assert "data.json" in text
+    assert _sha('{"key": "value"}') in text
+
+
+async def test_read_content_batch_partial_failure(mcp_server):
+    """Test read_content_batch returns error for missing files without aborting."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["README.md", "nonexistent.md"]})
+    text = str(result.content)
+    # Existing file should be returned successfully
+    assert "# Root README" in text
+    assert _sha("# Root README") in text
+    # Missing file should have an error entry
+    assert "nonexistent.md" in text
+    assert "error" in text
+
+
+async def test_read_content_batch_empty_list(mcp_server):
+    """Test read_content_batch rejects empty path list."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    with pytest.raises(ValueError, match="At least one path is required"):
+        await tool.run({"paths": []})
+
+
+async def test_read_content_batch_over_limit(mcp_server):
+    """Test read_content_batch rejects more than 10 paths."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    with pytest.raises(ValueError, match="Maximum 10 files per batch read"):
+        await tool.run({"paths": [f"file{i}.md" for i in range(11)]})
+
+
+async def test_read_content_batch_duplicate_paths(mcp_server):
+    """Test read_content_batch rejects duplicate paths."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    with pytest.raises(ValueError, match="Duplicate paths are not allowed"):
+        await tool.run({"paths": ["README.md", "README.md"]})
+
+
+async def test_read_content_batch_order_preserved(mcp_server, temp_fs):
+    """Test read_content_batch returns results in the same order as input paths."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["data.json", "README.md", "docs/README.md"]})
+    # Extract result order from the content string
+    text = str(result.content)
+    pos_data = text.find("data.json")
+    pos_root = text.find('"README.md"')
+    pos_docs = text.find("docs/README.md")
+    assert pos_data < pos_root < pos_docs
+
+
+async def test_read_content_batch_all_missing(mcp_server):
+    """Test read_content_batch with all missing files returns errors for each."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["missing1.md", "missing2.md"]})
+    text = str(result.content)
+    assert "missing1.md" in text
+    assert "missing2.md" in text
+    # No content should be present, only errors
+    assert "error" in text
 
 
 async def test_replace_content_tool(mcp_server, temp_fs, mock_context):
@@ -660,7 +732,7 @@ WRITE_TOOL_NAMES = {
 }
 # search_content is omitted here because it is only registered when a
 # search_engine is passed to create_mcp_server(); it is not a write tool.
-READ_TOOL_NAMES = {"read_content", "list_content"}
+READ_TOOL_NAMES = {"read_content", "read_content_batch", "list_content"}
 
 
 async def test_read_only_mode_omits_write_tools(temp_fs):
