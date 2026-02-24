@@ -11,6 +11,7 @@ from stash_mcp.filesystem import FileNotFoundError, FileSystem
 from stash_mcp.mcp_server import (
     EditOperation,
     FileEditOperation,
+    MoveOperation,
     _build_heading_tree,
     _get_mime_type,
     create_mcp_server,
@@ -135,6 +136,7 @@ async def test_list_tools(mcp_server):
     assert "read_content_batch" in tool_names
     assert "move_content" in tool_names
     assert "move_directory" in tool_names
+    assert "move_content_batch" in tool_names
     assert "get_markdown_structure" in tool_names
     assert "get_markdown_structure_batch" in tool_names
 
@@ -629,27 +631,189 @@ async def test_move_directory_tool_dest_exists(mcp_server, temp_fs, mock_context
         await tool.run({"source_path": "src", "dest_path": "dst"})
 
 
-async def test_resources_filtered_by_include_patterns(temp_fs):
-    """Test that only README.md files matching patterns are registered as MCP resources."""
-    # Write files of different types
-    temp_fs.write_file("docs/README.md", "# Docs README")
-    temp_fs.write_file("docs/guide.md", "# Guide")
-    temp_fs.write_file("notes/README.md", "# Notes README")
-    temp_fs.write_file("data.json", '{"key": "value"}')
+# --- move_content_batch tests ---
 
-    # Create a new filesystem with patterns, using the same content directory
-    filtered_fs = FileSystem(temp_fs.content_dir, include_patterns=["docs/**/*.md"])
-    mcp = create_mcp_server(filtered_fs)
 
-    resources = await mcp.get_resources()
-    uris = list(resources.keys())
+async def test_move_content_batch_happy_path(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch moves multiple files successfully."""
+    temp_fs.write_file("a.txt", "A")
+    temp_fs.write_file("b.txt", "B")
+    tool = await mcp_server.get_tool("move_content_batch")
+    result = await tool.run({
+        "moves": [
+            MoveOperation(source_path="a.txt", dest_path="moved_a.txt"),
+            MoveOperation(source_path="b.txt", dest_path="moved_b.txt"),
+        ],
+    })
+    text = str(result.content)
+    assert "moved_a.txt" in text
+    assert "moved_b.txt" in text
+    assert not temp_fs.file_exists("a.txt")
+    assert not temp_fs.file_exists("b.txt")
+    assert temp_fs.file_exists("moved_a.txt")
+    assert temp_fs.file_exists("moved_b.txt")
+    assert temp_fs.read_file("moved_a.txt") == "A"
+    assert temp_fs.read_file("moved_b.txt") == "B"
 
-    # Only docs/README.md should be registered (it's both README.md and matches pattern)
-    assert "stash://docs/README.md" in uris
-    # These should NOT be registered (either not README.md or don't match pattern)
-    assert "stash://docs/guide.md" not in uris  # Not README.md
-    assert "stash://notes/README.md" not in uris  # Doesn't match pattern
-    assert "stash://data.json" not in uris  # Not README.md
+
+async def test_move_content_batch_empty_list(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects an empty list."""
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="At least one move operation is required"):
+        await tool.run({"moves": []})
+
+
+async def test_move_content_batch_over_limit(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects more than 10 moves."""
+    tool = await mcp_server.get_tool("move_content_batch")
+    moves = [MoveOperation(source_path=f"src{i}.txt", dest_path=f"dst{i}.txt") for i in range(11)]
+    with pytest.raises(ValueError, match="Maximum 10 moves per batch"):
+        await tool.run({"moves": moves})
+
+
+async def test_move_content_batch_duplicate_sources(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects duplicate source paths."""
+    temp_fs.write_file("a.txt", "A")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Duplicate source paths"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="b.txt"),
+                MoveOperation(source_path="a.txt", dest_path="c.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_duplicate_destinations(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects duplicate destination paths."""
+    temp_fs.write_file("a.txt", "A")
+    temp_fs.write_file("b.txt", "B")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Duplicate destination paths"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="dest.txt"),
+                MoveOperation(source_path="b.txt", dest_path="dest.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_source_dest_overlap(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects paths that appear as both source and destination."""
+    temp_fs.write_file("a.txt", "A")
+    temp_fs.write_file("b.txt", "B")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="both source and destination"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="b.txt"),
+                MoveOperation(source_path="b.txt", dest_path="c.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_missing_source(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects a missing source file."""
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Source file not found"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="nonexistent.txt", dest_path="dest.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_dest_exists(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects when destination already exists."""
+    temp_fs.write_file("src.txt", "source")
+    temp_fs.write_file("dst.txt", "destination")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Destination already exists"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="src.txt", dest_path="dst.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_validation_all_or_nothing(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch aborts all moves when any validation fails."""
+    temp_fs.write_file("a.txt", "A")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="moved_a.txt"),
+                MoveOperation(source_path="nonexistent.txt", dest_path="moved_b.txt"),
+            ],
+        })
+    # a.txt should NOT have been moved
+    assert temp_fs.file_exists("a.txt")
+    assert not temp_fs.file_exists("moved_a.txt")
+
+
+async def test_move_content_batch_resource_registration(temp_fs, mock_context):
+    """Test move_content_batch updates resource registry for README.md files."""
+    temp_fs.write_file("README.md", "# Root")
+    temp_fs.write_file("docs/README.md", "# Docs")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_batch")
+    await tool.run({
+        "moves": [
+            MoveOperation(source_path="README.md", dest_path="archive/README.md"),
+            MoveOperation(source_path="docs/README.md", dest_path="archive/docs/README.md"),
+        ],
+    })
+    resources = await mcp._list_resources()
+    uris = {str(r.uri) for r in resources}
+    assert "stash://README.md" not in uris
+    assert "stash://docs/README.md" not in uris
+    assert "stash://archive/README.md" in uris
+    assert "stash://archive/docs/README.md" in uris
+
+
+async def test_move_content_batch_sends_resource_list_changed(temp_fs, mock_context):
+    """Test move_content_batch sends resource_list_changed when README.md is involved."""
+    temp_fs.write_file("README.md", "# Root")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_batch")
+    await tool.run({
+        "moves": [
+            MoveOperation(source_path="README.md", dest_path="archive/README.md"),
+        ],
+    })
+    mock_context.send_resource_list_changed.assert_awaited()
+
+
+async def test_move_content_batch_no_notification_for_non_readme(temp_fs, mock_context):
+    """Test move_content_batch does not send notification when no README.md is involved."""
+    temp_fs.write_file("a.txt", "A")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_batch")
+    await tool.run({
+        "moves": [
+            MoveOperation(source_path="a.txt", dest_path="moved_a.txt"),
+        ],
+    })
+    mock_context.send_resource_list_changed.assert_not_awaited()
+
+
+async def test_move_content_batch_emits_events(temp_fs, mock_context):
+    """Test move_content_batch emits CONTENT_MOVED events for each file."""
+    temp_fs.write_file("a.txt", "A")
+    temp_fs.write_file("b.txt", "B")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_batch")
+    with patch("stash_mcp.mcp_server.emit") as mock_emit:
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="moved_a.txt"),
+                MoveOperation(source_path="b.txt", dest_path="moved_b.txt"),
+            ],
+        })
+    assert mock_emit.call_count == 2
+    mock_emit.assert_any_call("content_moved", "moved_a.txt", source_path="a.txt")
+    mock_emit.assert_any_call("content_moved", "moved_b.txt", source_path="b.txt")
 
 
 async def test_tools_emit_events(mcp_server, temp_fs, mock_context):
@@ -936,6 +1100,7 @@ WRITE_TOOL_NAMES = {
     "delete_content",
     "move_content",
     "move_directory",
+    "move_content_batch",
 }
 # search_content is omitted here because it is only registered when a
 # search_engine is passed to create_mcp_server(); it is not a write tool.

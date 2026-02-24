@@ -39,6 +39,13 @@ class FileEditOperation(BaseModel):
     edits: list[EditOperation] = Field(description="Ordered list of edits to apply")
 
 
+class MoveOperation(BaseModel):
+    """A single file move operation."""
+
+    source_path: str = Field(description="Current file path relative to content root")
+    dest_path: str = Field(description="New file path relative to content root")
+
+
 # Mime type mapping for common extensions
 MIME_TYPES: dict[str, str] = {
     ".md": "text/markdown",
@@ -777,6 +784,81 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 "destination": dest_path,
                 "files_moved": len(moved_files),
             }
+
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Move multiple files",
+                readOnlyHint=False,
+                destructiveHint=False,
+                openWorldHint=False,
+            )
+        )
+        async def move_content_batch(
+            moves: list[MoveOperation],
+            ctx: Context,
+        ) -> dict:
+            """Move or rename multiple files in a single operation.
+
+            All validations run before any moves — if any move fails validation
+            the entire operation is aborted and no files are moved.
+
+            Args:
+                moves: List of move operations (max 10), each with source_path and dest_path
+            Returns:
+                A dict with 'results' list containing source, destination, and status per file
+            """
+            if len(moves) == 0:
+                raise ValueError("At least one move operation is required.")
+            if len(moves) > 10:
+                raise ValueError(f"Maximum 10 moves per batch. Got {len(moves)}.")
+
+            sources = [m.source_path for m in moves]
+            if len(sources) != len(set(sources)):
+                raise ValueError("Duplicate source paths are not allowed in a single batch move.")
+
+            dests = [m.dest_path for m in moves]
+            if len(dests) != len(set(dests)):
+                raise ValueError(
+                    "Duplicate destination paths are not allowed in a single batch move."
+                )
+
+            source_set = set(sources)
+            dest_set = set(dests)
+            overlap = source_set & dest_set
+            if overlap:
+                raise ValueError(
+                    f"Paths cannot appear as both source and destination: {overlap}. "
+                    "Use intermediate paths for swap operations."
+                )
+
+            for m in moves:
+                if not filesystem.file_exists(m.source_path):
+                    raise ValueError(f"Source file not found: {m.source_path}")
+                dst = filesystem._resolve_path(m.dest_path)
+                if dst.exists():
+                    raise ValueError(f"Destination already exists: {m.dest_path}")
+
+            results = []
+            resources_changed = False
+
+            for m in moves:
+                filesystem.move_file(m.source_path, m.dest_path)
+                if _unregister_resource(m.source_path):
+                    resources_changed = True
+                if _register_resource(m.dest_path):
+                    resources_changed = True
+                emit(CONTENT_MOVED, m.dest_path, source_path=m.source_path)
+                logger.info(f"Moved: {m.source_path} -> {m.dest_path}")
+                results.append({
+                    "source": m.source_path,
+                    "destination": m.dest_path,
+                    "result": "ok",
+                })
+
+            if resources_changed:
+                await ctx.send_resource_list_changed()
+
+            return {"results": results}
 
     # --- Search tool (conditional) ---
 
