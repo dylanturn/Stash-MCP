@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
@@ -118,6 +119,54 @@ def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
         else:
             content = content.replace(edit.old_string, edit.new_string, 1)
     return content
+
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+_FENCE_RE = re.compile(r"^```")
+
+
+def _build_heading_tree(flat: list[dict]) -> list[dict]:
+    """Convert a flat list of headings into a nested tree."""
+    root: list[dict] = []
+    stack: list[dict] = []
+
+    for heading in flat:
+        while stack and stack[-1]["level"] >= heading["level"]:
+            stack.pop()
+
+        if stack:
+            stack[-1]["children"].append(heading)
+        else:
+            root.append(heading)
+
+        stack.append(heading)
+
+    return root
+
+
+def parse_markdown_structure(content: str) -> list[dict]:
+    """Parse markdown content and return a nested heading structure."""
+    in_code_block = False
+    flat_headings: list[dict] = []
+
+    for line_num, line in enumerate(content.splitlines(), start=1):
+        if _FENCE_RE.match(line.strip()):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        match = _HEADING_RE.match(line.strip())
+        if match:
+            level = len(match.group(1))
+            text = match.group(2).strip()
+            flat_headings.append({
+                "heading": text,
+                "level": level,
+                "line_number": line_num,
+                "children": [],
+            })
+
+    return _build_heading_tree(flat_headings)
 
 
 def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=None) -> FastMCP:
@@ -495,6 +544,36 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             if not lines:
                 return f"Empty directory: '{path or '/'}'"
             return "\n".join(lines)
+
+    @mcp.tool()
+    async def get_markdown_structure(
+        path: str,
+    ) -> dict:
+        """Read a markdown file and return its document structure based on headings.
+
+        Parses the heading hierarchy (h1-h6) and returns a nested outline of
+        the document. Useful for understanding document organization before
+        reading full content.
+
+        Args:
+            path: File path relative to content root (must be a .md or .markdown file)
+        Returns:
+            A dict with 'path', 'title' (first h1 if present), and 'sections'
+            (nested list of heading entries)
+        """
+        suffix = PurePosixPath(path).suffix.lower()
+        if suffix not in {".md", ".markdown"}:
+            raise ValueError(
+                f"get_markdown_structure only supports markdown files (.md, .markdown). Got: {path}"
+            )
+        content = filesystem.read_file(path)
+        sections = parse_markdown_structure(content)
+        title = None
+        for heading in sections:
+            if heading["level"] == 1:
+                title = heading["heading"]
+                break
+        return {"path": path, "title": title, "sections": sections}
 
     if not Config.READ_ONLY:
 
