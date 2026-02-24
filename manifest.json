@@ -23,14 +23,20 @@
     "type": "python",
     "entry_point": "stash_mcp/server.py",
     "mcp_config": {
-      "command": "uv",
-      "args": ["run", "--directory", "${__dirname}", "-m", "stash_mcp.server"],
+      "command": "uvx",
+      "args": [
+        "mcp-proxy",
+        "--transport",
+        "streamablehttp",
+        "http://localhost:${user_config.port}/mcp"
+      ],
       "env": {
         "STASH_CONTENT_ROOT": "${user_config.content_dir}",
+        "STASH_PORT": "${user_config.port}",
         "STASH_READ_ONLY": "${user_config.read_only}",
-        "STASH_GIT_TRACKING": "${user_config.git_tracking}",
         "STASH_SEARCH_ENABLED": "${user_config.search_enabled}",
-        "STASH_SEARCH_EMBEDDER_MODEL": "${user_config.embedding_model}"
+        "STASH_SEARCH_EMBEDDER_MODEL": "${user_config.embedding_model}",
+        "STASH_GIT_TRACKING": "${user_config.git_tracking}"
       }
     }
   },
@@ -41,6 +47,13 @@
       "description": "Root directory for your content store",
       "required": true,
       "default": "${HOME}/stash-content"
+    },
+    "port": {
+      "type": "number",
+      "title": "Server Port",
+      "description": "Port the Stash-MCP HTTP server listens on",
+      "required": false,
+      "default": 8000
     },
     "read_only": {
       "type": "boolean",

@@ -110,15 +110,77 @@ The server will be available at:
 
 Your content will be persisted in the `./content` directory.
 
-### MCP Client Configuration
+### Connecting MCP Clients
 
-To connect Claude Desktop (or other MCP clients) to the running container, add the following to your MCP client configuration:
+Once the server is running (via Docker Compose or locally), connect Claude Desktop or any other MCP client using one of the methods below.
+
+**Option 1: Claude Desktop via `mcp-proxy` (Recommended for Desktop)**
+
+`mcp-proxy` bridges Claude Desktop's stdio transport to Stash-MCP's Streamable HTTP endpoint:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "uvx",
+      "args": [
+        "mcp-proxy",
+        "--transport",
+        "streamablehttp",
+        "http://localhost:8000/mcp"
+      ]
+    }
+  }
+}
+```
+
+> **Note:** `uvx` must be on the PATH that Claude Desktop sees. On macOS, GUI apps may not inherit your shell PATH — use the full path if needed (e.g. `/Users/you/.local/bin/uvx`).
+
+Alternatively, use `npx mcp-remote` if you have Node.js but not uv:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
+    }
+  }
+}
+```
+
+**Option 2: Native Streamable HTTP (Claude Code, Cursor, etc.)**
+
+Clients that support Streamable HTTP natively can connect directly:
 
 ```json
 {
   "mcpServers": {
     "stash": {
       "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+Claude Code CLI:
+```bash
+claude mcp add --transport http stash http://localhost:8000/mcp
+```
+
+**Option 3: Local stdio (no container)**
+
+Run the server as a stdio subprocess directly from your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/Stash-MCP", "-m", "stash_mcp.server"],
+      "env": {
+        "STASH_CONTENT_ROOT": "/path/to/your/content"
+      }
     }
   }
 }
@@ -131,31 +193,13 @@ To connect Claude Desktop (or other MCP clients) to the running container, add t
 uv sync
 
 # Run the server
-uv run -m stash_mcp.server
+uv run -m stash_mcp.main
 
 # Run tests
 uv run pytest
 
 # Run linter
 uv run ruff check .
-```
-
-### Claude Desktop / MCP Client
-
-Add to your MCP client configuration:
-
-```json
-{
-  "mcpServers": {
-    "stash": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/Stash-MCP", "-m", "stash_mcp.server"],
-      "env": {
-        "STASH_CONTENT_DIR": "/path/to/your/content"
-      }
-    }
-  }
-}
 ```
 
 ## Usage
