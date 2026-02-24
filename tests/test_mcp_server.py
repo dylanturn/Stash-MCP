@@ -135,6 +135,7 @@ async def test_list_tools(mcp_server):
     assert "read_content_batch" in tool_names
     assert "move_content" in tool_names
     assert "get_markdown_structure" in tool_names
+    assert "get_markdown_structure_batch" in tool_names
 
 
 async def test_create_content_tool(temp_fs, mock_context):
@@ -1061,3 +1062,127 @@ async def test_get_markdown_structure_tool_path_in_result(temp_fs):
     result = await tool.run({"path": "docs/guide.md"})
     text = str(result.content)
     assert "docs/guide.md" in text
+
+
+# --- get_markdown_structure_batch tests ---
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_happy_path(temp_fs):
+    """Test get_markdown_structure_batch returns structure for multiple files."""
+    temp_fs.write_file("a.md", "# Alpha\n\n## Section A\n")
+    temp_fs.write_file("b.md", "# Beta\n\n## Section B\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    result = await tool.run({"paths": ["a.md", "b.md"]})
+    text = str(result.content)
+    assert "Alpha" in text
+    assert "Beta" in text
+    assert "Section A" in text
+    assert "Section B" in text
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_empty_list(temp_fs):
+    """Test get_markdown_structure_batch rejects empty path list."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    with pytest.raises(ValueError, match="At least one path is required"):
+        await tool.run({"paths": []})
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_over_limit(temp_fs):
+    """Test get_markdown_structure_batch rejects more than 10 paths."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    paths = [f"file{i}.md" for i in range(11)]
+    with pytest.raises(ValueError, match="Maximum 10 files per batch"):
+        await tool.run({"paths": paths})
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_duplicate_paths(temp_fs):
+    """Test get_markdown_structure_batch rejects duplicate paths."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    with pytest.raises(ValueError, match="Duplicate paths are not allowed"):
+        await tool.run({"paths": ["a.md", "a.md"]})
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_partial_failure(temp_fs):
+    """Test get_markdown_structure_batch returns error for missing files without aborting."""
+    temp_fs.write_file("exists.md", "# Exists\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    result = await tool.run({"paths": ["exists.md", "missing.md"]})
+    text = str(result.content)
+    assert "Exists" in text
+    assert "missing.md" in text
+    assert "error" in text.lower()
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_non_markdown(temp_fs):
+    """Test get_markdown_structure_batch returns error for non-markdown files without aborting."""
+    temp_fs.write_file("doc.md", "# Doc\n")
+    temp_fs.write_file("data.json", '{"key": "value"}')
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    result = await tool.run({"paths": ["doc.md", "data.json"]})
+    text = str(result.content)
+    assert "Doc" in text
+    assert "only supports markdown files" in text
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_order_preserved(temp_fs):
+    """Test get_markdown_structure_batch preserves result order matching input paths."""
+    temp_fs.write_file("first.md", "# First\n")
+    temp_fs.write_file("second.md", "# Second\n")
+    temp_fs.write_file("third.md", "# Third\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    import json
+    result = await tool.run({"paths": ["third.md", "first.md", "second.md"]})
+    data = json.loads(str(result.content[0].text))
+    paths = [r["path"] for r in data["results"]]
+    assert paths == ["third.md", "first.md", "second.md"]
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_title_field(temp_fs):
+    """Test get_markdown_structure_batch extracts title from first h1."""
+    temp_fs.write_file("titled.md", "# My Title\n\n## Sub\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    result = await tool.run({"paths": ["titled.md"]})
+    text = str(result.content)
+    assert "My Title" in text
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_no_h1_title_null(temp_fs):
+    """Test get_markdown_structure_batch returns null title when no h1 exists."""
+    temp_fs.write_file("no_h1.md", "## Section\n\n### Subsection\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    import json
+    result = await tool.run({"paths": ["no_h1.md"]})
+    data = json.loads(str(result.content[0].text))
+    assert data["results"][0]["title"] is None
+
+
+@pytest.mark.anyio
+async def test_get_markdown_structure_batch_all_missing(temp_fs):
+    """Test get_markdown_structure_batch returns errors for all missing files."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure_batch")
+    import json
+    result = await tool.run({"paths": ["missing1.md", "missing2.md"]})
+    data = json.loads(str(result.content[0].text))
+    for r in data["results"]:
+        assert r["title"] is None
+        assert r["sections"] is None
+        assert r["error"] is not None

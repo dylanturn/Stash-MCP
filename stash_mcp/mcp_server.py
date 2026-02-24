@@ -575,6 +575,60 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 break
         return {"path": path, "title": title, "sections": sections}
 
+    @mcp.tool()
+    async def get_markdown_structure_batch(
+        paths: list[str],
+    ) -> dict:
+        """Return the heading structure of multiple markdown files.
+
+        Parses up to 10 markdown files and returns their heading hierarchies.
+        Useful for scanning a documentation tree to understand content organization
+        across multiple files.
+
+        Args:
+            paths: List of markdown file paths relative to content root (max 10)
+        Returns:
+            A dict with 'results' list, each containing the path, title, sections,
+            and error (null on success)
+        """
+        if len(paths) == 0:
+            raise ValueError("At least one path is required.")
+        if len(paths) > 10:
+            raise ValueError(f"Maximum 10 files per batch. Got {len(paths)}.")
+        if len(paths) != len(set(paths)):
+            raise ValueError("Duplicate paths are not allowed in a single batch call.")
+
+        results = []
+        for path in paths:
+            try:
+                suffix = PurePosixPath(path).suffix.lower()
+                if suffix not in (".md", ".markdown"):
+                    raise ValueError(
+                        f"get_markdown_structure only supports markdown files "
+                        f"(.md, .markdown). Got: {path}"
+                    )
+                content = filesystem.read_file(path)
+                sections = parse_markdown_structure(content)
+                title = None
+                for s in sections:
+                    if s["level"] == 1:
+                        title = s["heading"]
+                        break
+                results.append({
+                    "path": path,
+                    "title": title,
+                    "sections": sections,
+                    "error": None,
+                })
+            except (FileNotFoundError, InvalidPathError, ValueError) as exc:
+                results.append({
+                    "path": path,
+                    "title": None,
+                    "sections": None,
+                    "error": str(exc),
+                })
+        return {"results": results}
+
     if not Config.READ_ONLY:
 
         @mcp.tool()
