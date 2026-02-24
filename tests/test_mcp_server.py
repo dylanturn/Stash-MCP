@@ -128,17 +128,17 @@ async def test_list_tools(mcp_server):
     tool_names = list(tools.keys())
     assert "create_content" in tool_names
     assert "read_content" in tool_names
-    assert "replace_content" in tool_names
+    assert "overwrite_content" in tool_names
     assert "edit_content" in tool_names
-    assert "multi_edit_content" in tool_names
+    assert "edit_content_batch" in tool_names
     assert "delete_content" in tool_names
     assert "list_content" in tool_names
     assert "read_content_batch" in tool_names
     assert "move_content" in tool_names
-    assert "move_directory" in tool_names
+    assert "move_content_directory" in tool_names
     assert "move_content_batch" in tool_names
-    assert "get_markdown_structure" in tool_names
-    assert "get_markdown_structure_batch" in tool_names
+    assert "inspect_content_structure" in tool_names
+    assert "inspect_content_structure_batch" in tool_names
 
 
 async def test_create_content_tool(temp_fs, mock_context):
@@ -390,9 +390,9 @@ async def test_read_content_batch_max_lines_no_truncation_when_within_limit(temp
     assert '"truncated":false' in text  # truncated=False
 
 
-async def test_replace_content_tool(mcp_server, temp_fs, mock_context):
-    """Test replace_content tool updates an existing file."""
-    tool = await mcp_server.get_tool("replace_content")
+async def test_overwrite_content_tool(mcp_server, temp_fs, mock_context):
+    """Test overwrite_content tool updates an existing file."""
+    tool = await mcp_server.get_tool("overwrite_content")
     result = await tool.run({"path": "README.md", "content": "# Updated", "sha": _sha("# Root README")})
     assert "Updated: README.md" in str(result.content)
     assert temp_fs.read_file("README.md") == "# Updated"
@@ -480,9 +480,9 @@ async def test_create_sends_list_changed(temp_fs, mock_context):
     mock_context.send_resource_list_changed.assert_not_awaited()
 
 
-async def test_replace_existing_sends_resource_updated(mcp_server, mock_context):
-    """Test that replacing README.md sends resource_updated notification."""
-    tool = await mcp_server.get_tool("replace_content")
+async def test_overwrite_existing_sends_resource_updated(mcp_server, mock_context):
+    """Test that overwriting README.md sends resource_updated notification."""
+    tool = await mcp_server.get_tool("overwrite_content")
 
     # Replace README.md should send resource_updated
     await tool.run({"path": "README.md", "content": "# Changed", "sha": _sha("# Root README")})
@@ -498,18 +498,18 @@ async def test_replace_existing_sends_resource_updated(mcp_server, mock_context)
     mock_context.session.send_resource_updated.assert_not_awaited()
 
 
-async def test_replace_content_rejects_nonexistent_file(temp_fs, mock_context):
-    """Test that replace_content errors when file does not exist."""
+async def test_overwrite_content_rejects_nonexistent_file(temp_fs, mock_context):
+    """Test that overwrite_content errors when file does not exist."""
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("replace_content")
+    tool = await mcp.get_tool("overwrite_content")
 
     with pytest.raises(FileNotFoundError):
         await tool.run({"path": "nonexistent.md", "content": "# New", "sha": "abc"})
 
 
-async def test_replace_content_rejects_wrong_sha(mcp_server, temp_fs, mock_context):
-    """Test that replace_content errors when SHA does not match."""
-    tool = await mcp_server.get_tool("replace_content")
+async def test_overwrite_content_rejects_wrong_sha(mcp_server, temp_fs, mock_context):
+    """Test that overwrite_content errors when SHA does not match."""
+    tool = await mcp_server.get_tool("overwrite_content")
 
     with pytest.raises(ValueError, match="SHA mismatch"):
         await tool.run({"path": "README.md", "content": "# Changed", "sha": "wrong"})
@@ -570,11 +570,11 @@ async def test_move_sends_list_changed(mcp_server, temp_fs, mock_context):
     mock_context.send_resource_list_changed.assert_not_awaited()
 
 
-async def test_move_directory_tool(mcp_server, temp_fs, mock_context):
-    """Test move_directory tool moves an entire directory tree."""
+async def test_move_content_directory_tool(mcp_server, temp_fs, mock_context):
+    """Test move_content_directory tool moves an entire directory tree."""
     temp_fs.write_file("srcdir/a.txt", "A")
     temp_fs.write_file("srcdir/sub/b.txt", "B")
-    tool = await mcp_server.get_tool("move_directory")
+    tool = await mcp_server.get_tool("move_content_directory")
     result = await tool.run({"source_path": "srcdir", "dest_path": "dstdir"})
     content = result.content
     assert not (temp_fs.content_dir / "srcdir").exists()
@@ -583,8 +583,8 @@ async def test_move_directory_tool(mcp_server, temp_fs, mock_context):
     assert any("files_moved" in str(c) for c in content)
 
 
-async def test_move_directory_tool_with_readme(mcp_server, temp_fs, mock_context):
-    """Test that move_directory updates resource registry for README.md files."""
+async def test_move_content_directory_tool_with_readme(mcp_server, temp_fs, mock_context):
+    """Test that move_content_directory updates resource registry for README.md files."""
     temp_fs.write_file("docs/README.md", "# Docs")
     temp_fs.write_file("docs/guide.md", "# Guide")
     # Register the README.md resource first by creating a fresh server
@@ -594,7 +594,7 @@ async def test_move_directory_tool_with_readme(mcp_server, temp_fs, mock_context
     uris_before = {str(r.uri) for r in resources_before}
     assert "stash://docs/README.md" in uris_before
 
-    tool = await mcp.get_tool("move_directory")
+    tool = await mcp.get_tool("move_content_directory")
     await tool.run({"source_path": "docs", "dest_path": "archive/docs"})
 
     resources_after = await mcp._list_resources()
@@ -604,29 +604,29 @@ async def test_move_directory_tool_with_readme(mcp_server, temp_fs, mock_context
     mock_context.send_resource_list_changed.assert_awaited()
 
 
-async def test_move_directory_tool_no_notification_for_non_readme(temp_fs, mock_context):
-    """Test that move_directory does not send notification when no README.md is involved."""
+async def test_move_content_directory_tool_no_notification_for_non_readme(temp_fs, mock_context):
+    """Test that move_content_directory does not send notification when no README.md is involved."""
     temp_fs.write_file("srcdir/file.txt", "content")
     from stash_mcp.mcp_server import create_mcp_server
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("move_directory")
+    tool = await mcp.get_tool("move_content_directory")
     await tool.run({"source_path": "srcdir", "dest_path": "dstdir"})
     mock_context.send_resource_list_changed.assert_not_awaited()
 
 
-async def test_move_directory_tool_into_itself(mcp_server, temp_fs, mock_context):
-    """Test that move_directory rejects moving a directory into a subdirectory of itself."""
+async def test_move_content_directory_tool_into_itself(mcp_server, temp_fs, mock_context):
+    """Test that move_content_directory rejects moving a directory into a subdirectory of itself."""
     temp_fs.write_file("src/file.txt", "content")
-    tool = await mcp_server.get_tool("move_directory")
+    tool = await mcp_server.get_tool("move_content_directory")
     with pytest.raises(Exception, match="subdirectory of itself"):
         await tool.run({"source_path": "src", "dest_path": "src/child/src"})
 
 
-async def test_move_directory_tool_dest_exists(mcp_server, temp_fs, mock_context):
-    """Test that move_directory rejects an already-existing destination."""
+async def test_move_content_directory_tool_dest_exists(mcp_server, temp_fs, mock_context):
+    """Test that move_content_directory rejects an already-existing destination."""
     temp_fs.write_file("src/file.txt", "content")
     temp_fs.write_file("dst/other.txt", "other")
-    tool = await mcp_server.get_tool("move_directory")
+    tool = await mcp_server.get_tool("move_content_directory")
     with pytest.raises(Exception, match="already exists"):
         await tool.run({"source_path": "src", "dest_path": "dst"})
 
@@ -826,8 +826,8 @@ async def test_tools_emit_events(mcp_server, temp_fs, mock_context):
 
         mock_emit.reset_mock()
 
-        # Test replace (existing file)
-        tool = await mcp_server.get_tool("replace_content")
+        # Test overwrite (existing file)
+        tool = await mcp_server.get_tool("overwrite_content")
         await tool.run({"path": "evt.md", "content": "updated", "sha": _sha("event test")})
         mock_emit.assert_called_with("content_updated", "evt.md")
 
@@ -974,12 +974,12 @@ async def test_edit_content_emits_event(mcp_server, temp_fs, mock_context):
         mock_emit.assert_called_with("content_updated", "README.md")
 
 
-# --- multi_edit_content tests ---
+# --- edit_content_batch tests ---
 
 
-async def test_multi_edit_content_two_files(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content edits two files successfully."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_two_files(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch edits two files successfully."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     result = await tool.run({
         "edit_operations": [
             FileEditOperation(
@@ -1000,9 +1000,9 @@ async def test_multi_edit_content_two_files(mcp_server, temp_fs, mock_context):
     assert "ok" in text
 
 
-async def test_multi_edit_content_atomicity_bad_sha(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content aborts all if one file has bad SHA."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_atomicity_bad_sha(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch aborts all if one file has bad SHA."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     with pytest.raises(ValueError, match="SHA mismatch"):
         await tool.run({
             "edit_operations": [
@@ -1023,9 +1023,9 @@ async def test_multi_edit_content_atomicity_bad_sha(mcp_server, temp_fs, mock_co
     assert temp_fs.read_file("data.json") == '{"key": "value"}'
 
 
-async def test_multi_edit_content_atomicity_bad_edit(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content aborts all if one file's edit fails."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_atomicity_bad_edit(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch aborts all if one file's edit fails."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     with pytest.raises(ValueError, match="old_string not found"):
         await tool.run({
             "edit_operations": [
@@ -1046,9 +1046,9 @@ async def test_multi_edit_content_atomicity_bad_edit(mcp_server, temp_fs, mock_c
     assert temp_fs.read_file("data.json") == '{"key": "value"}'
 
 
-async def test_multi_edit_content_duplicate_paths(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content rejects duplicate file paths."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_duplicate_paths(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch rejects duplicate file paths."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     with pytest.raises(ValueError, match="Duplicate"):
         await tool.run({
             "edit_operations": [
@@ -1066,9 +1066,9 @@ async def test_multi_edit_content_duplicate_paths(mcp_server, temp_fs, mock_cont
         })
 
 
-async def test_multi_edit_content_returns_per_file_results(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content returns correct per-file result structure."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_returns_per_file_results(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch returns correct per-file result structure."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     result = await tool.run({
         "edit_operations": [
             FileEditOperation(
@@ -1094,12 +1094,12 @@ async def test_multi_edit_content_returns_per_file_results(mcp_server, temp_fs, 
 
 WRITE_TOOL_NAMES = {
     "create_content",
-    "replace_content",
+    "overwrite_content",
     "edit_content",
-    "multi_edit_content",
+    "edit_content_batch",
     "delete_content",
     "move_content",
-    "move_directory",
+    "move_content_directory",
     "move_content_batch",
 }
 # search_content is omitted here because it is only registered when a
@@ -1165,7 +1165,7 @@ async def test_server_name_used_in_mcp_server(temp_fs):
         assert mcp.name == "test-server"
 
 
-# --- get_markdown_structure tests ---
+# --- inspect_content_structure tests ---
 
 
 def test_parse_markdown_structure_typical_doc():
@@ -1231,12 +1231,12 @@ def test_build_heading_tree_multiple_top_level():
     assert tree[1]["heading"] == "B"
 
 
-async def test_get_markdown_structure_tool_typical(temp_fs):
-    """Test get_markdown_structure returns correct nested structure."""
+async def test_inspect_content_structure_tool_typical(temp_fs):
+    """Test inspect_content_structure returns correct nested structure."""
     content = "# Title\n\n## Section 1\n\n### Subsection\n\n## Section 2\n"
     temp_fs.write_file("doc.md", content)
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure")
+    tool = await mcp.get_tool("inspect_content_structure")
     result = await tool.run({"path": "doc.md"})
     text = str(result.content)
     assert "Title" in text
@@ -1245,63 +1245,63 @@ async def test_get_markdown_structure_tool_typical(temp_fs):
     assert "Section 2" in text
 
 
-async def test_get_markdown_structure_tool_title_field(temp_fs):
-    """Test get_markdown_structure returns title from first h1."""
+async def test_inspect_content_structure_tool_title_field(temp_fs):
+    """Test inspect_content_structure returns title from first h1."""
     temp_fs.write_file("titled.md", "# My Title\n\n## Sub\n")
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure")
+    tool = await mcp.get_tool("inspect_content_structure")
     result = await tool.run({"path": "titled.md"})
     text = str(result.content)
     assert '"title":"My Title"' in text or "My Title" in text
 
 
-async def test_get_markdown_structure_tool_no_h1_title_null(temp_fs):
-    """Test get_markdown_structure returns null title when no h1 exists."""
+async def test_inspect_content_structure_tool_no_h1_title_null(temp_fs):
+    """Test inspect_content_structure returns null title when no h1 exists."""
     temp_fs.write_file("no_h1.md", "## Section\n\n### Subsection\n")
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure")
+    tool = await mcp.get_tool("inspect_content_structure")
     result = await tool.run({"path": "no_h1.md"})
     text = str(result.content)
     assert '"title":null' in text
 
 
-async def test_get_markdown_structure_tool_rejects_non_markdown(temp_fs):
-    """Test get_markdown_structure raises ValueError for non-markdown files."""
+async def test_inspect_content_structure_tool_rejects_non_markdown(temp_fs):
+    """Test inspect_content_structure raises ValueError for non-markdown files."""
     temp_fs.write_file("data.json", '{"key": "value"}')
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure")
+    tool = await mcp.get_tool("inspect_content_structure")
     with pytest.raises(ValueError, match="only supports markdown files"):
         await tool.run({"path": "data.json"})
 
 
-async def test_get_markdown_structure_tool_file_not_found(temp_fs):
-    """Test get_markdown_structure raises FileNotFoundError for missing files."""
+async def test_inspect_content_structure_tool_file_not_found(temp_fs):
+    """Test inspect_content_structure raises FileNotFoundError for missing files."""
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure")
+    tool = await mcp.get_tool("inspect_content_structure")
     with pytest.raises(FileNotFoundError):
         await tool.run({"path": "missing.md"})
 
 
-async def test_get_markdown_structure_tool_path_in_result(temp_fs):
-    """Test get_markdown_structure includes the path in the result."""
+async def test_inspect_content_structure_tool_path_in_result(temp_fs):
+    """Test inspect_content_structure includes the path in the result."""
     temp_fs.write_file("docs/guide.md", "# Guide\n")
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure")
+    tool = await mcp.get_tool("inspect_content_structure")
     result = await tool.run({"path": "docs/guide.md"})
     text = str(result.content)
     assert "docs/guide.md" in text
 
 
-# --- get_markdown_structure_batch tests ---
+# --- inspect_content_structure_batch tests ---
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_happy_path(temp_fs):
-    """Test get_markdown_structure_batch returns structure for multiple files."""
+async def test_inspect_content_structure_batch_happy_path(temp_fs):
+    """Test inspect_content_structure_batch returns structure for multiple files."""
     temp_fs.write_file("a.md", "# Alpha\n\n## Section A\n")
     temp_fs.write_file("b.md", "# Beta\n\n## Section B\n")
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     result = await tool.run({"paths": ["a.md", "b.md"]})
     text = str(result.content)
     assert "Alpha" in text
@@ -1311,39 +1311,39 @@ async def test_get_markdown_structure_batch_happy_path(temp_fs):
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_empty_list(temp_fs):
-    """Test get_markdown_structure_batch rejects empty path list."""
+async def test_inspect_content_structure_batch_empty_list(temp_fs):
+    """Test inspect_content_structure_batch rejects empty path list."""
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     with pytest.raises(ValueError, match="At least one path is required"):
         await tool.run({"paths": []})
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_over_limit(temp_fs):
-    """Test get_markdown_structure_batch rejects more than 10 paths."""
+async def test_inspect_content_structure_batch_over_limit(temp_fs):
+    """Test inspect_content_structure_batch rejects more than 10 paths."""
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     paths = [f"file{i}.md" for i in range(11)]
     with pytest.raises(ValueError, match="Maximum 10 files per batch"):
         await tool.run({"paths": paths})
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_duplicate_paths(temp_fs):
-    """Test get_markdown_structure_batch rejects duplicate paths."""
+async def test_inspect_content_structure_batch_duplicate_paths(temp_fs):
+    """Test inspect_content_structure_batch rejects duplicate paths."""
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     with pytest.raises(ValueError, match="Duplicate paths are not allowed"):
         await tool.run({"paths": ["a.md", "a.md"]})
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_partial_failure(temp_fs):
-    """Test get_markdown_structure_batch returns error for missing files without aborting."""
+async def test_inspect_content_structure_batch_partial_failure(temp_fs):
+    """Test inspect_content_structure_batch returns error for missing files without aborting."""
     temp_fs.write_file("exists.md", "# Exists\n")
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     result = await tool.run({"paths": ["exists.md", "missing.md"]})
     text = str(result.content)
     assert "Exists" in text
@@ -1352,12 +1352,12 @@ async def test_get_markdown_structure_batch_partial_failure(temp_fs):
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_non_markdown(temp_fs):
-    """Test get_markdown_structure_batch returns error for non-markdown files without aborting."""
+async def test_inspect_content_structure_batch_non_markdown(temp_fs):
+    """Test inspect_content_structure_batch returns error for non-markdown files without aborting."""
     temp_fs.write_file("doc.md", "# Doc\n")
     temp_fs.write_file("data.json", '{"key": "value"}')
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     result = await tool.run({"paths": ["doc.md", "data.json"]})
     text = str(result.content)
     assert "Doc" in text
@@ -1365,13 +1365,13 @@ async def test_get_markdown_structure_batch_non_markdown(temp_fs):
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_order_preserved(temp_fs):
-    """Test get_markdown_structure_batch preserves result order matching input paths."""
+async def test_inspect_content_structure_batch_order_preserved(temp_fs):
+    """Test inspect_content_structure_batch preserves result order matching input paths."""
     temp_fs.write_file("first.md", "# First\n")
     temp_fs.write_file("second.md", "# Second\n")
     temp_fs.write_file("third.md", "# Third\n")
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     import json
     result = await tool.run({"paths": ["third.md", "first.md", "second.md"]})
     data = json.loads(str(result.content[0].text))
@@ -1380,22 +1380,22 @@ async def test_get_markdown_structure_batch_order_preserved(temp_fs):
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_title_field(temp_fs):
-    """Test get_markdown_structure_batch extracts title from first h1."""
+async def test_inspect_content_structure_batch_title_field(temp_fs):
+    """Test inspect_content_structure_batch extracts title from first h1."""
     temp_fs.write_file("titled.md", "# My Title\n\n## Sub\n")
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     result = await tool.run({"paths": ["titled.md"]})
     text = str(result.content)
     assert "My Title" in text
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_no_h1_title_null(temp_fs):
-    """Test get_markdown_structure_batch returns null title when no h1 exists."""
+async def test_inspect_content_structure_batch_no_h1_title_null(temp_fs):
+    """Test inspect_content_structure_batch returns null title when no h1 exists."""
     temp_fs.write_file("no_h1.md", "## Section\n\n### Subsection\n")
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     import json
     result = await tool.run({"paths": ["no_h1.md"]})
     data = json.loads(str(result.content[0].text))
@@ -1403,10 +1403,10 @@ async def test_get_markdown_structure_batch_no_h1_title_null(temp_fs):
 
 
 @pytest.mark.anyio
-async def test_get_markdown_structure_batch_all_missing(temp_fs):
-    """Test get_markdown_structure_batch returns errors for all missing files."""
+async def test_inspect_content_structure_batch_all_missing(temp_fs):
+    """Test inspect_content_structure_batch returns errors for all missing files."""
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("get_markdown_structure_batch")
+    tool = await mcp.get_tool("inspect_content_structure_batch")
     import json
     result = await tool.run({"paths": ["missing1.md", "missing2.md"]})
     data = json.loads(str(result.content[0].text))

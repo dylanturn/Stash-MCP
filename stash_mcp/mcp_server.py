@@ -32,7 +32,7 @@ class EditOperation(BaseModel):
 
 
 class FileEditOperation(BaseModel):
-    """Edits targeting a single file, used by multi_edit_content."""
+    """Edits targeting a single file, used by edit_content_batch."""
 
     file_path: str = Field(description="File path relative to content root")
     sha: str = Field(description="SHA-256 hex digest of the current file content")
@@ -304,14 +304,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         @mcp.tool(
             annotations=ToolAnnotations(
-                title="Replace file content",
+                title="Overwrite file content",
                 readOnlyHint=False,
                 destructiveHint=False,
                 idempotentHint=True,
                 openWorldHint=False,
             )
         )
-        async def replace_content(
+        async def overwrite_content(
             path: str,
             content: str,
             sha: str,
@@ -399,7 +399,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 openWorldHint=False,
             )
         )
-        async def multi_edit_content(
+        async def edit_content_batch(
             edit_operations: list[FileEditOperation],
             ctx: Context,
         ) -> dict:
@@ -417,7 +417,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             # Reject duplicate file paths
             paths = [op.file_path for op in edit_operations]
             if len(paths) != len(set(paths)):
-                raise ValueError("Duplicate file_path entries are not allowed in a single multi_edit_content call.")
+                raise ValueError("Duplicate file_path entries are not allowed in a single edit_content_batch call.")
 
             # Phase 1: read all files and validate SHAs
             originals: dict[str, str] = {}
@@ -614,12 +614,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     @mcp.tool(
         annotations=ToolAnnotations(
-            title="Get markdown structure",
+            title="Inspect content structure",
             readOnlyHint=True,
             openWorldHint=False,
         )
     )
-    async def get_markdown_structure(
+    async def inspect_content_structure(
         path: str,
     ) -> dict:
         """Read a markdown file and return its document structure based on headings.
@@ -637,7 +637,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         suffix = PurePosixPath(path).suffix.lower()
         if suffix not in {".md", ".markdown"}:
             raise ValueError(
-                f"get_markdown_structure only supports markdown files (.md, .markdown). Got: {path}"
+                f"inspect_content_structure only supports markdown files (.md, .markdown). Got: {path}"
             )
         content = filesystem.read_file(path)
         sections = parse_markdown_structure(content)
@@ -650,12 +650,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     @mcp.tool(
         annotations=ToolAnnotations(
-            title="Get markdown structure (batch)",
+            title="Inspect content structure (batch)",
             readOnlyHint=True,
             openWorldHint=False,
         )
     )
-    async def get_markdown_structure_batch(
+    async def inspect_content_structure_batch(
         paths: list[str],
     ) -> dict:
         """Return the heading structure of multiple markdown files.
@@ -683,7 +683,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 suffix = PurePosixPath(path).suffix.lower()
                 if suffix not in (".md", ".markdown"):
                     raise ValueError(
-                        f"get_markdown_structure only supports markdown files "
+                        f"inspect_content_structure only supports markdown files "
                         f"(.md, .markdown). Got: {path}"
                     )
                 content = filesystem.read_file(path)
@@ -742,13 +742,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         @mcp.tool(
             annotations=ToolAnnotations(
-                title="Move directory",
+                title="Move content directory",
                 readOnlyHint=False,
                 destructiveHint=False,
                 openWorldHint=False,
             )
         )
-        async def move_directory(
+        async def move_content_directory(
             source_path: str,
             dest_path: str,
             ctx: Context,
@@ -921,12 +921,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         @mcp.tool(
             annotations=ToolAnnotations(
-                title="View file history",
+                title="Log file history",
                 readOnlyHint=True,
                 openWorldHint=False,
             )
         )
-        async def history_content(
+        async def log_content(
             path: str,
             max_count: int = 20,
         ) -> str:
@@ -1030,10 +1030,10 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 """Begin a write transaction and return its UUID.
 
                 Acquires the global transaction lock.  All subsequent mutating
-                tool calls (create_content, replace_content, edit_content,
-                multi_edit_content, delete_content, move_content) on this
+                tool calls (create_content, overwrite_content, edit_content,
+                edit_content_batch, delete_content, move_content) on this
                 session will be part of the transaction.  Call
-                end_content_transaction to commit or abort_content_transaction
+                commit_content_transaction to commit or abort_content_transaction
                 to discard.
 
                 Returns:
@@ -1058,7 +1058,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     openWorldHint=False,
                 )
             )
-            async def end_content_transaction(
+            async def commit_content_transaction(
                 message: str,
                 ctx: Context,
                 author: str | None = None,

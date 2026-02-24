@@ -241,7 +241,7 @@ Set `STASH_GIT_TRACKING=true` to enable git-aware features. The content director
 
 **What it enables:**
 
-- Three additional MCP tools: `history_content`, `diff_content`, and `blame_content`
+- Three additional MCP tools: `log_content`, `diff_content`, and `blame_content`
 - Search results are enriched with `last_changed_at`, `changed_by`, and `commit_message` metadata
 - All writes (when `STASH_READ_ONLY=false`) are automatically committed to the local git repo and gated behind transactions (see [Transactions](#transactions) below)
 
@@ -275,7 +275,7 @@ When `STASH_GIT_TRACKING=true` and `STASH_READ_ONLY=false`, all writes are gated
 
 1. Call `start_content_transaction` — acquires an exclusive write lock and returns a `transaction_id`
 2. Perform any number of `create_content`, `update_content`, `delete_content`, or `move_content` calls — all changes are staged
-3. Call `end_content_transaction` with the `transaction_id` — commits all staged changes to git and releases the lock
+3. Call `commit_content_transaction` with the `transaction_id` — commits all staged changes to git and releases the lock
 4. If something goes wrong, call `abort_content_transaction` — rolls back all staged changes and releases the lock
 
 **Concurrency:** Only one transaction can be active at a time. A second agent attempting `start_content_transaction` will wait up to `STASH_TRANSACTION_LOCK_WAIT` seconds for the lock to be released. If the active transaction is not ended or aborted within `STASH_TRANSACTION_TIMEOUT` seconds, it is automatically aborted.
