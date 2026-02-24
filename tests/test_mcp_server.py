@@ -134,6 +134,7 @@ async def test_list_tools(mcp_server):
     assert "list_content" in tool_names
     assert "read_content_batch" in tool_names
     assert "move_content" in tool_names
+    assert "move_directory" in tool_names
     assert "get_markdown_structure" in tool_names
     assert "get_markdown_structure_batch" in tool_names
 
@@ -567,6 +568,67 @@ async def test_move_sends_list_changed(mcp_server, temp_fs, mock_context):
     mock_context.send_resource_list_changed.assert_not_awaited()
 
 
+async def test_move_directory_tool(mcp_server, temp_fs, mock_context):
+    """Test move_directory tool moves an entire directory tree."""
+    temp_fs.write_file("srcdir/a.txt", "A")
+    temp_fs.write_file("srcdir/sub/b.txt", "B")
+    tool = await mcp_server.get_tool("move_directory")
+    result = await tool.run({"source_path": "srcdir", "dest_path": "dstdir"})
+    content = result.content
+    assert not (temp_fs.content_dir / "srcdir").exists()
+    assert temp_fs.file_exists("dstdir/a.txt")
+    assert temp_fs.file_exists("dstdir/sub/b.txt")
+    assert any("files_moved" in str(c) for c in content)
+
+
+async def test_move_directory_tool_with_readme(mcp_server, temp_fs, mock_context):
+    """Test that move_directory updates resource registry for README.md files."""
+    temp_fs.write_file("docs/README.md", "# Docs")
+    temp_fs.write_file("docs/guide.md", "# Guide")
+    # Register the README.md resource first by creating a fresh server
+    from stash_mcp.mcp_server import create_mcp_server
+    mcp = create_mcp_server(temp_fs)
+    resources_before = await mcp._list_resources()
+    uris_before = {str(r.uri) for r in resources_before}
+    assert "stash://docs/README.md" in uris_before
+
+    tool = await mcp.get_tool("move_directory")
+    await tool.run({"source_path": "docs", "dest_path": "archive/docs"})
+
+    resources_after = await mcp._list_resources()
+    uris_after = {str(r.uri) for r in resources_after}
+    assert "stash://docs/README.md" not in uris_after
+    assert "stash://archive/docs/README.md" in uris_after
+    mock_context.send_resource_list_changed.assert_awaited()
+
+
+async def test_move_directory_tool_no_notification_for_non_readme(temp_fs, mock_context):
+    """Test that move_directory does not send notification when no README.md is involved."""
+    temp_fs.write_file("srcdir/file.txt", "content")
+    from stash_mcp.mcp_server import create_mcp_server
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_directory")
+    await tool.run({"source_path": "srcdir", "dest_path": "dstdir"})
+    mock_context.send_resource_list_changed.assert_not_awaited()
+
+
+async def test_move_directory_tool_into_itself(mcp_server, temp_fs, mock_context):
+    """Test that move_directory rejects moving a directory into a subdirectory of itself."""
+    temp_fs.write_file("src/file.txt", "content")
+    tool = await mcp_server.get_tool("move_directory")
+    with pytest.raises(Exception, match="subdirectory of itself"):
+        await tool.run({"source_path": "src", "dest_path": "src/child/src"})
+
+
+async def test_move_directory_tool_dest_exists(mcp_server, temp_fs, mock_context):
+    """Test that move_directory rejects an already-existing destination."""
+    temp_fs.write_file("src/file.txt", "content")
+    temp_fs.write_file("dst/other.txt", "other")
+    tool = await mcp_server.get_tool("move_directory")
+    with pytest.raises(Exception, match="already exists"):
+        await tool.run({"source_path": "src", "dest_path": "dst"})
+
+
 async def test_resources_filtered_by_include_patterns(temp_fs):
     """Test that only README.md files matching patterns are registered as MCP resources."""
     # Write files of different types
@@ -873,6 +935,7 @@ WRITE_TOOL_NAMES = {
     "multi_edit_content",
     "delete_content",
     "move_content",
+    "move_directory",
 }
 # search_content is omitted here because it is only registered when a
 # search_engine is passed to create_mcp_server(); it is not a write tool.

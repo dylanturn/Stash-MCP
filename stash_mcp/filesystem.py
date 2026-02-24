@@ -337,6 +337,62 @@ class FileSystem:
             logger.error(f"Error moving file '{source_path}' to '{dest_path}': {e}")
             raise FileSystemError(f"Failed to move file: {e}")
 
+    def move_directory(self, source_path: str, dest_path: str) -> list[tuple[str, str]]:
+        """Move/rename an entire directory tree.
+
+        Args:
+            source_path: Source directory path relative to content_dir
+            dest_path: Destination directory path relative to content_dir
+
+        Returns:
+            List of (old_path, new_path) tuples for all files that were moved
+
+        Raises:
+            FileNotFoundError: If source directory doesn't exist
+            InvalidPathError: If source is not a directory, or destination is
+                a subdirectory of the source
+            FileSystemError: If destination already exists or move fails
+        """
+        src_full = self._resolve_path(source_path)
+        dst_full = self._resolve_path(dest_path)
+
+        if not src_full.exists():
+            raise FileNotFoundError(f"Directory '{source_path}' not found")
+
+        if not src_full.is_dir():
+            raise InvalidPathError(f"Path '{source_path}' is not a directory")
+
+        try:
+            dst_full.relative_to(src_full)
+            raise InvalidPathError(
+                f"Cannot move '{source_path}' into a subdirectory of itself ('{dest_path}')"
+            )
+        except InvalidPathError:
+            raise
+        except ValueError:
+            pass  # Good — destination is not under source
+
+        if dst_full.exists():
+            raise FileSystemError(f"Destination '{dest_path}' already exists")
+
+        # Collect all files before the move (for resource notifications)
+        src_rel = Path(source_path.rstrip("/"))
+        dst_rel = Path(dest_path.rstrip("/"))
+        moved_files = []
+        for file_path in self.list_all_files(source_path):
+            new_path = str(dst_rel / Path(file_path).relative_to(src_rel))
+            moved_files.append((file_path, new_path))
+
+        try:
+            dst_full.parent.mkdir(parents=True, exist_ok=True)
+            src_full.rename(dst_full)
+            logger.info(f"Moved directory: {source_path} -> {dest_path}")
+        except Exception as e:
+            logger.error(f"Error moving directory '{source_path}' to '{dest_path}': {e}")
+            raise FileSystemError(f"Failed to move directory: {e}")
+
+        return moved_files
+
     def create_directory(self, relative_path: str) -> None:
         """Create a directory.
 

@@ -241,8 +241,11 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         if not _is_resource_file(path):
             return False
         uri_key = f"stash://{path}"
-        removed = mcp._resource_manager._resources.pop(uri_key, None)
-        return removed is not None
+        try:
+            mcp._local_provider.remove_resource(uri_key)
+            return True
+        except KeyError:
+            return False
 
     # Resource template for dynamic access (resources/templates/list)
     @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")
@@ -729,6 +732,51 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             emit(CONTENT_MOVED, dest_path, source_path=source_path)
             logger.info(f"Moved: {source_path} -> {dest_path}")
             return f"Moved: {source_path} -> {dest_path}"
+
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Move directory",
+                readOnlyHint=False,
+                destructiveHint=False,
+                openWorldHint=False,
+            )
+        )
+        async def move_directory(
+            source_path: str,
+            dest_path: str,
+            ctx: Context,
+        ) -> dict:
+            """Move or rename an entire directory tree.
+
+            Moves all files and subdirectories from source_path to dest_path.
+            The destination must not already exist.
+
+            Args:
+                source_path: Current directory path relative to content root
+                dest_path: New directory path relative to content root
+            Returns:
+                A dict with 'source', 'destination', and 'files_moved' count
+            """
+            moved_files = filesystem.move_directory(source_path, dest_path)
+
+            # Handle resource registration changes for any README.md files
+            resources_changed = False
+            for old_path, new_path in moved_files:
+                if _unregister_resource(old_path):
+                    resources_changed = True
+                if _register_resource(new_path):
+                    resources_changed = True
+                emit(CONTENT_MOVED, new_path, source_path=old_path)
+
+            if resources_changed:
+                await ctx.send_resource_list_changed()
+
+            logger.info(f"Moved directory: {source_path} -> {dest_path} ({len(moved_files)} files)")
+            return {
+                "source": source_path,
+                "destination": dest_path,
+                "files_moved": len(moved_files),
+            }
 
     # --- Search tool (conditional) ---
 
