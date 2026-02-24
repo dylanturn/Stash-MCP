@@ -417,7 +417,7 @@ class TestMCPTransactionTools:
             mcp, tm, fs = self._make_mcp(Path(tmpdir))
             tool_names = {t.name for t in await mcp.list_tools()}
             assert "start_content_transaction" in tool_names
-            assert "end_content_transaction" in tool_names
+            assert "commit_content_transaction" in tool_names
             assert "abort_content_transaction" in tool_names
 
     @pytest.mark.asyncio
@@ -494,11 +494,11 @@ class TestMCPTransactionTools:
                 start_tool = await mcp.get_tool("start_content_transaction")
                 await start_tool.run({})
 
-                replace_tool = await mcp.get_tool("replace_content")
+                overwrite_tool = await mcp.get_tool("overwrite_content")
                 import hashlib
 
                 sha = hashlib.sha256(original.encode()).hexdigest()
-                await replace_tool.run(
+                await overwrite_tool.run(
                     {"path": "README.md", "content": "corrupted", "sha": sha}
                 )
 
@@ -534,7 +534,7 @@ class TestModeMatrix:
                 mcp = create_mcp_server(fs, git_backend=git)
             tool_names = {t.name for t in await mcp.list_tools()}
             assert "start_content_transaction" not in tool_names
-            assert "end_content_transaction" not in tool_names
+            assert "commit_content_transaction" not in tool_names
             assert "abort_content_transaction" not in tool_names
 
     @pytest.mark.asyncio
