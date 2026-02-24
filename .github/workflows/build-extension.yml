@@ -1,0 +1,89 @@
+name: Build MCPB Extension
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install icon conversion dependencies
+        run: pip install cairosvg Pillow
+
+      - name: Generate PNG icons from SVGs
+        run: |
+          python3 - <<'EOF'
+          import cairosvg, os
+          os.makedirs("assets/icons", exist_ok=True)
+          cairosvg.svg2png(url="assets/logo/stash-mcp-icon-light.svg", write_to="assets/icons/icon-light.png", output_width=128, output_height=128)
+          cairosvg.svg2png(url="assets/logo/stash-mcp-icon-dark.svg",  write_to="assets/icons/icon-dark.png",  output_width=128, output_height=128)
+          cairosvg.svg2png(url="assets/logo/stash-mcp-icon-dark.svg",  write_to="icon.png",                    output_width=128, output_height=128)
+          print("Icons generated successfully")
+          EOF
+
+      - name: Pack MCPB extension bundle
+        run: |
+          python3 - <<'EOF'
+          import os, zipfile
+
+          bundle_name = "stash-mcp.mcpb"
+
+          # Files and directories to include in the bundle
+          include_files = [
+              "manifest.json",
+              "pyproject.toml",
+              "icon.png",
+          ]
+          include_dirs = [
+              "stash_mcp",
+              "assets/icons",
+          ]
+
+          def should_exclude(path):
+              parts = path.replace("\\", "/").split("/")
+              return any(p == "__pycache__" or p == ".git" or p.endswith(".pyc") for p in parts)
+
+          with zipfile.ZipFile(bundle_name, "w", zipfile.ZIP_DEFLATED) as zf:
+              for f in include_files:
+                  if os.path.exists(f):
+                      zf.write(f)
+                      print(f"  + {f}")
+
+              for d in include_dirs:
+                  for root, dirs, files in os.walk(d):
+                      dirs[:] = [x for x in dirs if not should_exclude(os.path.join(root, x))]
+                      for file in files:
+                          path = os.path.join(root, file)
+                          if not should_exclude(path):
+                              zf.write(path)
+                              print(f"  + {path}")
+
+          size_kb = os.path.getsize(bundle_name) / 1024
+          print(f"\nCreated {bundle_name} ({size_kb:.1f} KB)")
+          EOF
+
+      - name: Upload MCPB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stash-mcp-extension
+          path: stash-mcp.mcpb
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: stash-mcp.mcpb

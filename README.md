@@ -77,6 +77,18 @@
 
 ## Quick Start
 
+### Claude Desktop Extension (One-Click Install)
+
+The easiest way to use Stash-MCP with Claude Desktop is via the `.mcpb` Desktop Extension:
+
+1. Download `stash-mcp.mcpb` from the [latest release](https://github.com/dylanturn/Stash-MCP/releases/latest)
+2. Double-click the downloaded `.mcpb` file — Claude Desktop will open the extension installer
+3. In the installer, set your **Content Directory** (the folder where your documents live)
+4. Optionally enable **Git Tracking** or **Semantic Search**
+5. Click **Install** — the Stash icon will appear alongside tool calls in Claude
+
+> **Requirements:** [uv](https://docs.astral.sh/uv/getting-started/installation/) must be installed and available on your PATH.
+
 ### Using Docker Compose (Recommended)
 
 ```bash

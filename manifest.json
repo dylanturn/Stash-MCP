@@ -1,0 +1,102 @@
+{
+  "manifest_version": "0.3",
+  "name": "stash-mcp",
+  "display_name": "Stash",
+  "version": "0.1.0",
+  "description": "A file-backed content server that exposes documents to AI agents via MCP",
+  "long_description": "Stash-MCP is a file-first content server that provides semantic search, git-based change tracking, and structured document management through the Model Context Protocol. Ideal for centralized knowledge stores accessible by AI agents.",
+  "author": {
+    "name": "Dylan Turnbull",
+    "url": "https://github.com/dylanturn"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dylanturn/Stash-MCP.git"
+  },
+  "license": "MIT",
+  "icon": "icon.png",
+  "icons": [
+    { "src": "assets/icons/icon-light.png", "size": "128x128", "theme": "light" },
+    { "src": "assets/icons/icon-dark.png", "size": "128x128", "theme": "dark" }
+  ],
+  "server": {
+    "type": "python",
+    "entry_point": "stash_mcp/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "-m", "stash_mcp.server"],
+      "env": {
+        "STASH_CONTENT_ROOT": "${user_config.content_dir}",
+        "STASH_READ_ONLY": "${user_config.read_only}",
+        "STASH_GIT_TRACKING": "${user_config.git_tracking}",
+        "STASH_SEARCH_ENABLED": "${user_config.search_enabled}",
+        "STASH_SEARCH_EMBEDDER_MODEL": "${user_config.embedding_model}"
+      }
+    }
+  },
+  "user_config": {
+    "content_dir": {
+      "type": "directory",
+      "title": "Content Directory",
+      "description": "Root directory for your content store",
+      "required": true,
+      "default": "${HOME}/stash-content"
+    },
+    "read_only": {
+      "type": "boolean",
+      "title": "Read-Only Mode",
+      "description": "Restrict to read-only operations (no create, edit, delete, or move)",
+      "default": false
+    },
+    "git_tracking": {
+      "type": "boolean",
+      "title": "Git Tracking",
+      "description": "Enable git-based change tracking for content history, diff, and blame. The content directory must already be a git repository.",
+      "default": false
+    },
+    "search_enabled": {
+      "type": "boolean",
+      "title": "Enable Semantic Search",
+      "description": "Enable vector-based semantic search across content. Requires the search extras (uv sync --extra search).",
+      "default": false
+    },
+    "embedding_model": {
+      "type": "string",
+      "title": "Embedding Model",
+      "description": "Pydantic AI embedder model for semantic search (e.g. sentence-transformers:all-MiniLM-L6-v2, openai:text-embedding-3-small).",
+      "required": false,
+      "default": "sentence-transformers:all-MiniLM-L6-v2"
+    }
+  },
+  "tools": [
+    { "name": "read_content", "description": "Read file content with SHA-256 hash" },
+    { "name": "read_content_batch", "description": "Read multiple files with SHA-256 hashes (max 10)" },
+    { "name": "list_content", "description": "List files and directories in the content store" },
+    { "name": "inspect_content_structure", "description": "Parse markdown heading hierarchy for a file" },
+    { "name": "inspect_content_structure_batch", "description": "Parse markdown heading hierarchy for multiple files (max 10)" },
+    { "name": "create_content", "description": "Create a new file" },
+    { "name": "overwrite_content", "description": "Replace the full content of an existing file" },
+    { "name": "edit_content", "description": "Apply targeted string-replacement edits to a file" },
+    { "name": "edit_content_batch", "description": "Atomically apply edits to multiple files" },
+    { "name": "delete_content", "description": "Delete a content file" },
+    { "name": "move_content", "description": "Move or rename a file" },
+    { "name": "move_content_directory", "description": "Move or rename an entire directory tree" },
+    { "name": "move_content_batch", "description": "Move or rename multiple files in a single operation (max 10)" },
+    { "name": "search_content", "description": "Semantic similarity search across content" },
+    { "name": "log_content", "description": "View git commit history for a file" },
+    { "name": "diff_content", "description": "Show what changed in a file since a given git ref" },
+    { "name": "blame_content", "description": "View line-level authorship and timestamps" },
+    { "name": "start_content_transaction", "description": "Begin a write transaction" },
+    { "name": "commit_content_transaction", "description": "Commit all changes in the active transaction" },
+    { "name": "abort_content_transaction", "description": "Abort the active transaction and discard changes" },
+    { "name": "list_content_transactions", "description": "List active content transactions and their status" }
+  ],
+  "tools_generated": true,
+  "keywords": ["documentation", "knowledge-base", "semantic-search", "content-management", "git"],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.12"
+    }
+  }
+}
