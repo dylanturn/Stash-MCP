@@ -4,8 +4,10 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
+from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api import create_api
@@ -220,6 +222,10 @@ def create_app():
     app = create_api(filesystem, lifespan=_combined_lifespan, search_engine=search_engine)
     ui_router = create_ui_router(filesystem, search_engine=search_engine)
     app.include_router(ui_router)
+
+    # Serve vendored static assets (highlight.js, mermaid.js, etc.)
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     # Mount FastMCP server onto FastAPI for streamable HTTP transport
     app.mount("/mcp", mcp_http_app)

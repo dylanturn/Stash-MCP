@@ -97,20 +97,108 @@ Connect your MCP client to Stash-MCP to allow AI agents to access and manage con
 
 ### MCP Configuration
 
-For clients that use stdio transport, configure your MCP client with:
+Stash-MCP runs as an HTTP server exposing a Streamable HTTP MCP endpoint at `/mcp`. Connect MCP clients using one of the following methods.
+
+**Option 1: Claude Desktop via `mcp-proxy` (Recommended for Desktop)**
+
+`mcp-proxy` bridges Claude Desktop's stdio transport to Stash-MCP's Streamable HTTP endpoint:
 
 ```json
 {
   "mcpServers": {
     "stash": {
-      "command": "python",
-      "args": ["-m", "stash_mcp.server"],
+      "command": "uvx",
+      "args": [
+        "mcp-proxy",
+        "--transport",
+        "streamablehttp",
+        "http://localhost:8000/mcp"
+      ]
+    }
+  }
+}
+```
+
+> **Note:** `uvx` must be on the PATH that Claude Desktop sees. On macOS, GUI apps may not inherit your shell PATH — use the full path if needed (e.g. `/Users/you/.local/bin/uvx`).
+
+Alternatively, use `npx mcp-remote` if you have Node.js but not uv:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
+    }
+  }
+}
+```
+
+**Option 2: Native Streamable HTTP (Claude Code, Cursor, etc.)**
+
+Clients that support Streamable HTTP natively can connect directly:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+Claude Code CLI:
+```bash
+claude mcp add --transport http stash http://localhost:8000/mcp
+```
+
+**Option 3: Local stdio (no container)**
+
+Run the server as a stdio subprocess directly from your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/Stash-MCP", "-m", "stash_mcp.server"],
       "env": {
-        "STASH_CONTENT_DIR": "/path/to/your/content"
+        "STASH_CONTENT_ROOT": "/path/to/your/content"
       }
     }
   }
 }
+```
+
+### Troubleshooting MCP Connections
+
+**"Connection refused" errors**
+
+Ensure the server is running and reachable:
+```bash
+curl http://localhost:8000/api/health
+```
+If this fails, check that the Docker container is up (`docker-compose ps`) or the local server process is running.
+
+**`uvx` / `npx` not found**
+
+Claude Desktop may not inherit your shell's PATH. Use the full absolute path to the binary:
+- Find it with `which uvx` or `which npx` in your terminal
+- On macOS: typically `/Users/you/.local/bin/uvx` or `/usr/local/bin/npx`
+- Update your MCP config to use the full path as the `command` value
+
+**Tools not appearing in Claude**
+
+After editing your MCP config, fully restart Claude Desktop (quit and reopen — not just reload). Check the MCP server logs:
+- macOS: `~/Library/Logs/Claude/mcp-server-stash.log`
+- Windows: `%APPDATA%\Claude\logs\mcp-server-stash.log`
+
+**Timeout on first connection**
+
+The search index build runs in the background at startup and can take a few seconds for large content directories. The MCP endpoint is available immediately, but `search_content` results may be empty until indexing completes. Check indexing status via:
+```bash
+curl http://localhost:8000/api/search/status
 ```
 
 ### MCP Resources

@@ -199,15 +199,21 @@ def _breadcrumbs_html(path: str) -> str:
 def _render_markdown(content: str) -> str:
     """Render markdown to HTML with extensions.
 
-    Raw HTML tags in content are escaped to prevent XSS.
+    Raw HTML in markdown is passed through by design — Stash-MCP stores
+    user-controlled content (personal knowledge base), so constructs like
+    <details>, <img>, and <div> in markdown files are intentionally supported.
+    Do not expose the UI to untrusted third-party content.
     """
-    safe_content = content.replace("<", "&lt;")
     converter = md.Markdown(extensions=[
         "fenced_code",
         "tables",
         "nl2br",
+        "codehilite",
+        "toc",
+        "sane_lists",
+        "smarty",
     ])
-    return converter.convert(safe_content)
+    return converter.convert(content)
 
 
 def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
@@ -333,7 +339,7 @@ transition:color 150ms ease,border-color 150ms ease;white-space:nowrap;margin-bo
 
 .center-content{flex:1;padding:24px 32px;overflow-y:auto;display:flex;
 flex-direction:column;align-items:center;min-height:0}
-.center-inner{width:100%;max-width:900px;display:flex;flex-direction:column;flex:1;min-height:0}
+.center-inner{width:100%;display:flex;flex-direction:column;flex:1;min-height:0}
 
 .right-panel{width:280px;min-width:0;background:#272738;border-left:1px solid #313244;
 overflow-y:auto;padding:16px;flex-shrink:0;display:flex;flex-direction:column;
@@ -371,7 +377,7 @@ border-bottom:1px solid #313244;font-weight:500}
 .file-table .dir a{color:#cdd6f4}
 
 /* viewer - typography for comfortable reading */
-.viewer-content{background:#181825;padding:24px 32px;border-radius:6px;overflow-x:auto;
+.viewer-content{background:transparent;padding:24px 32px;border-radius:6px;overflow-x:auto;
 font-size:18px;line-height:1.6;color:#cdd6f4;margin-top:12px;flex:1;width:100%}
 .viewer-content pre{font-family:'Monaco','Menlo','Ubuntu Mono',monospace;
 white-space:pre-wrap;word-wrap:break-word;margin:0}
@@ -480,6 +486,10 @@ h2{font-size:17px;color:#e0e4f0;margin-bottom:12px;font-weight:500}
 .empty-msg{color:#7f849c;font-style:italic;padding:20px 0;text-align:center}
 .error-msg{color:#f38ba8;background:rgba(243,139,168,0.08);padding:12px;
 border-radius:4px;border-left:3px solid #f38ba8;margin-bottom:12px}
+
+/* mermaid diagrams */
+.markdown-body .mermaid{background:#181825;padding:1.5rem;border-radius:6px;
+margin-bottom:1.5rem;display:flex;justify-content:center}
 """
 
 # ---------------------------------------------------------------------------
@@ -640,6 +650,34 @@ var _unsaved=false;
   _restoreTreeState();
   _trackTreeToggles();
 })();
+
+if(typeof hljs!=='undefined'){hljs.highlightAll();}
+
+if(typeof mermaid!=='undefined'){
+  mermaid.initialize({
+    startOnLoad:false,
+    theme:'dark',
+    themeVariables:{
+      primaryColor:'#94e2d5',
+      primaryTextColor:'#cdd6f4',
+      primaryBorderColor:'#313244',
+      lineColor:'#7f849c',
+      secondaryColor:'#272738',
+      tertiaryColor:'#1e1e2e',
+      background:'#181825',
+      mainBkg:'#272738',
+      nodeBorder:'#94e2d5',
+    }
+  });
+  document.querySelectorAll('pre code.language-mermaid').forEach(function(block){
+    var pre=block.parentElement;
+    var container=document.createElement('div');
+    container.className='mermaid';
+    container.textContent=block.textContent;
+    pre.parentElement.replaceChild(container,pre);
+  });
+  mermaid.run();
+}
 """
 
 # ---------------------------------------------------------------------------
@@ -690,6 +728,9 @@ def _page(
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)} – Stash-MCP</title>
 <style>{_CSS}</style>
+<link rel="stylesheet" href="/static/vendor/github-dark.min.css">
+<script src="/static/vendor/highlight.min.js"></script>
+<script src="/static/vendor/mermaid.min.js"></script>
 </head>
 <body>
 <div class="app">

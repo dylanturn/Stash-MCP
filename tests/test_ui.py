@@ -78,7 +78,7 @@ class TestUIBrowse:
         assert response.status_code == 200
         body = response.text
         # Markdown files are rendered to HTML
-        assert "<h1>Hello World</h1>" in body
+        assert "Hello World</h1>" in body
         assert "markdown-body" in body
         # Should show metadata panel
         assert "text/markdown" in body
@@ -160,7 +160,7 @@ class TestUISave:
 
         # Verify file was created (markdown rendered to HTML)
         view_resp = ui_client.get("/ui/browse/new-file.md")
-        assert "<h1>New File</h1>" in view_resp.text
+        assert "New File</h1>" in view_resp.text
 
     def test_save_updates_existing_file(self, ui_client):
         """POST /ui/save updates existing file content."""
@@ -172,7 +172,7 @@ class TestUISave:
         assert response.status_code == 303
 
         view_resp = ui_client.get("/ui/browse/hello.md")
-        assert "<h1>Updated</h1>" in view_resp.text
+        assert "Updated</h1>" in view_resp.text
 
     def test_save_creates_nested_path(self, ui_client):
         """POST /ui/save creates parent directories as needed."""
@@ -228,7 +228,7 @@ class TestUIMove:
 
         # Verify file is at new location
         view_resp = ui_client.get("/ui/browse/renamed.md")
-        assert "<h1>Hello World</h1>" in view_resp.text
+        assert "Hello World</h1>" in view_resp.text
 
         # Verify old path is gone
         old_resp = ui_client.get("/ui/browse/hello.md")
@@ -262,7 +262,7 @@ class TestUIMarkdown:
         response = ui_client.get("/ui/browse/hello.md")
         body = response.text
         assert "markdown-body" in body
-        assert "<h1>Hello World</h1>" in body
+        assert "Hello World</h1>" in body
 
     def test_non_markdown_file_shown_as_preformatted(self, ui_client):
         """Non-markdown files should be shown in pre tags."""
@@ -275,7 +275,7 @@ class TestUIMarkdown:
         """Markdown with headings and content renders properly."""
         response = ui_client.get("/ui/browse/docs/readme.md")
         body = response.text
-        assert "<h1>README</h1>" in body
+        assert "README</h1>" in body
         assert "Some content here." in body
 
 
