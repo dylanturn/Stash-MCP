@@ -172,6 +172,85 @@ async def test_read_content_tool_not_found(mcp_server):
         await tool.run({"path": "nonexistent.md"})
 
 
+async def test_read_content_tool_returns_truncated_false_by_default(mcp_server):
+    """Test read_content returns truncated=False when max_lines is not provided."""
+    tool = await mcp_server.get_tool("read_content")
+    result = await tool.run({"path": "README.md"})
+    text = str(result.content)
+    assert "truncated" in text
+    assert '"truncated":false' in text
+
+
+async def test_read_content_tool_max_lines_truncates(temp_fs):
+    """Test read_content truncates content to max_lines lines."""
+    temp_fs.write_file("multi.md", "line1\nline2\nline3\nline4\nline5")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 2})
+    text = str(result.content)
+    assert "line1" in text
+    assert "line2" in text
+    assert "line3" not in text
+    assert '"truncated":true' in text  # truncated=True
+
+
+async def test_read_content_tool_max_lines_sha_is_full_file(temp_fs):
+    """Test read_content SHA is computed on full file even when truncated."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 1})
+    text = str(result.content)
+    # SHA must match the full file, not just the first line
+    assert _sha(content) in text
+
+
+async def test_read_content_tool_max_lines_no_truncation_when_within_limit(temp_fs):
+    """Test read_content returns full content when max_lines >= total lines."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 10})
+    text = str(result.content)
+    assert "line1" in text
+    assert "line2" in text
+    assert "line3" in text
+    assert '"truncated":false' in text  # truncated=False
+
+
+async def test_read_content_tool_max_lines_exact_line_count(temp_fs):
+    """Test read_content with max_lines equal to total line count."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 3})
+    text = str(result.content)
+    assert "line3" in text
+    assert '"truncated":false' in text  # truncated=False
+
+
+async def test_read_content_tool_max_lines_one(temp_fs):
+    """Test read_content with max_lines=1 returns only the first line."""
+    temp_fs.write_file("multi.md", "first\nsecond\nthird")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 1})
+    text = str(result.content)
+    assert "first" in text
+    assert "second" not in text
+    assert '"truncated":true' in text  # truncated=True
+
+
+async def test_read_content_tool_max_lines_zero_raises(mcp_server):
+    """Test read_content raises ValueError when max_lines=0."""
+    tool = await mcp_server.get_tool("read_content")
+    with pytest.raises(ValueError, match="max_lines must be a positive integer"):
+        await tool.run({"path": "README.md", "max_lines": 0})
+
+
 # --- read_content_batch tests ---
 
 
@@ -241,6 +320,62 @@ async def test_read_content_batch_all_missing(mcp_server):
     assert "missing2.md" in text
     # No content should be present, only errors
     assert "error" in text
+
+
+async def test_read_content_batch_truncated_false_by_default(mcp_server):
+    """Test read_content_batch includes truncated=False by default."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["README.md"]})
+    text = str(result.content)
+    assert "truncated" in text
+    assert '"truncated":false' in text
+
+
+async def test_read_content_batch_max_lines_truncates(temp_fs):
+    """Test read_content_batch truncates each file to max_lines."""
+    temp_fs.write_file("a.md", "line1\nline2\nline3\nline4")
+    temp_fs.write_file("b.md", "alpha\nbeta\ngamma")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["a.md", "b.md"], "max_lines": 2})
+    text = str(result.content)
+    assert "line1" in text
+    assert "line2" in text
+    assert "line3" not in text
+    assert "alpha" in text
+    assert "beta" in text
+    assert "gamma" not in text
+    assert '"truncated":true' in text  # at least one truncated=True
+
+
+async def test_read_content_batch_max_lines_sha_is_full_file(temp_fs):
+    """Test read_content_batch SHA is computed on full file even when truncated."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["multi.md"], "max_lines": 1})
+    text = str(result.content)
+    assert _sha(content) in text
+
+
+async def test_read_content_batch_max_lines_zero_raises(mcp_server):
+    """Test read_content_batch raises ValueError when max_lines=0."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    with pytest.raises(ValueError, match="max_lines must be a positive integer"):
+        await tool.run({"paths": ["README.md"], "max_lines": 0})
+
+
+async def test_read_content_batch_max_lines_no_truncation_when_within_limit(temp_fs):
+    """Test read_content_batch returns full content when max_lines >= total lines."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["multi.md"], "max_lines": 100})
+    text = str(result.content)
+    assert "line3" in text
+    assert '"truncated":false' in text  # truncated=False
 
 
 async def test_replace_content_tool(mcp_server, temp_fs, mock_context):
