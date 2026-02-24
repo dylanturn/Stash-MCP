@@ -393,6 +393,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
     @mcp.tool()
     async def read_content(
         path: str,
+        max_lines: int | None = None,
     ) -> dict:
         """
         Read and return the contents of a file along with its SHA-256 hash.
@@ -400,16 +401,28 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         Args:
             path: File path relative to content root
+            max_lines: Optional maximum number of lines to return from the
+                beginning of the file. If omitted, returns the full file.
         Returns:
-            A dict with 'content' (file text) and 'sha' (SHA-256 hex digest)
+            A dict with 'content' (file text), 'sha' (SHA-256 hex digest of
+            the FULL file), and 'truncated' (bool)
         """
         content = filesystem.read_file(path)
         sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        return {"content": content, "sha": sha}
+        truncated = False
+        if max_lines is not None:
+            if max_lines < 1:
+                raise ValueError("max_lines must be a positive integer.")
+            lines = content.splitlines(keepends=True)
+            if len(lines) > max_lines:
+                content = "".join(lines[:max_lines])
+                truncated = True
+        return {"content": content, "sha": sha, "truncated": truncated}
 
     @mcp.tool()
     async def read_content_batch(
         paths: list[str],
+        max_lines: int | None = None,
     ) -> dict:
         """Read multiple files and return their contents with SHA-256 hashes.
 
@@ -418,9 +431,11 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         Args:
             paths: List of file paths relative to content root (max 10)
+            max_lines: Optional maximum number of lines to return from the
+                beginning of each file. If omitted, returns full content.
         Returns:
             A dict with 'results' list, each containing 'path', 'content',
-            'sha', and 'error' (null on success)
+            'sha', 'truncated', and 'error' (null on success)
         """
         if not paths:
             raise ValueError("At least one path is required.")
@@ -428,15 +443,29 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             raise ValueError(f"Maximum 10 files per batch read. Got {len(paths)}.")
         if len(paths) != len(set(paths)):
             raise ValueError("Duplicate paths are not allowed in a single batch read.")
+        if max_lines is not None and max_lines < 1:
+            raise ValueError("max_lines must be a positive integer.")
 
         results = []
         for path in paths:
             try:
                 content = filesystem.read_file(path)
                 sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
-                results.append({"path": path, "content": content, "sha": sha, "error": None})
+                truncated = False
+                if max_lines is not None:
+                    lines = content.splitlines(keepends=True)
+                    if len(lines) > max_lines:
+                        content = "".join(lines[:max_lines])
+                        truncated = True
+                results.append({
+                    "path": path, "content": content, "sha": sha,
+                    "truncated": truncated, "error": None,
+                })
             except (FileNotFoundError, InvalidPathError) as exc:
-                results.append({"path": path, "content": None, "sha": None, "error": str(exc)})
+                results.append({
+                    "path": path, "content": None, "sha": None,
+                    "truncated": False, "error": str(exc),
+                })
         return {"results": results}
 
     @mcp.tool()
