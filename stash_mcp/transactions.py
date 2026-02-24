@@ -287,6 +287,10 @@ class TransactionManager:
         self._require_active_transaction()
         return self.fs.move_file(source_path, dest_path)
 
+    def move_directory(self, source_path: str, dest_path: str) -> list[tuple[str, str]]:
+        self._require_active_transaction()
+        return self.fs.move_directory(source_path, dest_path)
+
     def create_directory(self, path: str) -> None:
         self._require_active_transaction()
         return self.fs.create_directory(path)

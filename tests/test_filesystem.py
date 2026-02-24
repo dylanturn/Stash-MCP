@@ -178,6 +178,76 @@ def test_move_file_to_existing_dest(temp_fs):
         temp_fs.move_file("source.txt", "dest.txt")
 
 
+# --- move_directory tests ---
+
+
+def test_move_directory_basic(temp_fs):
+    """Test moving a directory to a new location."""
+    temp_fs.write_file("src/file1.txt", "File 1")
+    temp_fs.write_file("src/file2.txt", "File 2")
+    moved = temp_fs.move_directory("src", "dst")
+
+    assert not (temp_fs.content_dir / "src").exists()
+    assert temp_fs.file_exists("dst/file1.txt")
+    assert temp_fs.file_exists("dst/file2.txt")
+    assert temp_fs.read_file("dst/file1.txt") == "File 1"
+    assert len(moved) == 2
+    assert ("src/file1.txt", "dst/file1.txt") in moved
+    assert ("src/file2.txt", "dst/file2.txt") in moved
+
+
+def test_move_directory_nested(temp_fs):
+    """Test moving a directory with nested subdirectories."""
+    temp_fs.write_file("src/a.txt", "A")
+    temp_fs.write_file("src/sub/b.txt", "B")
+    temp_fs.write_file("src/sub/deep/c.txt", "C")
+    moved = temp_fs.move_directory("src", "dst")
+
+    assert temp_fs.file_exists("dst/a.txt")
+    assert temp_fs.file_exists("dst/sub/b.txt")
+    assert temp_fs.file_exists("dst/sub/deep/c.txt")
+    assert len(moved) == 3
+
+
+def test_move_directory_nonexistent_source(temp_fs):
+    """Test moving a nonexistent directory raises FileNotFoundError."""
+    with pytest.raises(FileNotFoundError):
+        temp_fs.move_directory("nonexistent", "dst")
+
+
+def test_move_directory_source_is_file(temp_fs):
+    """Test that moving a file path as directory raises InvalidPathError."""
+    temp_fs.write_file("file.txt", "content")
+    with pytest.raises(InvalidPathError):
+        temp_fs.move_directory("file.txt", "dst")
+
+
+def test_move_directory_dest_already_exists(temp_fs):
+    """Test that moving to an existing destination raises FileSystemError."""
+    from stash_mcp.filesystem import FileSystemError
+    temp_fs.write_file("src/file.txt", "content")
+    temp_fs.write_file("dst/other.txt", "other")
+    with pytest.raises(FileSystemError, match="already exists"):
+        temp_fs.move_directory("src", "dst")
+
+
+def test_move_directory_into_itself(temp_fs):
+    """Test that moving a directory into a subdirectory of itself raises InvalidPathError."""
+    temp_fs.write_file("src/file.txt", "content")
+    with pytest.raises(InvalidPathError, match="subdirectory of itself"):
+        temp_fs.move_directory("src", "src/archive/src")
+
+
+def test_move_directory_returns_moved_pairs(temp_fs):
+    """Test that move_directory returns correct (old_path, new_path) pairs."""
+    temp_fs.write_file("docs/README.md", "# Docs")
+    temp_fs.write_file("docs/guide.md", "# Guide")
+    moved = temp_fs.move_directory("docs", "archive/docs")
+
+    assert ("docs/README.md", "archive/docs/README.md") in moved
+    assert ("docs/guide.md", "archive/docs/guide.md") in moved
+
+
 # --- Include patterns tests ---
 
 
