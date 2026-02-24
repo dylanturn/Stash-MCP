@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 from fastmcp import FastMCP
 from fastmcp.resources import FunctionResource
 from fastmcp.server.context import Context
+from mcp.types import ToolAnnotations
 from pydantic import AnyUrl, BaseModel, Field
 
 from .config import Config
@@ -260,7 +261,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     if not Config.READ_ONLY:
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Create file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                openWorldHint=False,
+            )
+        )
         async def create_content(
             path: str,
             content: str,
@@ -284,7 +292,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             logger.info(f"Created: {path}")
             return f"Created: {path}"
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Replace file content",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            )
+        )
         async def replace_content(
             path: str,
             content: str,
@@ -319,7 +335,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             logger.info(f"Updated: {path}")
             return f"Updated: {path}"
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Edit file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            )
+        )
         async def edit_content(
             file_path: str,
             sha: str,
@@ -356,7 +380,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             new_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
             return {"path": file_path, "result": "ok", "new_sha": new_sha}
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Edit multiple files",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            )
+        )
         async def multi_edit_content(
             edit_operations: list[FileEditOperation],
             ctx: Context,
@@ -408,7 +440,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
             return {"results": results}
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Delete file",
+                readOnlyHint=False,
+                destructiveHint=True,
+                openWorldHint=False,
+            )
+        )
         async def delete_content(
             path: str,
             sha: str,
@@ -439,7 +478,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     # --- Read-only tools (always registered) ---
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Read file content",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
     async def read_content(
         path: str,
         max_lines: int | None = None,
@@ -468,7 +513,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 truncated = True
         return {"content": content, "sha": sha, "truncated": truncated}
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Read multiple files",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
     async def read_content_batch(
         paths: list[str],
         max_lines: int | None = None,
@@ -517,7 +568,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 })
         return {"results": results}
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="List files and directories",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
     async def list_content(
         path: str = "",
         recursive: bool = False,
@@ -545,7 +602,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 return f"Empty directory: '{path or '/'}'"
             return "\n".join(lines)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get markdown structure",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
     async def get_markdown_structure(
         path: str,
     ) -> dict:
@@ -575,7 +638,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 break
         return {"path": path, "title": title, "sections": sections}
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get markdown structure (batch)",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
     async def get_markdown_structure_batch(
         paths: list[str],
     ) -> dict:
@@ -631,7 +700,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     if not Config.READ_ONLY:
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Move or rename file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                openWorldHint=False,
+            )
+        )
         async def move_content(
             source_path: str,
             dest_path: str,
@@ -658,7 +734,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     if search_engine is not None:
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Search content",
+                readOnlyHint=True,
+                openWorldHint=False,
+            )
+        )
         async def search_content(
             query: str,
             max_results: int = 5,
@@ -707,7 +789,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     if git_backend is not None:
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="View file history",
+                readOnlyHint=True,
+                openWorldHint=False,
+            )
+        )
         async def history_content(
             path: str,
             max_count: int = 20,
@@ -732,7 +820,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 )
             return "\n".join(lines)
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="View file changes",
+                readOnlyHint=True,
+                openWorldHint=False,
+            )
+        )
         async def diff_content(
             path: str,
             ref: str | None = None,
@@ -749,7 +843,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
             return await asyncio.to_thread(git_backend.diff, path, ref)
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="View file blame",
+                readOnlyHint=True,
+                openWorldHint=False,
+            )
+        )
         async def blame_content(
             path: str,
             start_line: int | None = None,
@@ -788,7 +888,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         if tm is not None:
 
-            @mcp.tool()
+            @mcp.tool(
+                annotations=ToolAnnotations(
+                    title="Start transaction",
+                    readOnlyHint=False,
+                    destructiveHint=False,
+                    openWorldHint=False,
+                )
+            )
             async def start_content_transaction(ctx: Context) -> str:
                 """Begin a write transaction and return its UUID.
 
@@ -813,7 +920,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     raise ValueError(str(exc))
                 return txn_id
 
-            @mcp.tool()
+            @mcp.tool(
+                annotations=ToolAnnotations(
+                    title="Commit transaction",
+                    readOnlyHint=False,
+                    destructiveHint=False,
+                    openWorldHint=False,
+                )
+            )
             async def end_content_transaction(
                 message: str,
                 ctx: Context,
@@ -843,7 +957,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     raise ValueError(str(exc))
                 return f"Transaction committed: {message}"
 
-            @mcp.tool()
+            @mcp.tool(
+                annotations=ToolAnnotations(
+                    title="Abort transaction",
+                    readOnlyHint=False,
+                    destructiveHint=True,
+                    idempotentHint=True,
+                    openWorldHint=False,
+                )
+            )
             async def abort_content_transaction(ctx: Context) -> str:
                 """Abort the active transaction and discard all uncommitted changes.
 
@@ -860,7 +982,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     raise ValueError(str(exc))
                 return "Transaction aborted."
 
-            @mcp.tool()
+            @mcp.tool(
+                annotations=ToolAnnotations(
+                    title="List transactions",
+                    readOnlyHint=True,
+                    openWorldHint=False,
+                )
+            )
             async def list_content_transactions(ctx: Context) -> dict:
                 """List active content transactions.
 
