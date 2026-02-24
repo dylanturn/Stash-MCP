@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from stash_mcp.filesystem import FileNotFoundError, FileSystem
-from stash_mcp.mcp_server import EditOperation, FileEditOperation, _get_mime_type, create_mcp_server
+from stash_mcp.mcp_server import (
+    EditOperation,
+    FileEditOperation,
+    _build_heading_tree,
+    _get_mime_type,
+    create_mcp_server,
+    parse_markdown_structure,
+)
 
 
 def _sha(content: str) -> str:
@@ -127,6 +134,7 @@ async def test_list_tools(mcp_server):
     assert "list_content" in tool_names
     assert "read_content_batch" in tool_names
     assert "move_content" in tool_names
+    assert "get_markdown_structure" in tool_names
 
 
 async def test_create_content_tool(temp_fs, mock_context):
@@ -926,3 +934,130 @@ async def test_server_name_used_in_mcp_server(temp_fs):
     with patch("stash_mcp.mcp_server.Config.SERVER_NAME", "test-server"):
         mcp = create_mcp_server(temp_fs)
         assert mcp.name == "test-server"
+
+
+# --- get_markdown_structure tests ---
+
+
+def test_parse_markdown_structure_typical_doc():
+    """Test parsing a typical markdown document with nested headings."""
+    content = "# Title\n\n## Section 1\n\n### Subsection\n\n## Section 2\n"
+    sections = parse_markdown_structure(content)
+    assert len(sections) == 1
+    assert sections[0]["heading"] == "Title"
+    assert sections[0]["level"] == 1
+    assert len(sections[0]["children"]) == 2
+    assert sections[0]["children"][0]["heading"] == "Section 1"
+    assert sections[0]["children"][0]["children"][0]["heading"] == "Subsection"
+    assert sections[0]["children"][1]["heading"] == "Section 2"
+
+
+def test_parse_markdown_structure_no_headings():
+    """Test parsing a file with no headings returns empty list."""
+    content = "Just some plain text.\nNo headings here.\n"
+    sections = parse_markdown_structure(content)
+    assert sections == []
+
+
+def test_parse_markdown_structure_skips_code_blocks():
+    """Test that headings inside fenced code blocks are skipped."""
+    content = "# Real Heading\n\n```\n# Fake Heading\n```\n\n## Another Real\n"
+    sections = parse_markdown_structure(content)
+    assert len(sections) == 1
+    assert sections[0]["heading"] == "Real Heading"
+    assert len(sections[0]["children"]) == 1
+    assert sections[0]["children"][0]["heading"] == "Another Real"
+
+
+def test_parse_markdown_structure_level_skipping():
+    """Test that level skipping (h1 -> h3) is handled gracefully."""
+    content = "# Top\n\n### Deep\n\n## Middle\n"
+    sections = parse_markdown_structure(content)
+    assert len(sections) == 1
+    assert sections[0]["heading"] == "Top"
+    # h3 nests under h1 because there's no h2
+    assert len(sections[0]["children"]) == 2
+    assert sections[0]["children"][0]["heading"] == "Deep"
+    assert sections[0]["children"][0]["level"] == 3
+    assert sections[0]["children"][1]["heading"] == "Middle"
+
+
+def test_parse_markdown_structure_line_numbers():
+    """Test that line numbers are 1-based and accurate."""
+    content = "# First\nsome text\n## Second\n"
+    sections = parse_markdown_structure(content)
+    assert sections[0]["line_number"] == 1
+    assert sections[0]["children"][0]["line_number"] == 3
+
+
+def test_build_heading_tree_multiple_top_level():
+    """Test building a tree with multiple top-level headings."""
+    flat = [
+        {"heading": "A", "level": 1, "line_number": 1, "children": []},
+        {"heading": "B", "level": 1, "line_number": 5, "children": []},
+    ]
+    tree = _build_heading_tree(flat)
+    assert len(tree) == 2
+    assert tree[0]["heading"] == "A"
+    assert tree[1]["heading"] == "B"
+
+
+async def test_get_markdown_structure_tool_typical(temp_fs):
+    """Test get_markdown_structure returns correct nested structure."""
+    content = "# Title\n\n## Section 1\n\n### Subsection\n\n## Section 2\n"
+    temp_fs.write_file("doc.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure")
+    result = await tool.run({"path": "doc.md"})
+    text = str(result.content)
+    assert "Title" in text
+    assert "Section 1" in text
+    assert "Subsection" in text
+    assert "Section 2" in text
+
+
+async def test_get_markdown_structure_tool_title_field(temp_fs):
+    """Test get_markdown_structure returns title from first h1."""
+    temp_fs.write_file("titled.md", "# My Title\n\n## Sub\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure")
+    result = await tool.run({"path": "titled.md"})
+    text = str(result.content)
+    assert '"title":"My Title"' in text or "My Title" in text
+
+
+async def test_get_markdown_structure_tool_no_h1_title_null(temp_fs):
+    """Test get_markdown_structure returns null title when no h1 exists."""
+    temp_fs.write_file("no_h1.md", "## Section\n\n### Subsection\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure")
+    result = await tool.run({"path": "no_h1.md"})
+    text = str(result.content)
+    assert '"title":null' in text
+
+
+async def test_get_markdown_structure_tool_rejects_non_markdown(temp_fs):
+    """Test get_markdown_structure raises ValueError for non-markdown files."""
+    temp_fs.write_file("data.json", '{"key": "value"}')
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure")
+    with pytest.raises(ValueError, match="only supports markdown files"):
+        await tool.run({"path": "data.json"})
+
+
+async def test_get_markdown_structure_tool_file_not_found(temp_fs):
+    """Test get_markdown_structure raises FileNotFoundError for missing files."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure")
+    with pytest.raises(FileNotFoundError):
+        await tool.run({"path": "missing.md"})
+
+
+async def test_get_markdown_structure_tool_path_in_result(temp_fs):
+    """Test get_markdown_structure includes the path in the result."""
+    temp_fs.write_file("docs/guide.md", "# Guide\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("get_markdown_structure")
+    result = await tool.run({"path": "docs/guide.md"})
+    text = str(result.content)
+    assert "docs/guide.md" in text
