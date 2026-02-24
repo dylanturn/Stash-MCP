@@ -249,8 +249,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             return False
         uri_key = f"stash://{path}"
         try:
-            mcp._local_provider.remove_resource(uri_key)
+            # fastmcp 3.x: use public local_provider API
+            mcp.local_provider.remove_resource(uri_key)
             return True
+        except AttributeError:
+            # fastmcp 2.x: ResourceManager exposes _resources dict directly
+            return mcp._resource_manager._resources.pop(uri_key, None) is not None
         except KeyError:
             return False
 
