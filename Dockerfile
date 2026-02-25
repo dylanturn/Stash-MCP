@@ -25,14 +25,18 @@ COPY stash_mcp ./stash_mcp
 ARG SEARCH_EXTRA=search
 RUN uv sync --frozen --no-dev --extra ${SEARCH_EXTRA}
 
-# Create content directory
-RUN mkdir -p /data/content
+# Create persistent data directories
+RUN mkdir -p /data/content /data/.stash-index /data/models
 
 # Set environment variables
 ENV STASH_CONTENT_ROOT=/data/content
+ENV STASH_SEARCH_INDEX_DIR=/data/.stash-index
 ENV STASH_HOST=0.0.0.0
 ENV STASH_PORT=8000
 ENV PYTHONUNBUFFERED=1
+# Cache HuggingFace/sentence-transformers model weights under /data/models
+# so they persist across container restarts when the volume is mounted.
+ENV HF_HOME=/data/models
 
 # Expose port
 EXPOSE 8000

@@ -257,18 +257,28 @@ def create_app():
                 logger.debug("No running event loop; skipping search index update")
                 return
             if event_type in ("content_created", "content_updated"):
-                task = loop.create_task(search_engine.index_file(path))
+                task = loop.create_task(
+                    search_engine.index_file(path), name=f"index-{path}"
+                )
                 task.add_done_callback(_task_done_callback)
             elif event_type == "content_deleted":
-                task = loop.create_task(search_engine.remove_file(path))
+                task = loop.create_task(
+                    search_engine.remove_file(path), name=f"remove-{path}"
+                )
                 task.add_done_callback(_task_done_callback)
             elif event_type == "content_moved":
                 source_path = kwargs.get("source_path", "")
                 if source_path:
-                    task = loop.create_task(search_engine.remove_file(source_path))
+                    task = loop.create_task(
+                        search_engine.move_file_index(source_path, path),
+                        name=f"move-{source_path}->{path}",
+                    )
                     task.add_done_callback(_task_done_callback)
-                task = loop.create_task(search_engine.index_file(path))
-                task.add_done_callback(_task_done_callback)
+                else:
+                    task = loop.create_task(
+                        search_engine.index_file(path), name=f"index-{path}"
+                    )
+                    task.add_done_callback(_task_done_callback)
 
     add_listener(on_content_changed)
 
