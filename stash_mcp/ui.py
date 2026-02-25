@@ -208,12 +208,19 @@ def _render_markdown(content: str) -> str:
         "fenced_code",
         "tables",
         "nl2br",
-        "codehilite",
         "toc",
         "sane_lists",
         "smarty",
     ])
     return converter.convert(content)
+
+
+def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """Sort entries: directories first, then README.md, then remaining files (all alpha)."""
+    dirs = [(n, d) for n, d in entries if d]
+    readme = [(n, d) for n, d in entries if not d and n.lower() == "readme.md"]
+    files = [(n, d) for n, d in entries if not d and n.lower() != "readme.md"]
+    return dirs + readme + files
 
 
 def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
@@ -222,8 +229,9 @@ def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") ->
         entries = filesystem.list_files(rel)
     except Exception:
         return ""
+    sorted_entries = _sort_entries(entries)
     parts: list[str] = []
-    for name, is_dir in entries:
+    for name, is_dir in sorted_entries:
         child = f"{rel}/{name}" if rel else name
         escaped = html.escape(name)
         if is_dir:
@@ -822,6 +830,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 entries = filesystem.list_files(path)
             except Exception:
                 entries = []
+            entries = _sort_entries(entries)
             rows = ""
             for name, is_dir in entries:
                 child = f"{path}/{name}" if path else name
