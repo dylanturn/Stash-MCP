@@ -196,8 +196,8 @@ def _breadcrumbs_html(path: str) -> str:
     return f' <span class="sep">{_icon("chevron-right")}</span> '.join(items)
 
 
-def _render_markdown(content: str) -> str:
-    """Render markdown to HTML with extensions.
+def _render_markdown(content: str) -> tuple[str, str]:
+    """Render markdown to HTML with extensions. Returns (html, toc_html).
 
     Raw HTML in markdown is passed through by design — Stash-MCP stores
     user-controlled content (personal knowledge base), so constructs like
@@ -212,7 +212,8 @@ def _render_markdown(content: str) -> str:
         "sane_lists",
         "smarty",
     ])
-    return converter.convert(content)
+    rendered = converter.convert(content)
+    return rendered, getattr(converter, "toc", "")
 
 
 def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
@@ -350,11 +351,31 @@ flex-direction:column;align-items:center;min-height:0}
 .center-inner{width:100%;display:flex;flex-direction:column;flex:1;min-height:0}
 
 .right-panel{width:280px;min-width:0;background:#272738;border-left:1px solid #313244;
-overflow-y:auto;padding:16px;flex-shrink:0;display:flex;flex-direction:column;
+flex-shrink:0;display:flex;flex-direction:column;overflow:hidden;
 transition:width 150ms ease,padding 150ms ease}
-.right-panel.collapsed{width:0;padding:0;overflow:hidden;border-left:none}
-.right-top{flex:1}
-.right-bottom{border-top:1px solid #313244;padding-top:16px;margin-top:16px}
+.right-panel.collapsed{width:0;overflow:hidden;border-left:none}
+.right-toc{flex:1;min-height:0;overflow-y:auto;padding:16px}
+.toc-heading{font-size:14px;font-weight:600;color:#7f849c;margin-bottom:12px;
+display:flex;align-items:center;gap:8px}
+.toc-nav .toc li{list-style:none}
+.toc-nav .toc a{display:block;padding:6px 12px;color:#7f849c;font-size:14px;
+text-decoration:none;border-left:2px solid transparent;border-radius:0 4px 4px 0;
+transition:color 150ms ease,background 150ms ease,border-color 150ms ease}
+.toc-nav .toc a:hover{color:#cdd6f4;background:rgba(148,226,213,0.05)}
+.toc-nav .toc a.active{color:#94e2d5;background:rgba(148,226,213,0.08);
+border-left-color:#94e2d5}
+.toc-nav .toc ul{padding-left:0;margin:0}
+.toc-nav .toc>ul>li>a{padding-left:12px}
+.toc-nav .toc>ul>li>ul>li>a{padding-left:28px}
+.toc-nav .toc>ul>li>ul>li>ul>li>a{padding-left:44px}
+.right-meta-accordion{flex-shrink:0;border-top:1px solid #313244}
+.meta-accordion-header{display:flex;align-items:center;justify-content:space-between;
+padding:14px 16px;font-size:15px;font-weight:600;color:#cdd6f4;cursor:pointer;list-style:none}
+.meta-accordion-header::-webkit-details-marker,.meta-accordion-header::marker{display:none}
+.meta-accordion-header .icon{transition:transform 150ms ease}
+.meta-accordion[open] .meta-accordion-header .icon{transform:rotate(90deg)}
+.meta-accordion-body{padding:0 16px 16px}
+.right-bottom{flex-shrink:0;border-top:1px solid #313244;padding:12px 16px}
 
 /* breadcrumbs */
 .breadcrumbs{font-size:13px;color:#7f849c;margin-bottom:16px;
@@ -686,6 +707,33 @@ if(typeof mermaid!=='undefined'){
   });
   mermaid.run();
 }
+
+// Scroll-spy for TOC
+(function(){
+  var tocLinks=document.querySelectorAll('#toc-nav .toc a');
+  if(!tocLinks.length)return;
+  var viewer=document.querySelector('.center-content');
+  if(!viewer)return;
+  var linkMap={};
+  tocLinks.forEach(function(a){
+    var href=a.getAttribute('href');
+    if(href&&href.startsWith('#')){linkMap[href.slice(1)]=a;}
+  });
+  var headingIds=Object.keys(linkMap);
+  var currentActive=null;
+  var observer=new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if(entry.isIntersecting){
+        if(currentActive)currentActive.classList.remove('active');
+        var link=linkMap[entry.target.id];
+        if(link){link.classList.add('active');currentActive=link;}
+      }
+    });
+  },{root:viewer,rootMargin:'0px 0px -80% 0px',threshold:0});
+  headingIds.forEach(function(id){
+    var el=document.getElementById(id);if(el)observer.observe(el);
+  });
+})();
 """
 
 # ---------------------------------------------------------------------------
@@ -892,8 +940,9 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 return _page("Error", sidebar, center)
 
             escaped_content = html.escape(content)
+            toc_html = ""
             if path.endswith((".md", ".markdown")):
-                rendered = _render_markdown(content)
+                rendered, toc_html = _render_markdown(content)
                 center = (
                     f'<div class="viewer-content markdown-body">{rendered}</div>'
                 )
@@ -902,7 +951,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                     f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
                 )
 
-            # right panel — metadata + actions
+            # right panel — TOC (markdown only) + metadata accordion + actions
             try:
                 st = full.stat()
                 size = _human_size(st.st_size)
@@ -914,9 +963,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 mtime = "—"
             words = len(content.split())
             chars = len(content)
-            right = (
-                '<div class="right-top">'
-                '<h2 class="meta-heading">Document Metadata</h2>'
+            _meta_body = (
                 '<div class="meta-field">'
                 '<div class="meta-field-label">File Path</div>'
                 f'<div class="meta-field-path">{html.escape(path)}</div>'
@@ -940,8 +987,8 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 f'<div class="meta-stat-row"><span class="label">Words:</span>'
                 f'<span class="value">{words}</span></div>'
                 '</div>'
-                "</div>"
-                '<div class="right-bottom">'
+            )
+            _action_stack = (
                 '<div class="action-stack">'
                 f'<button class="btn-rename" onclick="showRename(this)">'
                 f'{_icon("pen-line")} Rename / Move</button>'
@@ -964,8 +1011,34 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 '<button type="button" class="btn-confirm-cancel" '
                 'onclick="hideConfirm(this)">Cancel</button>'
                 "</div></form>"
-                "</div></div>"
+                "</div>"
             )
+            if toc_html:
+                # Markdown with headings: scrollable TOC + collapsed accordion
+                right = (
+                    '<div class="right-toc">'
+                    f'<h2 class="toc-heading">{_icon("list")} On This Page</h2>'
+                    f'<nav class="toc-nav" id="toc-nav">{toc_html}</nav>'
+                    '</div>'
+                    '<div class="right-meta-accordion">'
+                    '<details class="meta-accordion">'
+                    f'<summary class="meta-accordion-header">Document Metadata {_icon("chevron-right")}</summary>'
+                    f'<div class="meta-accordion-body">{_meta_body}</div>'
+                    '</details>'
+                    '</div>'
+                    f'<div class="right-bottom">{_action_stack}</div>'
+                )
+            else:
+                # Non-markdown or no headings: no TOC, metadata expanded
+                right = (
+                    '<div class="right-meta-accordion">'
+                    '<details class="meta-accordion" open>'
+                    f'<summary class="meta-accordion-header">Document Metadata {_icon("chevron-right")}</summary>'
+                    f'<div class="meta-accordion-body">{_meta_body}</div>'
+                    '</details>'
+                    '</div>'
+                    f'<div class="right-bottom">{_action_stack}</div>'
+                )
             return _page(
                 PurePosixPath(path).name, sidebar, center, right, mode="view", path=path,
             )
@@ -1039,7 +1112,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
             "</div></form>"
         )
 
-        # right panel — metadata + actions (same as browse view)
+        # right panel — no TOC in edit view; metadata expanded by default
         full = filesystem._resolve_path(path)
         try:
             st = full.stat()
@@ -1052,9 +1125,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
             mtime = "—"
         words = len(content.split())
         chars = len(content)
-        right = (
-            '<div class="right-top">'
-            '<h2 class="meta-heading">Document Metadata</h2>'
+        _meta_body = (
             '<div class="meta-field">'
             '<div class="meta-field-label">File Path</div>'
             f'<div class="meta-field-path">{html.escape(path)}</div>'
@@ -1078,7 +1149,14 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
             f'<div class="meta-stat-row"><span class="label">Words:</span>'
             f'<span class="value">{words}</span></div>'
             '</div>'
-            "</div>"
+        )
+        right = (
+            '<div class="right-meta-accordion">'
+            '<details class="meta-accordion" open>'
+            f'<summary class="meta-accordion-header">Document Metadata {_icon("chevron-right")}</summary>'
+            f'<div class="meta-accordion-body">{_meta_body}</div>'
+            '</details>'
+            '</div>'
             '<div class="right-bottom">'
             '<div class="action-stack">'
             f'<button class="btn-rename" onclick="showRename(this)">'
