@@ -738,6 +738,7 @@ def _page(
 <style>{_CSS}</style>
 <link rel="stylesheet" href="/static/vendor/github-dark.min.css">
 <script src="/static/vendor/highlight.min.js"></script>
+<script src="/static/vendor/languages/terraform.min.js"></script>
 <script src="/static/vendor/mermaid.min.js"></script>
 </head>
 <body>
