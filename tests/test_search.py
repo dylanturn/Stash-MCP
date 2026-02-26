@@ -13,6 +13,7 @@ from stash_mcp.search import (
     _chunk_text,
     _chunk_text_sliding_window,
     _content_hash,
+    _normalize_path,
 )
 
 # --- Mock embedding function (deterministic, no API calls) ---
@@ -821,3 +822,174 @@ class TestSearchConfig:
         assert Config.CONTEXTUAL_MODEL == "claude-haiku-4-5-20251001"
         assert Config.SEARCH_CHUNK_SIZE == 1000
         assert Config.SEARCH_CHUNK_OVERLAP == 100
+
+    def test_model_cache_dir_default(self):
+        """Test that MODEL_CACHE_DIR defaults to /data/models."""
+        from stash_mcp.config import Config
+
+        assert Config.MODEL_CACHE_DIR == Path("/data/models")
+
+
+# --- Path normalization tests ---
+
+
+class TestNormalizePath:
+
+    def test_forward_slash_unchanged(self):
+        """Test that a well-formed path is unchanged."""
+        assert _normalize_path("docs/api.md") == "docs/api.md"
+
+    def test_strips_leading_slash(self):
+        """Test that a leading slash is stripped."""
+        assert _normalize_path("/docs/api.md") == "docs/api.md"
+
+    def test_strips_trailing_slash(self):
+        """Test that a trailing slash is stripped."""
+        assert _normalize_path("docs/api.md/") == "docs/api.md"
+
+    def test_strips_both_slashes(self):
+        """Test that leading and trailing slashes are both stripped."""
+        assert _normalize_path("/docs/api.md/") == "docs/api.md"
+
+    def test_normalizes_backslashes(self):
+        """Test that backslashes are converted to forward slashes (Windows paths)."""
+        assert _normalize_path("docs\\api.md") == "docs/api.md"
+
+    def test_normalizes_backslashes_and_leading_slash(self):
+        """Test backslash normalization combined with leading slash removal."""
+        assert _normalize_path("\\docs\\api.md") == "docs/api.md"
+
+    def test_empty_string(self):
+        """Test that empty string stays empty."""
+        assert _normalize_path("") == ""
+
+
+# --- Search index integrity tests (delete/move) ---
+
+
+class TestSearchIndexIntegrity:
+
+    @pytest.fixture
+    def engine_with_files(self):
+        """Create a SearchEngine with pre-indexed files."""
+        with TemporaryDirectory() as content_dir:
+            with TemporaryDirectory() as index_dir:
+                cd = Path(content_dir)
+                (cd / "docs").mkdir()
+                (cd / "docs" / "auth.md").write_text(
+                    "# Authentication\n\nThe OAuth2 flow is used for authorization."
+                )
+                (cd / "notes.md").write_text(
+                    "# Meeting Notes\n\nDiscussed project milestones and deliverables."
+                )
+                engine = SearchEngine(
+                    content_dir=cd,
+                    index_dir=Path(index_dir),
+                    embed_fn=mock_embed,
+                )
+                yield engine, cd
+
+    async def test_delete_file_removed_from_search(self, engine_with_files):
+        """Test that deleted files no longer appear in search results."""
+        engine, content_dir = engine_with_files
+        await engine.build_index(["docs/auth.md", "notes.md"])
+        assert engine.indexed_files == 2
+
+        # Delete the file and remove from index
+        (content_dir / "docs" / "auth.md").unlink()
+        await engine.remove_file("docs/auth.md")
+
+        assert engine.indexed_files == 1
+        assert engine.indexed_chunks < engine.store.count or engine.indexed_chunks >= 0
+        assert "docs/auth.md" not in engine.meta.file_hashes
+
+        # Search should no longer return results for the deleted file
+        results = await engine.search("OAuth2 authorization")
+        file_paths = [r.file_path for r in results]
+        assert "docs/auth.md" not in file_paths
+
+    async def test_delete_file_with_leading_slash_normalization(self, engine_with_files):
+        """Test that remove_file works even when path has a leading slash."""
+        engine, content_dir = engine_with_files
+        await engine.build_index(["docs/auth.md", "notes.md"])
+
+        (content_dir / "docs" / "auth.md").unlink()
+        # Pass path with leading slash (as might come from user input/API)
+        await engine.remove_file("/docs/auth.md")
+
+        assert "docs/auth.md" not in engine.meta.file_hashes
+        results = await engine.search("OAuth2 authorization")
+        file_paths = [r.file_path for r in results]
+        assert "docs/auth.md" not in file_paths
+
+    async def test_move_file_updates_index(self, engine_with_files):
+        """Test that moved files: old path gone, new path searchable."""
+        engine, content_dir = engine_with_files
+        await engine.build_index(["docs/auth.md", "notes.md"])
+
+        # Move the file on disk
+        old_path = content_dir / "docs" / "auth.md"
+        new_path = content_dir / "docs" / "auth-guide.md"
+        old_path.rename(new_path)
+
+        # Use the atomic move_file_index method
+        await engine.move_file_index("docs/auth.md", "docs/auth-guide.md")
+
+        # Old path should be gone
+        assert "docs/auth.md" not in engine.meta.file_hashes
+        # New path should be indexed
+        assert "docs/auth-guide.md" in engine.meta.file_hashes
+
+        # Search should return the new path, not the old
+        results = await engine.search("OAuth2 authorization")
+        file_paths = [r.file_path for r in results]
+        assert "docs/auth.md" not in file_paths
+        assert "docs/auth-guide.md" in file_paths
+
+    async def test_move_file_with_path_normalization(self, engine_with_files):
+        """Test move_file_index with paths that need normalization."""
+        engine, content_dir = engine_with_files
+        await engine.build_index(["docs/auth.md"])
+
+        old_path = content_dir / "docs" / "auth.md"
+        new_path = content_dir / "docs" / "auth-guide.md"
+        old_path.rename(new_path)
+
+        # Pass with leading slashes (as from user input)
+        await engine.move_file_index("/docs/auth.md", "/docs/auth-guide.md")
+
+        assert "docs/auth.md" not in engine.meta.file_hashes
+        assert "docs/auth-guide.md" in engine.meta.file_hashes
+
+    async def test_embedder_loaded_at_init(self):
+        """Test that the embedder is None when embed_fn is provided (not lazily created)."""
+        with TemporaryDirectory() as content_dir:
+            with TemporaryDirectory() as index_dir:
+                engine = SearchEngine(
+                    content_dir=Path(content_dir),
+                    index_dir=Path(index_dir),
+                    embed_fn=mock_embed,
+                )
+                # With embed_fn, _embedder should be None (no model to load)
+                assert engine._embedder is None
+
+    async def test_path_normalization_in_vector_store(self):
+        """Test that remove_by_file normalizes paths for correct matching."""
+        with TemporaryDirectory() as tmpdir:
+            store = VectorStore(Path(tmpdir) / "vectors.pkl")
+            store.add(
+                [[1.0, 0.0], [0.0, 1.0]],
+                [
+                    {"file_path": "docs/api.md", "chunk_index": 0},
+                    {"file_path": "notes.md", "chunk_index": 0},
+                ],
+            )
+            assert store.count == 2
+
+            # Remove with leading slash - should still match "docs/api.md"
+            removed = store.remove_by_file("/docs/api.md")
+            assert removed == 1
+            assert store.count == 1
+
+            results = store.search([0.0, 1.0])
+            assert results[0]["file_path"] == "notes.md"

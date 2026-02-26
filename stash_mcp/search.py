@@ -19,6 +19,22 @@ logger = logging.getLogger(__name__)
 MAX_CONTEXTUAL_DOCUMENT_CHARS = 150_000
 
 
+def _normalize_path(path: str) -> str:
+    """Normalize a file path for consistent matching.
+
+    Strips leading/trailing slashes and normalizes backslashes to forward slashes.
+    This ensures paths from different sources (MCP tools, REST API, UI, filesystem)
+    match correctly in the vector store.
+
+    Args:
+        path: The raw file path string.
+
+    Returns:
+        Normalized path string.
+    """
+    return path.replace("\\", "/").strip("/")
+
+
 @dataclass
 class ChunkMetadata:
     """Metadata for a single chunk in the vector store."""
@@ -124,8 +140,10 @@ class VectorStore:
         if not self._metadata:
             return 0
 
+        normalized = _normalize_path(file_path)
         keep_indices = [
-            i for i, m in enumerate(self._metadata) if m.get("file_path") != file_path
+            i for i, m in enumerate(self._metadata)
+            if _normalize_path(m.get("file_path", "")) != normalized
         ]
         removed = len(self._metadata) - len(keep_indices)
 
@@ -396,7 +414,7 @@ class SearchEngine:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-        # Validate embedding dependencies at init time so we fail fast
+        # Validate numpy dependency at init time so we fail fast
         # rather than crashing on first file operation.
         if self._embed_fn is None:
             try:
@@ -404,13 +422,6 @@ class SearchEngine:
             except ImportError:
                 raise RuntimeError(
                     "numpy is required for semantic search. "
-                    "Install with: pip install 'stash-mcp[search]'"
-                )
-            try:
-                from pydantic_ai import Embedder  # noqa: F401
-            except ImportError:
-                raise RuntimeError(
-                    "pydantic-ai is required for semantic search. "
                     "Install with: pip install 'stash-mcp[search]'"
                 )
 
@@ -432,6 +443,30 @@ class SearchEngine:
         self._indexing = False
         self._lock = asyncio.Lock()
 
+        # Eagerly initialise the embedder so the first search query is fast
+        self._embedder = self._create_embedder()
+
+    def _create_embedder(self):
+        """Create and return the embedding model instance, or None for custom embed_fn.
+
+        Returns:
+            Embedder instance, or None if a custom embed_fn is provided.
+
+        Raises:
+            RuntimeError: If pydantic-ai is not installed.
+        """
+        if self._embed_fn is not None:
+            return None
+        try:
+            from pydantic_ai import Embedder
+
+            return Embedder(self.embedder_model)
+        except ImportError:
+            raise RuntimeError(
+                "pydantic-ai is required for semantic search. "
+                "Install with: pip install 'stash-mcp[search]'"
+            )
+
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of document texts using the configured embedder.
 
@@ -443,17 +478,6 @@ class SearchEngine:
         """
         if self._embed_fn is not None:
             return await self._embed_fn(texts)
-
-        if self._embedder is None:
-            try:
-                from pydantic_ai import Embedder
-
-                self._embedder = Embedder(self.embedder_model)
-            except ImportError:
-                raise RuntimeError(
-                    "pydantic-ai is required for semantic search. "
-                    "Install with: pip install 'stash-mcp[search]'"
-                )
 
         result = await self._embedder.embed_documents(texts)
         return result.embeddings
@@ -473,17 +497,6 @@ class SearchEngine:
         if self._embed_fn is not None:
             result = await self._embed_fn([text])
             return result[0]
-
-        if self._embedder is None:
-            try:
-                from pydantic_ai import Embedder
-
-                self._embedder = Embedder(self.embedder_model)
-            except ImportError:
-                raise RuntimeError(
-                    "pydantic-ai is required for semantic search. "
-                    "Install with: pip install 'stash-mcp[search]'"
-                )
 
         result = await self._embedder.embed_query(text)
         return result.embeddings[0]
@@ -550,7 +563,8 @@ class SearchEngine:
 
         try:
             for rel_path in file_paths:
-                full_path = self.content_dir / rel_path
+                normalized = _normalize_path(rel_path)
+                full_path = self.content_dir / normalized
                 if not full_path.is_file():
                     continue
 
@@ -559,19 +573,19 @@ class SearchEngine:
                         full_path.read_text, encoding="utf-8"
                     )
                 except Exception as e:
-                    logger.warning(f"Could not read {rel_path}: {e}")
+                    logger.warning(f"Could not read {normalized}: {e}")
                     continue
 
                 content_h = _content_hash(content)
 
                 # Skip if unchanged
-                if self.meta.file_hashes.get(rel_path) == content_h:
-                    total_chunks += self.meta.chunk_counts.get(rel_path, 0)
+                if self.meta.file_hashes.get(normalized) == content_h:
+                    total_chunks += self.meta.chunk_counts.get(normalized, 0)
                     continue
 
                 async with self._lock:
                     chunks_added = await self._index_file_locked(
-                        rel_path, content=content
+                        normalized, content=content
                     )
                 total_chunks += chunks_added
                 files_since_save += 1
@@ -610,10 +624,11 @@ class SearchEngine:
             Number of chunks indexed.
         """
         # Remove old chunks for this file
-        self.store.remove_by_file(relative_path)
+        normalized_path = _normalize_path(relative_path)
+        self.store.remove_by_file(normalized_path)
 
         if content is None:
-            full_path = self.content_dir / relative_path
+            full_path = self.content_dir / normalized_path
             if not full_path.is_file():
                 return 0
             try:
@@ -621,7 +636,7 @@ class SearchEngine:
                     full_path.read_text, encoding="utf-8"
                 )
             except Exception as e:
-                logger.warning(f"Could not read {relative_path}: {e}")
+                logger.warning(f"Could not read {normalized_path}: {e}")
                 return 0
 
         chunks = _chunk_text_sliding_window(content, self.chunk_size, self.chunk_overlap)
@@ -641,7 +656,7 @@ class SearchEngine:
             texts_to_embed.append(embed_text)
 
             meta = ChunkMetadata(
-                file_path=relative_path,
+                file_path=normalized_path,
                 chunk_index=i,
                 content=chunk,
                 context=context,
@@ -652,8 +667,8 @@ class SearchEngine:
         embeddings = await self._embed(texts_to_embed)
         self.store.add(embeddings, metadata_list)
 
-        self.meta.file_hashes[relative_path] = content_h
-        self.meta.chunk_counts[relative_path] = len(chunks)
+        self.meta.file_hashes[normalized_path] = content_h
+        self.meta.chunk_counts[normalized_path] = len(chunks)
 
         return len(chunks)
 
@@ -684,14 +699,36 @@ class SearchEngine:
         Args:
             relative_path: Relative path to the file.
         """
+        normalized_path = _normalize_path(relative_path)
         async with self._lock:
-            removed = self.store.remove_by_file(relative_path)
-            self.meta.file_hashes.pop(relative_path, None)
-            self.meta.chunk_counts.pop(relative_path, None)
+            removed = self.store.remove_by_file(normalized_path)
+            self.meta.file_hashes.pop(normalized_path, None)
+            self.meta.chunk_counts.pop(normalized_path, None)
         await self.store.save_async()
         await self.meta.save_async(self.index_dir / "index_meta.json")
         if removed:
-            logger.info(f"Removed {removed} chunks for {relative_path}")
+            logger.info(f"Removed {removed} chunks for {normalized_path}")
+
+    async def move_file_index(self, old_path: str, new_path: str) -> None:
+        """Atomically remove old path and index new path under a single lock acquisition.
+
+        This prevents race conditions where two independent tasks for remove and
+        index could interleave with other operations.
+
+        Args:
+            old_path: Relative path of the file at its old location.
+            new_path: Relative path of the file at its new location.
+        """
+        old_normalized = _normalize_path(old_path)
+        async with self._lock:
+            removed = self.store.remove_by_file(old_normalized)
+            self.meta.file_hashes.pop(old_normalized, None)
+            self.meta.chunk_counts.pop(old_normalized, None)
+            if removed:
+                logger.info(f"Removed {removed} chunks for moved file {old_normalized}")
+            await self._index_file_locked(new_path)
+        await self.store.save_async()
+        await self.meta.save_async(self.index_dir / "index_meta.json")
 
     async def search(
         self,
