@@ -196,18 +196,32 @@ def _breadcrumbs_html(path: str) -> str:
     return f' <span class="sep">{_icon("chevron-right")}</span> '.join(items)
 
 
-def _render_markdown(content: str) -> str:
-    """Render markdown to HTML with extensions.
+def _render_markdown(content: str) -> tuple[str, str]:
+    """Render markdown to HTML with extensions. Returns (html, toc_html).
 
-    Raw HTML tags in content are escaped to prevent XSS.
+    Raw HTML in markdown is passed through by design — Stash-MCP stores
+    user-controlled content (personal knowledge base), so constructs like
+    <details>, <img>, and <div> in markdown files are intentionally supported.
+    Do not expose the UI to untrusted third-party content.
     """
-    safe_content = content.replace("<", "&lt;")
     converter = md.Markdown(extensions=[
         "fenced_code",
         "tables",
         "nl2br",
+        "toc",
+        "sane_lists",
+        "smarty",
     ])
-    return converter.convert(safe_content)
+    rendered = converter.convert(content)
+    return rendered, getattr(converter, "toc", "")
+
+
+def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """Sort entries: directories first, then README.md, then remaining files (all alpha)."""
+    dirs = [(n, d) for n, d in entries if d]
+    readme = [(n, d) for n, d in entries if not d and n.lower() == "readme.md"]
+    files = [(n, d) for n, d in entries if not d and n.lower() != "readme.md"]
+    return dirs + readme + files
 
 
 def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
@@ -216,8 +230,9 @@ def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") ->
         entries = filesystem.list_files(rel)
     except Exception:
         return ""
+    sorted_entries = _sort_entries(entries)
     parts: list[str] = []
-    for name, is_dir in entries:
+    for name, is_dir in sorted_entries:
         child = f"{rel}/{name}" if rel else name
         escaped = html.escape(name)
         if is_dir:
@@ -333,14 +348,34 @@ transition:color 150ms ease,border-color 150ms ease;white-space:nowrap;margin-bo
 
 .center-content{flex:1;padding:24px 32px;overflow-y:auto;display:flex;
 flex-direction:column;align-items:center;min-height:0}
-.center-inner{width:100%;max-width:900px;display:flex;flex-direction:column;flex:1;min-height:0}
+.center-inner{width:100%;display:flex;flex-direction:column;flex:1;min-height:0}
 
 .right-panel{width:280px;min-width:0;background:#272738;border-left:1px solid #313244;
-overflow-y:auto;padding:16px;flex-shrink:0;display:flex;flex-direction:column;
+flex-shrink:0;display:flex;flex-direction:column;overflow:hidden;
 transition:width 150ms ease,padding 150ms ease}
-.right-panel.collapsed{width:0;padding:0;overflow:hidden;border-left:none}
-.right-top{flex:1}
-.right-bottom{border-top:1px solid #313244;padding-top:16px;margin-top:16px}
+.right-panel.collapsed{width:0;overflow:hidden;border-left:none}
+.right-toc{flex:1;min-height:0;overflow-y:auto;padding:16px}
+.toc-heading{font-size:14px;font-weight:600;color:#7f849c;margin-bottom:12px;
+display:flex;align-items:center;gap:8px}
+.toc-nav .toc li{list-style:none}
+.toc-nav .toc a{display:block;padding:6px 12px;color:#7f849c;font-size:14px;
+text-decoration:none;border-left:2px solid transparent;border-radius:0 4px 4px 0;
+transition:color 150ms ease,background 150ms ease,border-color 150ms ease}
+.toc-nav .toc a:hover{color:#cdd6f4;background:rgba(148,226,213,0.05)}
+.toc-nav .toc a.active{color:#94e2d5;background:rgba(148,226,213,0.08);
+border-left-color:#94e2d5}
+.toc-nav .toc ul{padding-left:0;margin:0}
+.toc-nav .toc>ul>li>a{padding-left:12px}
+.toc-nav .toc>ul>li>ul>li>a{padding-left:28px}
+.toc-nav .toc>ul>li>ul>li>ul>li>a{padding-left:44px}
+.right-meta-accordion{flex-shrink:0;border-top:1px solid #313244}
+.meta-accordion-header{display:flex;align-items:center;justify-content:space-between;
+padding:14px 16px;font-size:15px;font-weight:600;color:#cdd6f4;cursor:pointer;list-style:none}
+.meta-accordion-header::-webkit-details-marker,.meta-accordion-header::marker{display:none}
+.meta-accordion-header .icon{transition:transform 150ms ease}
+.meta-accordion[open] .meta-accordion-header .icon{transform:rotate(90deg)}
+.meta-accordion-body{padding:0 16px 16px}
+.right-bottom{flex-shrink:0;border-top:1px solid #313244;padding:12px 16px}
 
 /* breadcrumbs */
 .breadcrumbs{font-size:13px;color:#7f849c;margin-bottom:16px;
@@ -371,7 +406,7 @@ border-bottom:1px solid #313244;font-weight:500}
 .file-table .dir a{color:#cdd6f4}
 
 /* viewer - typography for comfortable reading */
-.viewer-content{background:#181825;padding:24px 32px;border-radius:6px;overflow-x:auto;
+.viewer-content{background:transparent;padding:24px 32px;border-radius:6px;overflow-x:auto;
 font-size:18px;line-height:1.6;color:#cdd6f4;margin-top:12px;flex:1;width:100%}
 .viewer-content pre{font-family:'Monaco','Menlo','Ubuntu Mono',monospace;
 white-space:pre-wrap;word-wrap:break-word;margin:0}
@@ -480,6 +515,10 @@ h2{font-size:17px;color:#e0e4f0;margin-bottom:12px;font-weight:500}
 .empty-msg{color:#7f849c;font-style:italic;padding:20px 0;text-align:center}
 .error-msg{color:#f38ba8;background:rgba(243,139,168,0.08);padding:12px;
 border-radius:4px;border-left:3px solid #f38ba8;margin-bottom:12px}
+
+/* mermaid diagrams */
+.markdown-body .mermaid{background:#181825;padding:1.5rem;border-radius:6px;
+margin-bottom:1.5rem;display:flex;justify-content:center}
 """
 
 # ---------------------------------------------------------------------------
@@ -640,6 +679,61 @@ var _unsaved=false;
   _restoreTreeState();
   _trackTreeToggles();
 })();
+
+if(typeof hljs!=='undefined'){hljs.highlightAll();}
+
+if(typeof mermaid!=='undefined'){
+  mermaid.initialize({
+    startOnLoad:false,
+    theme:'dark',
+    themeVariables:{
+      primaryColor:'#94e2d5',
+      primaryTextColor:'#cdd6f4',
+      primaryBorderColor:'#313244',
+      lineColor:'#7f849c',
+      secondaryColor:'#272738',
+      tertiaryColor:'#1e1e2e',
+      background:'#181825',
+      mainBkg:'#272738',
+      nodeBorder:'#94e2d5',
+    }
+  });
+  document.querySelectorAll('pre code.language-mermaid').forEach(function(block){
+    var pre=block.parentElement;
+    var container=document.createElement('div');
+    container.className='mermaid';
+    container.textContent=block.textContent;
+    pre.parentElement.replaceChild(container,pre);
+  });
+  mermaid.run();
+}
+
+// Scroll-spy for TOC
+(function(){
+  var tocLinks=document.querySelectorAll('#toc-nav .toc a');
+  if(!tocLinks.length)return;
+  var viewer=document.querySelector('.center-content');
+  if(!viewer)return;
+  var linkMap={};
+  tocLinks.forEach(function(a){
+    var href=a.getAttribute('href');
+    if(href&&href.startsWith('#')){linkMap[href.slice(1)]=a;}
+  });
+  var headingIds=Object.keys(linkMap);
+  var currentActive=null;
+  var observer=new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if(entry.isIntersecting){
+        if(currentActive)currentActive.classList.remove('active');
+        var link=linkMap[entry.target.id];
+        if(link){link.classList.add('active');currentActive=link;}
+      }
+    });
+  },{root:viewer,rootMargin:'0px 0px -80% 0px',threshold:0});
+  headingIds.forEach(function(id){
+    var el=document.getElementById(id);if(el)observer.observe(el);
+  });
+})();
 """
 
 # ---------------------------------------------------------------------------
@@ -690,6 +784,10 @@ def _page(
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)} – Stash-MCP</title>
 <style>{_CSS}</style>
+<link rel="stylesheet" href="/static/vendor/github-dark.min.css">
+<script src="/static/vendor/highlight.min.js"></script>
+<script src="/static/vendor/languages/terraform.min.js"></script>
+<script src="/static/vendor/mermaid.min.js"></script>
 </head>
 <body>
 <div class="app">
@@ -781,6 +879,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 entries = filesystem.list_files(path)
             except Exception:
                 entries = []
+            entries = _sort_entries(entries)
             rows = ""
             for name, is_dir in entries:
                 child = f"{path}/{name}" if path else name
@@ -841,8 +940,9 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 return _page("Error", sidebar, center)
 
             escaped_content = html.escape(content)
+            toc_html = ""
             if path.endswith((".md", ".markdown")):
-                rendered = _render_markdown(content)
+                rendered, toc_html = _render_markdown(content)
                 center = (
                     f'<div class="viewer-content markdown-body">{rendered}</div>'
                 )
@@ -851,7 +951,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                     f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
                 )
 
-            # right panel — metadata + actions
+            # right panel — TOC (markdown only) + metadata accordion + actions
             try:
                 st = full.stat()
                 size = _human_size(st.st_size)
@@ -863,9 +963,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 mtime = "—"
             words = len(content.split())
             chars = len(content)
-            right = (
-                '<div class="right-top">'
-                '<h2 class="meta-heading">Document Metadata</h2>'
+            _meta_body = (
                 '<div class="meta-field">'
                 '<div class="meta-field-label">File Path</div>'
                 f'<div class="meta-field-path">{html.escape(path)}</div>'
@@ -889,8 +987,8 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 f'<div class="meta-stat-row"><span class="label">Words:</span>'
                 f'<span class="value">{words}</span></div>'
                 '</div>'
-                "</div>"
-                '<div class="right-bottom">'
+            )
+            _action_stack = (
                 '<div class="action-stack">'
                 f'<button class="btn-rename" onclick="showRename(this)">'
                 f'{_icon("pen-line")} Rename / Move</button>'
@@ -913,8 +1011,34 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 '<button type="button" class="btn-confirm-cancel" '
                 'onclick="hideConfirm(this)">Cancel</button>'
                 "</div></form>"
-                "</div></div>"
+                "</div>"
             )
+            if toc_html:
+                # Markdown with headings: scrollable TOC + collapsed accordion
+                right = (
+                    '<div class="right-toc">'
+                    f'<h2 class="toc-heading">{_icon("list")} On This Page</h2>'
+                    f'<nav class="toc-nav" id="toc-nav">{toc_html}</nav>'
+                    '</div>'
+                    '<div class="right-meta-accordion">'
+                    '<details class="meta-accordion">'
+                    f'<summary class="meta-accordion-header">Document Metadata {_icon("chevron-right")}</summary>'
+                    f'<div class="meta-accordion-body">{_meta_body}</div>'
+                    '</details>'
+                    '</div>'
+                    f'<div class="right-bottom">{_action_stack}</div>'
+                )
+            else:
+                # Non-markdown or no headings: no TOC, metadata expanded
+                right = (
+                    '<div class="right-meta-accordion">'
+                    '<details class="meta-accordion" open>'
+                    f'<summary class="meta-accordion-header">Document Metadata {_icon("chevron-right")}</summary>'
+                    f'<div class="meta-accordion-body">{_meta_body}</div>'
+                    '</details>'
+                    '</div>'
+                    f'<div class="right-bottom">{_action_stack}</div>'
+                )
             return _page(
                 PurePosixPath(path).name, sidebar, center, right, mode="view", path=path,
             )
@@ -988,7 +1112,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
             "</div></form>"
         )
 
-        # right panel — metadata + actions (same as browse view)
+        # right panel — no TOC in edit view; metadata expanded by default
         full = filesystem._resolve_path(path)
         try:
             st = full.stat()
@@ -1001,9 +1125,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
             mtime = "—"
         words = len(content.split())
         chars = len(content)
-        right = (
-            '<div class="right-top">'
-            '<h2 class="meta-heading">Document Metadata</h2>'
+        _meta_body = (
             '<div class="meta-field">'
             '<div class="meta-field-label">File Path</div>'
             f'<div class="meta-field-path">{html.escape(path)}</div>'
@@ -1027,7 +1149,14 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
             f'<div class="meta-stat-row"><span class="label">Words:</span>'
             f'<span class="value">{words}</span></div>'
             '</div>'
-            "</div>"
+        )
+        right = (
+            '<div class="right-meta-accordion">'
+            '<details class="meta-accordion" open>'
+            f'<summary class="meta-accordion-header">Document Metadata {_icon("chevron-right")}</summary>'
+            f'<div class="meta-accordion-body">{_meta_body}</div>'
+            '</details>'
+            '</div>'
             '<div class="right-bottom">'
             '<div class="action-stack">'
             f'<button class="btn-rename" onclick="showRename(this)">'

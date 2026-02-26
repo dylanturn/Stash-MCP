@@ -77,6 +77,18 @@
 
 ## Quick Start
 
+### Claude Desktop Extension (One-Click Install)
+
+The easiest way to use Stash-MCP with Claude Desktop is via the `.mcpb` Desktop Extension:
+
+1. Download `stash-mcp.mcpb` from the [latest release](https://github.com/dylanturn/Stash-MCP/releases/latest)
+2. Double-click the downloaded `.mcpb` file — Claude Desktop will open the extension installer
+3. In the installer, set your **Content Directory** (the folder where your documents live)
+4. Optionally enable **Git Tracking** or **Semantic Search**
+5. Click **Install** — the Stash icon will appear alongside tool calls in Claude
+
+> **Requirements:** [uv](https://docs.astral.sh/uv/getting-started/installation/) must be installed and available on your PATH.
+
 ### Using Docker Compose (Recommended)
 
 ```bash
@@ -98,15 +110,77 @@ The server will be available at:
 
 Your content will be persisted in the `./content` directory.
 
-### MCP Client Configuration
+### Connecting MCP Clients
 
-To connect Claude Desktop (or other MCP clients) to the running container, add the following to your MCP client configuration:
+Once the server is running (via Docker Compose or locally), connect Claude Desktop or any other MCP client using one of the methods below.
+
+**Option 1: Claude Desktop via `mcp-proxy` (Recommended for Desktop)**
+
+`mcp-proxy` bridges Claude Desktop's stdio transport to Stash-MCP's Streamable HTTP endpoint:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "uvx",
+      "args": [
+        "mcp-proxy",
+        "--transport",
+        "streamablehttp",
+        "http://localhost:8000/mcp"
+      ]
+    }
+  }
+}
+```
+
+> **Note:** `uvx` must be on the PATH that Claude Desktop sees. On macOS, GUI apps may not inherit your shell PATH — use the full path if needed (e.g. `/Users/you/.local/bin/uvx`).
+
+Alternatively, use `npx mcp-remote` if you have Node.js but not uv:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
+    }
+  }
+}
+```
+
+**Option 2: Native Streamable HTTP (Claude Code, Cursor, etc.)**
+
+Clients that support Streamable HTTP natively can connect directly:
 
 ```json
 {
   "mcpServers": {
     "stash": {
       "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+Claude Code CLI:
+```bash
+claude mcp add --transport http stash http://localhost:8000/mcp
+```
+
+**Option 3: Local stdio (no container)**
+
+Run the server as a stdio subprocess directly from your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/Stash-MCP", "-m", "stash_mcp.server"],
+      "env": {
+        "STASH_CONTENT_ROOT": "/path/to/your/content"
+      }
     }
   }
 }
@@ -119,31 +193,13 @@ To connect Claude Desktop (or other MCP clients) to the running container, add t
 uv sync
 
 # Run the server
-uv run -m stash_mcp.server
+uv run -m stash_mcp.main
 
 # Run tests
 uv run pytest
 
 # Run linter
 uv run ruff check .
-```
-
-### Claude Desktop / MCP Client
-
-Add to your MCP client configuration:
-
-```json
-{
-  "mcpServers": {
-    "stash": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/Stash-MCP", "-m", "stash_mcp.server"],
-      "env": {
-        "STASH_CONTENT_DIR": "/path/to/your/content"
-      }
-    }
-  }
-}
 ```
 
 ## Usage
@@ -241,7 +297,7 @@ Set `STASH_GIT_TRACKING=true` to enable git-aware features. The content director
 
 **What it enables:**
 
-- Three additional MCP tools: `history_content`, `diff_content`, and `blame_content`
+- Three additional MCP tools: `log_content`, `diff_content`, and `blame_content`
 - Search results are enriched with `last_changed_at`, `changed_by`, and `commit_message` metadata
 - All writes (when `STASH_READ_ONLY=false`) are automatically committed to the local git repo and gated behind transactions (see [Transactions](#transactions) below)
 
@@ -275,7 +331,7 @@ When `STASH_GIT_TRACKING=true` and `STASH_READ_ONLY=false`, all writes are gated
 
 1. Call `start_content_transaction` — acquires an exclusive write lock and returns a `transaction_id`
 2. Perform any number of `create_content`, `update_content`, `delete_content`, or `move_content` calls — all changes are staged
-3. Call `end_content_transaction` with the `transaction_id` — commits all staged changes to git and releases the lock
+3. Call `commit_content_transaction` with the `transaction_id` — commits all staged changes to git and releases the lock
 4. If something goes wrong, call `abort_content_transaction` — rolls back all staged changes and releases the lock
 
 **Concurrency:** Only one transaction can be active at a time. A second agent attempting `start_content_transaction` will wait up to `STASH_TRANSACTION_LOCK_WAIT` seconds for the lock to be released. If the active transaction is not ended or aborted within `STASH_TRANSACTION_TIMEOUT` seconds, it is automatically aborted.

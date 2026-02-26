@@ -6,9 +6,15 @@ services:
       - "8000:8000"
     volumes:
       - ./content:/data/content
+      - stash-models:/data/models
+      - stash-index:/data/.stash-index
     environment:
       - STASH_CONTENT_ROOT=/data/content
       - STASH_HOST=0.0.0.0
       - STASH_PORT=8000
       - STASH_SEARCH_ENABLED=false
     restart: unless-stopped
+
+volumes:
+  stash-models:
+  stash-index:

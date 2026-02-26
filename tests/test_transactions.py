@@ -417,7 +417,7 @@ class TestMCPTransactionTools:
             mcp, tm, fs = self._make_mcp(Path(tmpdir))
             tool_names = {t.name for t in await mcp.list_tools()}
             assert "start_content_transaction" in tool_names
-            assert "end_content_transaction" in tool_names
+            assert "commit_content_transaction" in tool_names
             assert "abort_content_transaction" in tool_names
 
     @pytest.mark.asyncio
@@ -494,11 +494,11 @@ class TestMCPTransactionTools:
                 start_tool = await mcp.get_tool("start_content_transaction")
                 await start_tool.run({})
 
-                replace_tool = await mcp.get_tool("replace_content")
+                overwrite_tool = await mcp.get_tool("overwrite_content")
                 import hashlib
 
                 sha = hashlib.sha256(original.encode()).hexdigest()
-                await replace_tool.run(
+                await overwrite_tool.run(
                     {"path": "README.md", "content": "corrupted", "sha": sha}
                 )
 
@@ -534,7 +534,7 @@ class TestModeMatrix:
                 mcp = create_mcp_server(fs, git_backend=git)
             tool_names = {t.name for t in await mcp.list_tools()}
             assert "start_content_transaction" not in tool_names
-            assert "end_content_transaction" not in tool_names
+            assert "commit_content_transaction" not in tool_names
             assert "abort_content_transaction" not in tool_names
 
     @pytest.mark.asyncio
@@ -564,3 +564,152 @@ class TestModeMatrix:
                 mcp = create_mcp_server(fs, git_backend=git)
             tool_names = {t.name for t in await mcp.list_tools()}
             assert "start_content_transaction" not in tool_names
+
+
+# ---------------------------------------------------------------------------
+# get_transaction_status / list_content_transactions
+# ---------------------------------------------------------------------------
+
+
+class TestGetTransactionStatus:
+    """Unit tests for TransactionManager.get_transaction_status()."""
+
+    @pytest.mark.asyncio
+    async def test_no_active_transaction(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, _ = _make_tm(Path(tmpdir))
+            status = tm.get_transaction_status()
+            assert status == {"has_active_transaction": False}
+
+    @pytest.mark.asyncio
+    async def test_no_active_transaction_with_session_id(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, _ = _make_tm(Path(tmpdir))
+            status = tm.get_transaction_status("some-session")
+            assert status == {"has_active_transaction": False}
+
+    @pytest.mark.asyncio
+    async def test_active_transaction_owned_by_caller(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, _ = _make_tm(Path(tmpdir))
+            txn_id = await tm.start_transaction("session-1", timeout=30, lock_wait=5)
+            try:
+                status = tm.get_transaction_status("session-1")
+                assert status["has_active_transaction"] is True
+                assert status["transaction_id"] == txn_id
+                assert status["session_id"] == "session-1"
+                assert status["owned_by_current_session"] is True
+            finally:
+                await tm.abort_transaction("session-1")
+
+    @pytest.mark.asyncio
+    async def test_active_transaction_owned_by_other_session(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, _ = _make_tm(Path(tmpdir))
+            txn_id = await tm.start_transaction("session-1", timeout=30, lock_wait=5)
+            try:
+                status = tm.get_transaction_status("session-2")
+                assert status["has_active_transaction"] is True
+                assert status["transaction_id"] == txn_id
+                assert status["session_id"] == "session-1"
+                assert status["owned_by_current_session"] is False
+            finally:
+                await tm.abort_transaction("session-1")
+
+    @pytest.mark.asyncio
+    async def test_no_owned_by_field_without_session_id(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, _ = _make_tm(Path(tmpdir))
+            await tm.start_transaction("session-1", timeout=30, lock_wait=5)
+            try:
+                status = tm.get_transaction_status()
+                assert "owned_by_current_session" not in status
+            finally:
+                await tm.abort_transaction("session-1")
+
+
+class TestListContentTransactionsTool:
+    """Integration tests for the list_content_transactions MCP tool."""
+
+    def _make_mcp(self, tmpdir: Path):
+        from stash_mcp.git_backend import GitBackend
+        from stash_mcp.mcp_server import create_mcp_server
+
+        _init_repo(tmpdir)
+        fs = FileSystem(tmpdir)
+        git = GitBackend(tmpdir)
+        tm = TransactionManager(fs, git)
+        with (
+            patch("stash_mcp.mcp_server.Config.READ_ONLY", False),
+            patch("stash_mcp.mcp_server.Config.GIT_SYNC_ENABLED", False),
+        ):
+            mcp = create_mcp_server(tm, git_backend=git)
+        return mcp, tm
+
+    def _mock_context(self, session_obj=None):
+        from fastmcp.server.context import Context, _current_context
+
+        ctx = MagicMock(spec=Context)
+        ctx.session = session_obj or MagicMock()
+        ctx.session.send_resource_updated = AsyncMock()
+        ctx.send_resource_list_changed = AsyncMock()
+        token = _current_context.set(ctx)
+        return ctx, token
+
+    @pytest.mark.asyncio
+    async def test_tool_registered(self):
+        with TemporaryDirectory() as tmpdir:
+            mcp, _ = self._make_mcp(Path(tmpdir))
+            tool_names = {t.name for t in await mcp.list_tools()}
+            assert "list_content_transactions" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_returns_no_active_transaction(self):
+        with TemporaryDirectory() as tmpdir:
+            mcp, _ = self._make_mcp(Path(tmpdir))
+            ctx, token = self._mock_context()
+            try:
+                tool = await mcp.get_tool("list_content_transactions")
+                result = await tool.run({})
+                text = str(result.content)
+                assert "has_active_transaction" in text
+                assert "false" in text.lower()
+            finally:
+                from fastmcp.server.context import _current_context
+                _current_context.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_returns_active_transaction_owned_by_caller(self):
+        with TemporaryDirectory() as tmpdir:
+            mcp, tm = self._make_mcp(Path(tmpdir))
+            session_obj = MagicMock()
+            ctx, token = self._mock_context(session_obj)
+            try:
+                start_tool = await mcp.get_tool("start_content_transaction")
+                await start_tool.run({})
+
+                list_tool = await mcp.get_tool("list_content_transactions")
+                result = await list_tool.run({})
+                text = str(result.content)
+                assert "has_active_transaction" in text
+                assert "true" in text.lower()
+                assert "owned_by_current_session" in text
+            finally:
+                from fastmcp.server.context import _current_context
+                _current_context.reset(token)
+                if tm._active_session is not None:
+                    await tm.abort_transaction(tm._active_session)
+
+    @pytest.mark.asyncio
+    async def test_not_registered_when_read_only(self):
+        with TemporaryDirectory() as tmpdir:
+            from stash_mcp.git_backend import GitBackend
+            from stash_mcp.mcp_server import create_mcp_server
+
+            _init_repo(Path(tmpdir))
+            fs = FileSystem(Path(tmpdir))
+            git = GitBackend(Path(tmpdir))
+            with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
+                mcp = create_mcp_server(fs, git_backend=git)
+            tool_names = {t.name for t in await mcp.list_tools()}
+            assert "list_content_transactions" not in tool_names

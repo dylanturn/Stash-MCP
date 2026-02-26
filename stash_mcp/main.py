@@ -4,8 +4,10 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
+from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api import create_api
@@ -221,6 +223,10 @@ def create_app():
     ui_router = create_ui_router(filesystem, search_engine=search_engine)
     app.include_router(ui_router)
 
+    # Serve vendored static assets (highlight.js, mermaid.js, etc.)
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
     # Mount FastMCP server onto FastAPI for streamable HTTP transport
     app.mount("/mcp", mcp_http_app)
 
@@ -251,18 +257,28 @@ def create_app():
                 logger.debug("No running event loop; skipping search index update")
                 return
             if event_type in ("content_created", "content_updated"):
-                task = loop.create_task(search_engine.index_file(path))
+                task = loop.create_task(
+                    search_engine.index_file(path), name=f"index-{path}"
+                )
                 task.add_done_callback(_task_done_callback)
             elif event_type == "content_deleted":
-                task = loop.create_task(search_engine.remove_file(path))
+                task = loop.create_task(
+                    search_engine.remove_file(path), name=f"remove-{path}"
+                )
                 task.add_done_callback(_task_done_callback)
             elif event_type == "content_moved":
                 source_path = kwargs.get("source_path", "")
                 if source_path:
-                    task = loop.create_task(search_engine.remove_file(source_path))
+                    task = loop.create_task(
+                        search_engine.move_file_index(source_path, path),
+                        name=f"move-{source_path}->{path}",
+                    )
                     task.add_done_callback(_task_done_callback)
-                task = loop.create_task(search_engine.index_file(path))
-                task.add_done_callback(_task_done_callback)
+                else:
+                    task = loop.create_task(
+                        search_engine.index_file(path), name=f"index-{path}"
+                    )
+                    task.add_done_callback(_task_done_callback)
 
     add_listener(on_content_changed)
 

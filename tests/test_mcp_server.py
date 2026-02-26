@@ -8,7 +8,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from stash_mcp.filesystem import FileNotFoundError, FileSystem
-from stash_mcp.mcp_server import EditOperation, FileEditOperation, _get_mime_type, create_mcp_server
+from stash_mcp.mcp_server import (
+    EditOperation,
+    FileEditOperation,
+    MoveOperation,
+    _build_heading_tree,
+    _get_mime_type,
+    create_mcp_server,
+    parse_markdown_structure,
+)
 
 
 def _sha(content: str) -> str:
@@ -120,12 +128,17 @@ async def test_list_tools(mcp_server):
     tool_names = list(tools.keys())
     assert "create_content" in tool_names
     assert "read_content" in tool_names
-    assert "replace_content" in tool_names
+    assert "overwrite_content" in tool_names
     assert "edit_content" in tool_names
-    assert "multi_edit_content" in tool_names
+    assert "edit_content_batch" in tool_names
     assert "delete_content" in tool_names
     assert "list_content" in tool_names
+    assert "read_content_batch" in tool_names
     assert "move_content" in tool_names
+    assert "move_content_directory" in tool_names
+    assert "move_content_batch" in tool_names
+    assert "inspect_content_structure" in tool_names
+    assert "inspect_content_structure_batch" in tool_names
 
 
 async def test_create_content_tool(temp_fs, mock_context):
@@ -171,9 +184,215 @@ async def test_read_content_tool_not_found(mcp_server):
         await tool.run({"path": "nonexistent.md"})
 
 
-async def test_replace_content_tool(mcp_server, temp_fs, mock_context):
-    """Test replace_content tool updates an existing file."""
-    tool = await mcp_server.get_tool("replace_content")
+async def test_read_content_tool_returns_truncated_false_by_default(mcp_server):
+    """Test read_content returns truncated=False when max_lines is not provided."""
+    tool = await mcp_server.get_tool("read_content")
+    result = await tool.run({"path": "README.md"})
+    text = str(result.content)
+    assert "truncated" in text
+    assert '"truncated":false' in text
+
+
+async def test_read_content_tool_max_lines_truncates(temp_fs):
+    """Test read_content truncates content to max_lines lines."""
+    temp_fs.write_file("multi.md", "line1\nline2\nline3\nline4\nline5")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 2})
+    text = str(result.content)
+    assert "line1" in text
+    assert "line2" in text
+    assert "line3" not in text
+    assert '"truncated":true' in text  # truncated=True
+
+
+async def test_read_content_tool_max_lines_sha_is_full_file(temp_fs):
+    """Test read_content SHA is computed on full file even when truncated."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 1})
+    text = str(result.content)
+    # SHA must match the full file, not just the first line
+    assert _sha(content) in text
+
+
+async def test_read_content_tool_max_lines_no_truncation_when_within_limit(temp_fs):
+    """Test read_content returns full content when max_lines >= total lines."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 10})
+    text = str(result.content)
+    assert "line1" in text
+    assert "line2" in text
+    assert "line3" in text
+    assert '"truncated":false' in text  # truncated=False
+
+
+async def test_read_content_tool_max_lines_exact_line_count(temp_fs):
+    """Test read_content with max_lines equal to total line count."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 3})
+    text = str(result.content)
+    assert "line3" in text
+    assert '"truncated":false' in text  # truncated=False
+
+
+async def test_read_content_tool_max_lines_one(temp_fs):
+    """Test read_content with max_lines=1 returns only the first line."""
+    temp_fs.write_file("multi.md", "first\nsecond\nthird")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+    result = await tool.run({"path": "multi.md", "max_lines": 1})
+    text = str(result.content)
+    assert "first" in text
+    assert "second" not in text
+    assert '"truncated":true' in text  # truncated=True
+
+
+async def test_read_content_tool_max_lines_zero_raises(mcp_server):
+    """Test read_content raises ValueError when max_lines=0."""
+    tool = await mcp_server.get_tool("read_content")
+    with pytest.raises(ValueError, match="max_lines must be a positive integer"):
+        await tool.run({"path": "README.md", "max_lines": 0})
+
+
+# --- read_content_batch tests ---
+
+
+async def test_read_content_batch_happy_path(mcp_server):
+    """Test read_content_batch returns content and sha for multiple files."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["README.md", "data.json"]})
+    text = str(result.content)
+    assert "# Root README" in text
+    assert _sha("# Root README") in text
+    assert "data.json" in text
+    assert _sha('{"key": "value"}') in text
+
+
+async def test_read_content_batch_partial_failure(mcp_server):
+    """Test read_content_batch returns error for missing files without aborting."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["README.md", "nonexistent.md"]})
+    text = str(result.content)
+    # Existing file should be returned successfully
+    assert "# Root README" in text
+    assert _sha("# Root README") in text
+    # Missing file should have an error entry
+    assert "nonexistent.md" in text
+    assert "error" in text
+
+
+async def test_read_content_batch_empty_list(mcp_server):
+    """Test read_content_batch rejects empty path list."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    with pytest.raises(ValueError, match="At least one path is required"):
+        await tool.run({"paths": []})
+
+
+async def test_read_content_batch_over_limit(mcp_server):
+    """Test read_content_batch rejects more than 10 paths."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    with pytest.raises(ValueError, match="Maximum 10 files per batch read"):
+        await tool.run({"paths": [f"file{i}.md" for i in range(11)]})
+
+
+async def test_read_content_batch_duplicate_paths(mcp_server):
+    """Test read_content_batch rejects duplicate paths."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    with pytest.raises(ValueError, match="Duplicate paths are not allowed"):
+        await tool.run({"paths": ["README.md", "README.md"]})
+
+
+async def test_read_content_batch_order_preserved(mcp_server, temp_fs):
+    """Test read_content_batch returns results in the same order as input paths."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["data.json", "README.md", "docs/README.md"]})
+    # Extract result order from the content string
+    text = str(result.content)
+    pos_data = text.find("data.json")
+    pos_root = text.find('"README.md"')
+    pos_docs = text.find("docs/README.md")
+    assert pos_data < pos_root < pos_docs
+
+
+async def test_read_content_batch_all_missing(mcp_server):
+    """Test read_content_batch with all missing files returns errors for each."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["missing1.md", "missing2.md"]})
+    text = str(result.content)
+    assert "missing1.md" in text
+    assert "missing2.md" in text
+    # No content should be present, only errors
+    assert "error" in text
+
+
+async def test_read_content_batch_truncated_false_by_default(mcp_server):
+    """Test read_content_batch includes truncated=False by default."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["README.md"]})
+    text = str(result.content)
+    assert "truncated" in text
+    assert '"truncated":false' in text
+
+
+async def test_read_content_batch_max_lines_truncates(temp_fs):
+    """Test read_content_batch truncates each file to max_lines."""
+    temp_fs.write_file("a.md", "line1\nline2\nline3\nline4")
+    temp_fs.write_file("b.md", "alpha\nbeta\ngamma")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["a.md", "b.md"], "max_lines": 2})
+    text = str(result.content)
+    assert "line1" in text
+    assert "line2" in text
+    assert "line3" not in text
+    assert "alpha" in text
+    assert "beta" in text
+    assert "gamma" not in text
+    assert '"truncated":true' in text  # at least one truncated=True
+
+
+async def test_read_content_batch_max_lines_sha_is_full_file(temp_fs):
+    """Test read_content_batch SHA is computed on full file even when truncated."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["multi.md"], "max_lines": 1})
+    text = str(result.content)
+    assert _sha(content) in text
+
+
+async def test_read_content_batch_max_lines_zero_raises(mcp_server):
+    """Test read_content_batch raises ValueError when max_lines=0."""
+    tool = await mcp_server.get_tool("read_content_batch")
+    with pytest.raises(ValueError, match="max_lines must be a positive integer"):
+        await tool.run({"paths": ["README.md"], "max_lines": 0})
+
+
+async def test_read_content_batch_max_lines_no_truncation_when_within_limit(temp_fs):
+    """Test read_content_batch returns full content when max_lines >= total lines."""
+    content = "line1\nline2\nline3"
+    temp_fs.write_file("multi.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["multi.md"], "max_lines": 100})
+    text = str(result.content)
+    assert "line3" in text
+    assert '"truncated":false' in text  # truncated=False
+
+
+async def test_overwrite_content_tool(mcp_server, temp_fs, mock_context):
+    """Test overwrite_content tool updates an existing file."""
+    tool = await mcp_server.get_tool("overwrite_content")
     result = await tool.run({"path": "README.md", "content": "# Updated", "sha": _sha("# Root README")})
     assert "Updated: README.md" in str(result.content)
     assert temp_fs.read_file("README.md") == "# Updated"
@@ -261,9 +480,9 @@ async def test_create_sends_list_changed(temp_fs, mock_context):
     mock_context.send_resource_list_changed.assert_not_awaited()
 
 
-async def test_replace_existing_sends_resource_updated(mcp_server, mock_context):
-    """Test that replacing README.md sends resource_updated notification."""
-    tool = await mcp_server.get_tool("replace_content")
+async def test_overwrite_existing_sends_resource_updated(mcp_server, mock_context):
+    """Test that overwriting README.md sends resource_updated notification."""
+    tool = await mcp_server.get_tool("overwrite_content")
 
     # Replace README.md should send resource_updated
     await tool.run({"path": "README.md", "content": "# Changed", "sha": _sha("# Root README")})
@@ -279,18 +498,18 @@ async def test_replace_existing_sends_resource_updated(mcp_server, mock_context)
     mock_context.session.send_resource_updated.assert_not_awaited()
 
 
-async def test_replace_content_rejects_nonexistent_file(temp_fs, mock_context):
-    """Test that replace_content errors when file does not exist."""
+async def test_overwrite_content_rejects_nonexistent_file(temp_fs, mock_context):
+    """Test that overwrite_content errors when file does not exist."""
     mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("replace_content")
+    tool = await mcp.get_tool("overwrite_content")
 
     with pytest.raises(FileNotFoundError):
         await tool.run({"path": "nonexistent.md", "content": "# New", "sha": "abc"})
 
 
-async def test_replace_content_rejects_wrong_sha(mcp_server, temp_fs, mock_context):
-    """Test that replace_content errors when SHA does not match."""
-    tool = await mcp_server.get_tool("replace_content")
+async def test_overwrite_content_rejects_wrong_sha(mcp_server, temp_fs, mock_context):
+    """Test that overwrite_content errors when SHA does not match."""
+    tool = await mcp_server.get_tool("overwrite_content")
 
     with pytest.raises(ValueError, match="SHA mismatch"):
         await tool.run({"path": "README.md", "content": "# Changed", "sha": "wrong"})
@@ -351,27 +570,250 @@ async def test_move_sends_list_changed(mcp_server, temp_fs, mock_context):
     mock_context.send_resource_list_changed.assert_not_awaited()
 
 
-async def test_resources_filtered_by_include_patterns(temp_fs):
-    """Test that only README.md files matching patterns are registered as MCP resources."""
-    # Write files of different types
-    temp_fs.write_file("docs/README.md", "# Docs README")
+async def test_move_content_directory_tool(mcp_server, temp_fs, mock_context):
+    """Test move_content_directory tool moves an entire directory tree."""
+    temp_fs.write_file("srcdir/a.txt", "A")
+    temp_fs.write_file("srcdir/sub/b.txt", "B")
+    tool = await mcp_server.get_tool("move_content_directory")
+    result = await tool.run({"source_path": "srcdir", "dest_path": "dstdir"})
+    content = result.content
+    assert not (temp_fs.content_dir / "srcdir").exists()
+    assert temp_fs.file_exists("dstdir/a.txt")
+    assert temp_fs.file_exists("dstdir/sub/b.txt")
+    assert any("files_moved" in str(c) for c in content)
+
+
+async def test_move_content_directory_tool_with_readme(mcp_server, temp_fs, mock_context):
+    """Test that move_content_directory updates resource registry for README.md files."""
+    temp_fs.write_file("docs/README.md", "# Docs")
     temp_fs.write_file("docs/guide.md", "# Guide")
-    temp_fs.write_file("notes/README.md", "# Notes README")
-    temp_fs.write_file("data.json", '{"key": "value"}')
+    # Register the README.md resource first by creating a fresh server
+    from stash_mcp.mcp_server import create_mcp_server
+    mcp = create_mcp_server(temp_fs)
+    resources_before = await mcp._list_resources()
+    uris_before = {str(r.uri) for r in resources_before}
+    assert "stash://docs/README.md" in uris_before
 
-    # Create a new filesystem with patterns, using the same content directory
-    filtered_fs = FileSystem(temp_fs.content_dir, include_patterns=["docs/**/*.md"])
-    mcp = create_mcp_server(filtered_fs)
+    tool = await mcp.get_tool("move_content_directory")
+    await tool.run({"source_path": "docs", "dest_path": "archive/docs"})
 
-    resources = await mcp.get_resources()
-    uris = list(resources.keys())
+    resources_after = await mcp._list_resources()
+    uris_after = {str(r.uri) for r in resources_after}
+    assert "stash://docs/README.md" not in uris_after
+    assert "stash://archive/docs/README.md" in uris_after
+    mock_context.send_resource_list_changed.assert_awaited()
 
-    # Only docs/README.md should be registered (it's both README.md and matches pattern)
-    assert "stash://docs/README.md" in uris
-    # These should NOT be registered (either not README.md or don't match pattern)
-    assert "stash://docs/guide.md" not in uris  # Not README.md
-    assert "stash://notes/README.md" not in uris  # Doesn't match pattern
-    assert "stash://data.json" not in uris  # Not README.md
+
+async def test_move_content_directory_tool_no_notification_for_non_readme(temp_fs, mock_context):
+    """Test that move_content_directory does not send notification when no README.md is involved."""
+    temp_fs.write_file("srcdir/file.txt", "content")
+    from stash_mcp.mcp_server import create_mcp_server
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_directory")
+    await tool.run({"source_path": "srcdir", "dest_path": "dstdir"})
+    mock_context.send_resource_list_changed.assert_not_awaited()
+
+
+async def test_move_content_directory_tool_into_itself(mcp_server, temp_fs, mock_context):
+    """Test that move_content_directory rejects moving a directory into a subdirectory of itself."""
+    temp_fs.write_file("src/file.txt", "content")
+    tool = await mcp_server.get_tool("move_content_directory")
+    with pytest.raises(Exception, match="subdirectory of itself"):
+        await tool.run({"source_path": "src", "dest_path": "src/child/src"})
+
+
+async def test_move_content_directory_tool_dest_exists(mcp_server, temp_fs, mock_context):
+    """Test that move_content_directory rejects an already-existing destination."""
+    temp_fs.write_file("src/file.txt", "content")
+    temp_fs.write_file("dst/other.txt", "other")
+    tool = await mcp_server.get_tool("move_content_directory")
+    with pytest.raises(Exception, match="already exists"):
+        await tool.run({"source_path": "src", "dest_path": "dst"})
+
+
+# --- move_content_batch tests ---
+
+
+async def test_move_content_batch_happy_path(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch moves multiple files successfully."""
+    temp_fs.write_file("a.txt", "A")
+    temp_fs.write_file("b.txt", "B")
+    tool = await mcp_server.get_tool("move_content_batch")
+    result = await tool.run({
+        "moves": [
+            MoveOperation(source_path="a.txt", dest_path="moved_a.txt"),
+            MoveOperation(source_path="b.txt", dest_path="moved_b.txt"),
+        ],
+    })
+    text = str(result.content)
+    assert "moved_a.txt" in text
+    assert "moved_b.txt" in text
+    assert not temp_fs.file_exists("a.txt")
+    assert not temp_fs.file_exists("b.txt")
+    assert temp_fs.file_exists("moved_a.txt")
+    assert temp_fs.file_exists("moved_b.txt")
+    assert temp_fs.read_file("moved_a.txt") == "A"
+    assert temp_fs.read_file("moved_b.txt") == "B"
+
+
+async def test_move_content_batch_empty_list(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects an empty list."""
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="At least one move operation is required"):
+        await tool.run({"moves": []})
+
+
+async def test_move_content_batch_over_limit(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects more than 10 moves."""
+    tool = await mcp_server.get_tool("move_content_batch")
+    moves = [MoveOperation(source_path=f"src{i}.txt", dest_path=f"dst{i}.txt") for i in range(11)]
+    with pytest.raises(ValueError, match="Maximum 10 moves per batch"):
+        await tool.run({"moves": moves})
+
+
+async def test_move_content_batch_duplicate_sources(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects duplicate source paths."""
+    temp_fs.write_file("a.txt", "A")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Duplicate source paths"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="b.txt"),
+                MoveOperation(source_path="a.txt", dest_path="c.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_duplicate_destinations(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects duplicate destination paths."""
+    temp_fs.write_file("a.txt", "A")
+    temp_fs.write_file("b.txt", "B")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Duplicate destination paths"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="dest.txt"),
+                MoveOperation(source_path="b.txt", dest_path="dest.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_source_dest_overlap(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects paths that appear as both source and destination."""
+    temp_fs.write_file("a.txt", "A")
+    temp_fs.write_file("b.txt", "B")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="both source and destination"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="b.txt"),
+                MoveOperation(source_path="b.txt", dest_path="c.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_missing_source(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects a missing source file."""
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Source file not found"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="nonexistent.txt", dest_path="dest.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_dest_exists(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch rejects when destination already exists."""
+    temp_fs.write_file("src.txt", "source")
+    temp_fs.write_file("dst.txt", "destination")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Destination already exists"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="src.txt", dest_path="dst.txt"),
+            ],
+        })
+
+
+async def test_move_content_batch_validation_all_or_nothing(mcp_server, temp_fs, mock_context):
+    """Test move_content_batch aborts all moves when any validation fails."""
+    temp_fs.write_file("a.txt", "A")
+    tool = await mcp_server.get_tool("move_content_batch")
+    with pytest.raises(ValueError):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="moved_a.txt"),
+                MoveOperation(source_path="nonexistent.txt", dest_path="moved_b.txt"),
+            ],
+        })
+    # a.txt should NOT have been moved
+    assert temp_fs.file_exists("a.txt")
+    assert not temp_fs.file_exists("moved_a.txt")
+
+
+async def test_move_content_batch_resource_registration(temp_fs, mock_context):
+    """Test move_content_batch updates resource registry for README.md files."""
+    temp_fs.write_file("README.md", "# Root")
+    temp_fs.write_file("docs/README.md", "# Docs")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_batch")
+    await tool.run({
+        "moves": [
+            MoveOperation(source_path="README.md", dest_path="archive/README.md"),
+            MoveOperation(source_path="docs/README.md", dest_path="archive/docs/README.md"),
+        ],
+    })
+    resources = await mcp._list_resources()
+    uris = {str(r.uri) for r in resources}
+    assert "stash://README.md" not in uris
+    assert "stash://docs/README.md" not in uris
+    assert "stash://archive/README.md" in uris
+    assert "stash://archive/docs/README.md" in uris
+
+
+async def test_move_content_batch_sends_resource_list_changed(temp_fs, mock_context):
+    """Test move_content_batch sends resource_list_changed when README.md is involved."""
+    temp_fs.write_file("README.md", "# Root")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_batch")
+    await tool.run({
+        "moves": [
+            MoveOperation(source_path="README.md", dest_path="archive/README.md"),
+        ],
+    })
+    mock_context.send_resource_list_changed.assert_awaited()
+
+
+async def test_move_content_batch_no_notification_for_non_readme(temp_fs, mock_context):
+    """Test move_content_batch does not send notification when no README.md is involved."""
+    temp_fs.write_file("a.txt", "A")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_batch")
+    await tool.run({
+        "moves": [
+            MoveOperation(source_path="a.txt", dest_path="moved_a.txt"),
+        ],
+    })
+    mock_context.send_resource_list_changed.assert_not_awaited()
+
+
+async def test_move_content_batch_emits_events(temp_fs, mock_context):
+    """Test move_content_batch emits CONTENT_MOVED events for each file."""
+    temp_fs.write_file("a.txt", "A")
+    temp_fs.write_file("b.txt", "B")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("move_content_batch")
+    with patch("stash_mcp.mcp_server.emit") as mock_emit:
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="a.txt", dest_path="moved_a.txt"),
+                MoveOperation(source_path="b.txt", dest_path="moved_b.txt"),
+            ],
+        })
+    assert mock_emit.call_count == 2
+    mock_emit.assert_any_call("content_moved", "moved_a.txt", source_path="a.txt")
+    mock_emit.assert_any_call("content_moved", "moved_b.txt", source_path="b.txt")
 
 
 async def test_tools_emit_events(mcp_server, temp_fs, mock_context):
@@ -384,8 +826,8 @@ async def test_tools_emit_events(mcp_server, temp_fs, mock_context):
 
         mock_emit.reset_mock()
 
-        # Test replace (existing file)
-        tool = await mcp_server.get_tool("replace_content")
+        # Test overwrite (existing file)
+        tool = await mcp_server.get_tool("overwrite_content")
         await tool.run({"path": "evt.md", "content": "updated", "sha": _sha("event test")})
         mock_emit.assert_called_with("content_updated", "evt.md")
 
@@ -532,12 +974,12 @@ async def test_edit_content_emits_event(mcp_server, temp_fs, mock_context):
         mock_emit.assert_called_with("content_updated", "README.md")
 
 
-# --- multi_edit_content tests ---
+# --- edit_content_batch tests ---
 
 
-async def test_multi_edit_content_two_files(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content edits two files successfully."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_two_files(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch edits two files successfully."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     result = await tool.run({
         "edit_operations": [
             FileEditOperation(
@@ -558,9 +1000,9 @@ async def test_multi_edit_content_two_files(mcp_server, temp_fs, mock_context):
     assert "ok" in text
 
 
-async def test_multi_edit_content_atomicity_bad_sha(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content aborts all if one file has bad SHA."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_atomicity_bad_sha(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch aborts all if one file has bad SHA."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     with pytest.raises(ValueError, match="SHA mismatch"):
         await tool.run({
             "edit_operations": [
@@ -581,9 +1023,9 @@ async def test_multi_edit_content_atomicity_bad_sha(mcp_server, temp_fs, mock_co
     assert temp_fs.read_file("data.json") == '{"key": "value"}'
 
 
-async def test_multi_edit_content_atomicity_bad_edit(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content aborts all if one file's edit fails."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_atomicity_bad_edit(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch aborts all if one file's edit fails."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     with pytest.raises(ValueError, match="old_string not found"):
         await tool.run({
             "edit_operations": [
@@ -604,9 +1046,9 @@ async def test_multi_edit_content_atomicity_bad_edit(mcp_server, temp_fs, mock_c
     assert temp_fs.read_file("data.json") == '{"key": "value"}'
 
 
-async def test_multi_edit_content_duplicate_paths(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content rejects duplicate file paths."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_duplicate_paths(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch rejects duplicate file paths."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     with pytest.raises(ValueError, match="Duplicate"):
         await tool.run({
             "edit_operations": [
@@ -624,9 +1066,9 @@ async def test_multi_edit_content_duplicate_paths(mcp_server, temp_fs, mock_cont
         })
 
 
-async def test_multi_edit_content_returns_per_file_results(mcp_server, temp_fs, mock_context):
-    """Test multi_edit_content returns correct per-file result structure."""
-    tool = await mcp_server.get_tool("multi_edit_content")
+async def test_edit_content_batch_returns_per_file_results(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch returns correct per-file result structure."""
+    tool = await mcp_server.get_tool("edit_content_batch")
     result = await tool.run({
         "edit_operations": [
             FileEditOperation(
@@ -652,15 +1094,17 @@ async def test_multi_edit_content_returns_per_file_results(mcp_server, temp_fs, 
 
 WRITE_TOOL_NAMES = {
     "create_content",
-    "replace_content",
+    "overwrite_content",
     "edit_content",
-    "multi_edit_content",
+    "edit_content_batch",
     "delete_content",
     "move_content",
+    "move_content_directory",
+    "move_content_batch",
 }
 # search_content is omitted here because it is only registered when a
 # search_engine is passed to create_mcp_server(); it is not a write tool.
-READ_TOOL_NAMES = {"read_content", "list_content"}
+READ_TOOL_NAMES = {"read_content", "read_content_batch", "list_content"}
 
 
 async def test_read_only_mode_omits_write_tools(temp_fs):
@@ -719,3 +1163,254 @@ async def test_server_name_used_in_mcp_server(temp_fs):
     with patch("stash_mcp.mcp_server.Config.SERVER_NAME", "test-server"):
         mcp = create_mcp_server(temp_fs)
         assert mcp.name == "test-server"
+
+
+# --- inspect_content_structure tests ---
+
+
+def test_parse_markdown_structure_typical_doc():
+    """Test parsing a typical markdown document with nested headings."""
+    content = "# Title\n\n## Section 1\n\n### Subsection\n\n## Section 2\n"
+    sections = parse_markdown_structure(content)
+    assert len(sections) == 1
+    assert sections[0]["heading"] == "Title"
+    assert sections[0]["level"] == 1
+    assert len(sections[0]["children"]) == 2
+    assert sections[0]["children"][0]["heading"] == "Section 1"
+    assert sections[0]["children"][0]["children"][0]["heading"] == "Subsection"
+    assert sections[0]["children"][1]["heading"] == "Section 2"
+
+
+def test_parse_markdown_structure_no_headings():
+    """Test parsing a file with no headings returns empty list."""
+    content = "Just some plain text.\nNo headings here.\n"
+    sections = parse_markdown_structure(content)
+    assert sections == []
+
+
+def test_parse_markdown_structure_skips_code_blocks():
+    """Test that headings inside fenced code blocks are skipped."""
+    content = "# Real Heading\n\n```\n# Fake Heading\n```\n\n## Another Real\n"
+    sections = parse_markdown_structure(content)
+    assert len(sections) == 1
+    assert sections[0]["heading"] == "Real Heading"
+    assert len(sections[0]["children"]) == 1
+    assert sections[0]["children"][0]["heading"] == "Another Real"
+
+
+def test_parse_markdown_structure_level_skipping():
+    """Test that level skipping (h1 -> h3) is handled gracefully."""
+    content = "# Top\n\n### Deep\n\n## Middle\n"
+    sections = parse_markdown_structure(content)
+    assert len(sections) == 1
+    assert sections[0]["heading"] == "Top"
+    # h3 nests under h1 because there's no h2
+    assert len(sections[0]["children"]) == 2
+    assert sections[0]["children"][0]["heading"] == "Deep"
+    assert sections[0]["children"][0]["level"] == 3
+    assert sections[0]["children"][1]["heading"] == "Middle"
+
+
+def test_parse_markdown_structure_line_numbers():
+    """Test that line numbers are 1-based and accurate."""
+    content = "# First\nsome text\n## Second\n"
+    sections = parse_markdown_structure(content)
+    assert sections[0]["line_number"] == 1
+    assert sections[0]["children"][0]["line_number"] == 3
+
+
+def test_build_heading_tree_multiple_top_level():
+    """Test building a tree with multiple top-level headings."""
+    flat = [
+        {"heading": "A", "level": 1, "line_number": 1, "children": []},
+        {"heading": "B", "level": 1, "line_number": 5, "children": []},
+    ]
+    tree = _build_heading_tree(flat)
+    assert len(tree) == 2
+    assert tree[0]["heading"] == "A"
+    assert tree[1]["heading"] == "B"
+
+
+async def test_inspect_content_structure_tool_typical(temp_fs):
+    """Test inspect_content_structure returns correct nested structure."""
+    content = "# Title\n\n## Section 1\n\n### Subsection\n\n## Section 2\n"
+    temp_fs.write_file("doc.md", content)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure")
+    result = await tool.run({"path": "doc.md"})
+    text = str(result.content)
+    assert "Title" in text
+    assert "Section 1" in text
+    assert "Subsection" in text
+    assert "Section 2" in text
+
+
+async def test_inspect_content_structure_tool_title_field(temp_fs):
+    """Test inspect_content_structure returns title from first h1."""
+    temp_fs.write_file("titled.md", "# My Title\n\n## Sub\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure")
+    result = await tool.run({"path": "titled.md"})
+    text = str(result.content)
+    assert '"title":"My Title"' in text or "My Title" in text
+
+
+async def test_inspect_content_structure_tool_no_h1_title_null(temp_fs):
+    """Test inspect_content_structure returns null title when no h1 exists."""
+    temp_fs.write_file("no_h1.md", "## Section\n\n### Subsection\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure")
+    result = await tool.run({"path": "no_h1.md"})
+    text = str(result.content)
+    assert '"title":null' in text
+
+
+async def test_inspect_content_structure_tool_rejects_non_markdown(temp_fs):
+    """Test inspect_content_structure raises ValueError for non-markdown files."""
+    temp_fs.write_file("data.json", '{"key": "value"}')
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure")
+    with pytest.raises(ValueError, match="only supports markdown files"):
+        await tool.run({"path": "data.json"})
+
+
+async def test_inspect_content_structure_tool_file_not_found(temp_fs):
+    """Test inspect_content_structure raises FileNotFoundError for missing files."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure")
+    with pytest.raises(FileNotFoundError):
+        await tool.run({"path": "missing.md"})
+
+
+async def test_inspect_content_structure_tool_path_in_result(temp_fs):
+    """Test inspect_content_structure includes the path in the result."""
+    temp_fs.write_file("docs/guide.md", "# Guide\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure")
+    result = await tool.run({"path": "docs/guide.md"})
+    text = str(result.content)
+    assert "docs/guide.md" in text
+
+
+# --- inspect_content_structure_batch tests ---
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_happy_path(temp_fs):
+    """Test inspect_content_structure_batch returns structure for multiple files."""
+    temp_fs.write_file("a.md", "# Alpha\n\n## Section A\n")
+    temp_fs.write_file("b.md", "# Beta\n\n## Section B\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    result = await tool.run({"paths": ["a.md", "b.md"]})
+    text = str(result.content)
+    assert "Alpha" in text
+    assert "Beta" in text
+    assert "Section A" in text
+    assert "Section B" in text
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_empty_list(temp_fs):
+    """Test inspect_content_structure_batch rejects empty path list."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    with pytest.raises(ValueError, match="At least one path is required"):
+        await tool.run({"paths": []})
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_over_limit(temp_fs):
+    """Test inspect_content_structure_batch rejects more than 10 paths."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    paths = [f"file{i}.md" for i in range(11)]
+    with pytest.raises(ValueError, match="Maximum 10 files per batch"):
+        await tool.run({"paths": paths})
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_duplicate_paths(temp_fs):
+    """Test inspect_content_structure_batch rejects duplicate paths."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    with pytest.raises(ValueError, match="Duplicate paths are not allowed"):
+        await tool.run({"paths": ["a.md", "a.md"]})
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_partial_failure(temp_fs):
+    """Test inspect_content_structure_batch returns error for missing files without aborting."""
+    temp_fs.write_file("exists.md", "# Exists\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    result = await tool.run({"paths": ["exists.md", "missing.md"]})
+    text = str(result.content)
+    assert "Exists" in text
+    assert "missing.md" in text
+    assert "error" in text.lower()
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_non_markdown(temp_fs):
+    """Test inspect_content_structure_batch returns error for non-markdown files without aborting."""
+    temp_fs.write_file("doc.md", "# Doc\n")
+    temp_fs.write_file("data.json", '{"key": "value"}')
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    result = await tool.run({"paths": ["doc.md", "data.json"]})
+    text = str(result.content)
+    assert "Doc" in text
+    assert "only supports markdown files" in text
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_order_preserved(temp_fs):
+    """Test inspect_content_structure_batch preserves result order matching input paths."""
+    temp_fs.write_file("first.md", "# First\n")
+    temp_fs.write_file("second.md", "# Second\n")
+    temp_fs.write_file("third.md", "# Third\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    import json
+    result = await tool.run({"paths": ["third.md", "first.md", "second.md"]})
+    data = json.loads(str(result.content[0].text))
+    paths = [r["path"] for r in data["results"]]
+    assert paths == ["third.md", "first.md", "second.md"]
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_title_field(temp_fs):
+    """Test inspect_content_structure_batch extracts title from first h1."""
+    temp_fs.write_file("titled.md", "# My Title\n\n## Sub\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    result = await tool.run({"paths": ["titled.md"]})
+    text = str(result.content)
+    assert "My Title" in text
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_no_h1_title_null(temp_fs):
+    """Test inspect_content_structure_batch returns null title when no h1 exists."""
+    temp_fs.write_file("no_h1.md", "## Section\n\n### Subsection\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    import json
+    result = await tool.run({"paths": ["no_h1.md"]})
+    data = json.loads(str(result.content[0].text))
+    assert data["results"][0]["title"] is None
+
+
+@pytest.mark.anyio
+async def test_inspect_content_structure_batch_all_missing(temp_fs):
+    """Test inspect_content_structure_batch returns errors for all missing files."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("inspect_content_structure_batch")
+    import json
+    result = await tool.run({"paths": ["missing1.md", "missing2.md"]})
+    data = json.loads(str(result.content[0].text))
+    for r in data["results"]:
+        assert r["title"] is None
+        assert r["sections"] is None
+        assert r["error"] is not None

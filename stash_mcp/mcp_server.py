@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
@@ -9,6 +10,7 @@ from pathlib import PurePosixPath
 from fastmcp import FastMCP
 from fastmcp.resources import FunctionResource
 from fastmcp.server.context import Context
+from mcp.types import ToolAnnotations
 from pydantic import AnyUrl, BaseModel, Field
 
 from .config import Config
@@ -30,11 +32,18 @@ class EditOperation(BaseModel):
 
 
 class FileEditOperation(BaseModel):
-    """Edits targeting a single file, used by multi_edit_content."""
+    """Edits targeting a single file, used by edit_content_batch."""
 
     file_path: str = Field(description="File path relative to content root")
     sha: str = Field(description="SHA-256 hex digest of the current file content")
     edits: list[EditOperation] = Field(description="Ordered list of edits to apply")
+
+
+class MoveOperation(BaseModel):
+    """A single file move operation."""
+
+    source_path: str = Field(description="Current file path relative to content root")
+    dest_path: str = Field(description="New file path relative to content root")
 
 
 # Mime type mapping for common extensions
@@ -120,6 +129,54 @@ def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
     return content
 
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+_FENCE_RE = re.compile(r"^```")
+
+
+def _build_heading_tree(flat: list[dict]) -> list[dict]:
+    """Convert a flat list of headings into a nested tree."""
+    root: list[dict] = []
+    stack: list[dict] = []
+
+    for heading in flat:
+        while stack and stack[-1]["level"] >= heading["level"]:
+            stack.pop()
+
+        if stack:
+            stack[-1]["children"].append(heading)
+        else:
+            root.append(heading)
+
+        stack.append(heading)
+
+    return root
+
+
+def parse_markdown_structure(content: str) -> list[dict]:
+    """Parse markdown content and return a nested heading structure."""
+    in_code_block = False
+    flat_headings: list[dict] = []
+
+    for line_num, line in enumerate(content.splitlines(), start=1):
+        if _FENCE_RE.match(line.strip()):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        match = _HEADING_RE.match(line.strip())
+        if match:
+            level = len(match.group(1))
+            text = match.group(2).strip()
+            flat_headings.append({
+                "heading": text,
+                "level": level,
+                "line_number": line_num,
+                "children": [],
+            })
+
+    return _build_heading_tree(flat_headings)
+
+
 def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=None) -> FastMCP:
     """Create and configure the FastMCP server.
 
@@ -191,8 +248,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         if not _is_resource_file(path):
             return False
         uri_key = f"stash://{path}"
-        removed = mcp._resource_manager._resources.pop(uri_key, None)
-        return removed is not None
+        try:
+            # fastmcp 3.x: use public local_provider API
+            mcp.local_provider.remove_resource(uri_key)
+            return True
+        except AttributeError:
+            # fastmcp 2.x: ResourceManager exposes _resources dict directly
+            return mcp._resource_manager._resources.pop(uri_key, None) is not None
+        except KeyError:
+            return False
 
     # Resource template for dynamic access (resources/templates/list)
     @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")
@@ -211,7 +275,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     if not Config.READ_ONLY:
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Create file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                openWorldHint=False,
+            )
+        )
         async def create_content(
             path: str,
             content: str,
@@ -235,8 +306,16 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             logger.info(f"Created: {path}")
             return f"Created: {path}"
 
-        @mcp.tool()
-        async def replace_content(
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Overwrite file content",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            )
+        )
+        async def overwrite_content(
             path: str,
             content: str,
             sha: str,
@@ -270,7 +349,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             logger.info(f"Updated: {path}")
             return f"Updated: {path}"
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Edit file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            )
+        )
         async def edit_content(
             file_path: str,
             sha: str,
@@ -307,8 +394,16 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             new_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
             return {"path": file_path, "result": "ok", "new_sha": new_sha}
 
-        @mcp.tool()
-        async def multi_edit_content(
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Edit multiple files",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            )
+        )
+        async def edit_content_batch(
             edit_operations: list[FileEditOperation],
             ctx: Context,
         ) -> dict:
@@ -326,7 +421,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             # Reject duplicate file paths
             paths = [op.file_path for op in edit_operations]
             if len(paths) != len(set(paths)):
-                raise ValueError("Duplicate file_path entries are not allowed in a single multi_edit_content call.")
+                raise ValueError("Duplicate file_path entries are not allowed in a single edit_content_batch call.")
 
             # Phase 1: read all files and validate SHAs
             originals: dict[str, str] = {}
@@ -359,7 +454,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
             return {"results": results}
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Delete file",
+                readOnlyHint=False,
+                destructiveHint=True,
+                openWorldHint=False,
+            )
+        )
         async def delete_content(
             path: str,
             sha: str,
@@ -390,9 +492,16 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     # --- Read-only tools (always registered) ---
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Read file content",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
     async def read_content(
         path: str,
+        max_lines: int | None = None,
     ) -> dict:
         """
         Read and return the contents of a file along with its SHA-256 hash.
@@ -400,14 +509,86 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         Args:
             path: File path relative to content root
+            max_lines: Optional maximum number of lines to return from the
+                beginning of the file. If omitted, returns the full file.
         Returns:
-            A dict with 'content' (file text) and 'sha' (SHA-256 hex digest)
+            A dict with 'content' (file text), 'sha' (SHA-256 hex digest of
+            the FULL file), and 'truncated' (bool)
         """
         content = filesystem.read_file(path)
         sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        return {"content": content, "sha": sha}
+        truncated = False
+        if max_lines is not None:
+            if max_lines < 1:
+                raise ValueError("max_lines must be a positive integer.")
+            lines = content.splitlines(keepends=True)
+            if len(lines) > max_lines:
+                content = "".join(lines[:max_lines])
+                truncated = True
+        return {"content": content, "sha": sha, "truncated": truncated}
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Read multiple files",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def read_content_batch(
+        paths: list[str],
+        max_lines: int | None = None,
+    ) -> dict:
+        """Read multiple files and return their contents with SHA-256 hashes.
+
+        Reads up to 10 files in a single call. Each file's content and SHA
+        are returned so they can be used with update/delete operations.
+
+        Args:
+            paths: List of file paths relative to content root (max 10)
+            max_lines: Optional maximum number of lines to return from the
+                beginning of each file. If omitted, returns full content.
+        Returns:
+            A dict with 'results' list, each containing 'path', 'content',
+            'sha', 'truncated', and 'error' (null on success)
+        """
+        if not paths:
+            raise ValueError("At least one path is required.")
+        if len(paths) > 10:
+            raise ValueError(f"Maximum 10 files per batch read. Got {len(paths)}.")
+        if len(paths) != len(set(paths)):
+            raise ValueError("Duplicate paths are not allowed in a single batch read.")
+        if max_lines is not None and max_lines < 1:
+            raise ValueError("max_lines must be a positive integer.")
+
+        results = []
+        for path in paths:
+            try:
+                content = filesystem.read_file(path)
+                sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                truncated = False
+                if max_lines is not None:
+                    lines = content.splitlines(keepends=True)
+                    if len(lines) > max_lines:
+                        content = "".join(lines[:max_lines])
+                        truncated = True
+                results.append({
+                    "path": path, "content": content, "sha": sha,
+                    "truncated": truncated, "error": None,
+                })
+            except (FileNotFoundError, InvalidPathError) as exc:
+                results.append({
+                    "path": path, "content": None, "sha": None,
+                    "truncated": False, "error": str(exc),
+                })
+        return {"results": results}
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="List files and directories",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
     async def list_content(
         path: str = "",
         recursive: bool = False,
@@ -435,9 +616,112 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 return f"Empty directory: '{path or '/'}'"
             return "\n".join(lines)
 
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Inspect content structure",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def inspect_content_structure(
+        path: str,
+    ) -> dict:
+        """Read a markdown file and return its document structure based on headings.
+
+        Parses the heading hierarchy (h1-h6) and returns a nested outline of
+        the document. Useful for understanding document organization before
+        reading full content.
+
+        Args:
+            path: File path relative to content root (must be a .md or .markdown file)
+        Returns:
+            A dict with 'path', 'title' (first h1 if present), and 'sections'
+            (nested list of heading entries)
+        """
+        suffix = PurePosixPath(path).suffix.lower()
+        if suffix not in {".md", ".markdown"}:
+            raise ValueError(
+                f"inspect_content_structure only supports markdown files (.md, .markdown). Got: {path}"
+            )
+        content = filesystem.read_file(path)
+        sections = parse_markdown_structure(content)
+        title = None
+        for heading in sections:
+            if heading["level"] == 1:
+                title = heading["heading"]
+                break
+        return {"path": path, "title": title, "sections": sections}
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Inspect content structure (batch)",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def inspect_content_structure_batch(
+        paths: list[str],
+    ) -> dict:
+        """Return the heading structure of multiple markdown files.
+
+        Parses up to 10 markdown files and returns their heading hierarchies.
+        Useful for scanning a documentation tree to understand content organization
+        across multiple files.
+
+        Args:
+            paths: List of markdown file paths relative to content root (max 10)
+        Returns:
+            A dict with 'results' list, each containing the path, title, sections,
+            and error (null on success)
+        """
+        if len(paths) == 0:
+            raise ValueError("At least one path is required.")
+        if len(paths) > 10:
+            raise ValueError(f"Maximum 10 files per batch. Got {len(paths)}.")
+        if len(paths) != len(set(paths)):
+            raise ValueError("Duplicate paths are not allowed in a single batch call.")
+
+        results = []
+        for path in paths:
+            try:
+                suffix = PurePosixPath(path).suffix.lower()
+                if suffix not in (".md", ".markdown"):
+                    raise ValueError(
+                        f"inspect_content_structure only supports markdown files "
+                        f"(.md, .markdown). Got: {path}"
+                    )
+                content = filesystem.read_file(path)
+                sections = parse_markdown_structure(content)
+                title = None
+                for s in sections:
+                    if s["level"] == 1:
+                        title = s["heading"]
+                        break
+                results.append({
+                    "path": path,
+                    "title": title,
+                    "sections": sections,
+                    "error": None,
+                })
+            except (FileNotFoundError, InvalidPathError, ValueError) as exc:
+                results.append({
+                    "path": path,
+                    "title": None,
+                    "sections": None,
+                    "error": str(exc),
+                })
+        return {"results": results}
+
     if not Config.READ_ONLY:
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Move or rename file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                openWorldHint=False,
+            )
+        )
         async def move_content(
             source_path: str,
             dest_path: str,
@@ -460,11 +744,137 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             logger.info(f"Moved: {source_path} -> {dest_path}")
             return f"Moved: {source_path} -> {dest_path}"
 
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Move content directory",
+                readOnlyHint=False,
+                destructiveHint=False,
+                openWorldHint=False,
+            )
+        )
+        async def move_content_directory(
+            source_path: str,
+            dest_path: str,
+            ctx: Context,
+        ) -> dict:
+            """Move or rename an entire directory tree.
+
+            Moves all files and subdirectories from source_path to dest_path.
+            The destination must not already exist.
+
+            Args:
+                source_path: Current directory path relative to content root
+                dest_path: New directory path relative to content root
+            Returns:
+                A dict with 'source', 'destination', and 'files_moved' count
+            """
+            moved_files = filesystem.move_directory(source_path, dest_path)
+
+            # Handle resource registration changes for any README.md files
+            resources_changed = False
+            for old_path, new_path in moved_files:
+                if _unregister_resource(old_path):
+                    resources_changed = True
+                if _register_resource(new_path):
+                    resources_changed = True
+                emit(CONTENT_MOVED, new_path, source_path=old_path)
+
+            if resources_changed:
+                await ctx.send_resource_list_changed()
+
+            logger.info(f"Moved directory: {source_path} -> {dest_path} ({len(moved_files)} files)")
+            return {
+                "source": source_path,
+                "destination": dest_path,
+                "files_moved": len(moved_files),
+            }
+
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Move multiple files",
+                readOnlyHint=False,
+                destructiveHint=False,
+                openWorldHint=False,
+            )
+        )
+        async def move_content_batch(
+            moves: list[MoveOperation],
+            ctx: Context,
+        ) -> dict:
+            """Move or rename multiple files in a single operation.
+
+            All validations run before any moves — if any move fails validation
+            the entire operation is aborted and no files are moved.
+
+            Args:
+                moves: List of move operations (max 10), each with source_path and dest_path
+            Returns:
+                A dict with 'results' list containing source, destination, and status per file
+            """
+            if len(moves) == 0:
+                raise ValueError("At least one move operation is required.")
+            if len(moves) > 10:
+                raise ValueError(f"Maximum 10 moves per batch. Got {len(moves)}.")
+
+            sources = [m.source_path for m in moves]
+            if len(sources) != len(set(sources)):
+                raise ValueError("Duplicate source paths are not allowed in a single batch move.")
+
+            dests = [m.dest_path for m in moves]
+            if len(dests) != len(set(dests)):
+                raise ValueError(
+                    "Duplicate destination paths are not allowed in a single batch move."
+                )
+
+            source_set = set(sources)
+            dest_set = set(dests)
+            overlap = source_set & dest_set
+            if overlap:
+                raise ValueError(
+                    f"Paths cannot appear as both source and destination: {overlap}. "
+                    "Use intermediate paths for swap operations."
+                )
+
+            for m in moves:
+                if not filesystem.file_exists(m.source_path):
+                    raise ValueError(f"Source file not found: {m.source_path}")
+                dst = filesystem._resolve_path(m.dest_path)
+                if dst.exists():
+                    raise ValueError(f"Destination already exists: {m.dest_path}")
+
+            results = []
+            resources_changed = False
+
+            for m in moves:
+                filesystem.move_file(m.source_path, m.dest_path)
+                if _unregister_resource(m.source_path):
+                    resources_changed = True
+                if _register_resource(m.dest_path):
+                    resources_changed = True
+                emit(CONTENT_MOVED, m.dest_path, source_path=m.source_path)
+                logger.info(f"Moved: {m.source_path} -> {m.dest_path}")
+                results.append({
+                    "source": m.source_path,
+                    "destination": m.dest_path,
+                    "result": "ok",
+                })
+
+            if resources_changed:
+                await ctx.send_resource_list_changed()
+
+            return {"results": results}
+
     # --- Search tool (conditional) ---
 
     if search_engine is not None:
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Search content",
+                readOnlyHint=True,
+                openWorldHint=False,
+            )
+        )
         async def search_content(
             query: str,
             max_results: int = 5,
@@ -513,8 +923,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     if git_backend is not None:
 
-        @mcp.tool()
-        async def history_content(
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="Log file history",
+                readOnlyHint=True,
+                openWorldHint=False,
+            )
+        )
+        async def log_content(
             path: str,
             max_count: int = 20,
         ) -> str:
@@ -538,7 +954,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 )
             return "\n".join(lines)
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="View file changes",
+                readOnlyHint=True,
+                openWorldHint=False,
+            )
+        )
         async def diff_content(
             path: str,
             ref: str | None = None,
@@ -555,7 +977,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
             return await asyncio.to_thread(git_backend.diff, path, ref)
 
-        @mcp.tool()
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                title="View file blame",
+                readOnlyHint=True,
+                openWorldHint=False,
+            )
+        )
         async def blame_content(
             path: str,
             start_line: int | None = None,
@@ -594,15 +1022,22 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         if tm is not None:
 
-            @mcp.tool()
+            @mcp.tool(
+                annotations=ToolAnnotations(
+                    title="Start transaction",
+                    readOnlyHint=False,
+                    destructiveHint=False,
+                    openWorldHint=False,
+                )
+            )
             async def start_content_transaction(ctx: Context) -> str:
                 """Begin a write transaction and return its UUID.
 
                 Acquires the global transaction lock.  All subsequent mutating
-                tool calls (create_content, replace_content, edit_content,
-                multi_edit_content, delete_content, move_content) on this
+                tool calls (create_content, overwrite_content, edit_content,
+                edit_content_batch, delete_content, move_content) on this
                 session will be part of the transaction.  Call
-                end_content_transaction to commit or abort_content_transaction
+                commit_content_transaction to commit or abort_content_transaction
                 to discard.
 
                 Returns:
@@ -619,8 +1054,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     raise ValueError(str(exc))
                 return txn_id
 
-            @mcp.tool()
-            async def end_content_transaction(
+            @mcp.tool(
+                annotations=ToolAnnotations(
+                    title="Commit transaction",
+                    readOnlyHint=False,
+                    destructiveHint=False,
+                    openWorldHint=False,
+                )
+            )
+            async def commit_content_transaction(
                 message: str,
                 ctx: Context,
                 author: str | None = None,
@@ -649,7 +1091,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     raise ValueError(str(exc))
                 return f"Transaction committed: {message}"
 
-            @mcp.tool()
+            @mcp.tool(
+                annotations=ToolAnnotations(
+                    title="Abort transaction",
+                    readOnlyHint=False,
+                    destructiveHint=True,
+                    idempotentHint=True,
+                    openWorldHint=False,
+                )
+            )
             async def abort_content_transaction(ctx: Context) -> str:
                 """Abort the active transaction and discard all uncommitted changes.
 
@@ -665,5 +1115,28 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 except TransactionError as exc:
                     raise ValueError(str(exc))
                 return "Transaction aborted."
+
+            @mcp.tool(
+                annotations=ToolAnnotations(
+                    title="List transactions",
+                    readOnlyHint=True,
+                    openWorldHint=False,
+                )
+            )
+            async def list_content_transactions(ctx: Context) -> dict:
+                """List active content transactions.
+
+                Returns the current transaction state including whether a
+                transaction is active, its ID, which session owns it, and
+                whether this session is the owner.  Useful for agent
+                retry/recovery scenarios where the agent needs to know if a
+                transaction is still open before attempting to start a new one.
+
+                Returns:
+                    A dict with 'has_active_transaction' (bool) and optional
+                    transaction details.
+                """
+                session_id = str(id(ctx.session))
+                return tm.get_transaction_status(session_id)
 
     return mcp
