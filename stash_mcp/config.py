@@ -69,6 +69,13 @@ class Config:
         os.getenv("STASH_MODEL_CACHE_DIR", "/data/models")
     )
 
+    # Git clone-on-startup
+    GIT_CLONE_URL: str | None = os.getenv("STASH_GIT_CLONE_URL")
+    GIT_CLONE_BRANCH: str = os.getenv("STASH_GIT_CLONE_BRANCH", "main")
+    GIT_CLONE_TOKEN: str | None = os.getenv(
+        "STASH_GIT_CLONE_TOKEN", os.getenv("STASH_GIT_SYNC_TOKEN")
+    )
+
     # Git tracking
     GIT_TRACKING: bool = os.getenv("STASH_GIT_TRACKING", "false").lower() == "true"
 
