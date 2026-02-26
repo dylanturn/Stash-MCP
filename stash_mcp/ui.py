@@ -625,7 +625,7 @@ function handleSearch(query){
           var h='';
           data.results.forEach(function(r){
             var snippet=r.content||'';
-            if(snippet.length>120)snippet=snippet.substring(0,120)+'…';
+            if(snippet.length>120)snippet=snippet.substring(0,120)+'\u2026';
             h+='<a class="search-result" href="/ui/browse/'+encodeURIComponent(r.file_path)+'">'
               +'<span class="search-result-path">'+_escHtml(r.file_path)+'</span>'
               +'<span class="search-result-snippet">'+_escHtml(snippet)+'</span>'
@@ -680,8 +680,6 @@ var _unsaved=false;
   _trackTreeToggles();
 })();
 
-if(typeof hljs!=='undefined'){hljs.highlightAll();}
-
 if(typeof mermaid!=='undefined'){
   mermaid.initialize({
     startOnLoad:false,
@@ -707,6 +705,8 @@ if(typeof mermaid!=='undefined'){
   });
   mermaid.run();
 }
+
+if(typeof hljs!=='undefined'){hljs.highlightAll();}
 
 // Scroll-spy for TOC
 (function(){
@@ -814,7 +814,7 @@ def _sidebar_html(filesystem: FileSystem, active: str = "", search_enabled: bool
     """Build sidebar HTML with header + search + tree."""
     tree = _build_tree_html(filesystem, active=active)
     vector_attr = ' data-vector-search="true"' if search_enabled else ""
-    placeholder = "Search content…" if search_enabled else "Search files..."
+    placeholder = "Search content\u2026" if search_enabled else "Search files..."
     results_div = '<div id="search-results" class="search-results"></div>' if search_enabled else ""
     return (
         '<div class="sidebar-header">'
@@ -889,7 +889,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                     rows += (
                         f'<tr><td class="dir"><a href="/ui/browse/{escaped_child}">'
                         f"{_icon('folder')} {escaped}/</a></td>"
-                        "<td>directory</td><td>—</td><td>—</td></tr>"
+                        "<td>directory</td><td>\u2014</td><td>\u2014</td></tr>"
                     )
                 else:
                     # file metadata
@@ -901,8 +901,8 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                             "%Y-%m-%d %H:%M"
                         )
                     except Exception:
-                        size = "—"
-                        mtime = "—"
+                        size = "\u2014"
+                        mtime = "\u2014"
                     icon = _file_icon(name)
                     rows += (
                         f'<tr><td class="name"><a href="/ui/browse/{escaped_child}">'
@@ -959,8 +959,8 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                     "%b %-d, %Y, %I:%M %p"
                 )
             except Exception:
-                size = "—"
-                mtime = "—"
+                size = "\u2014"
+                mtime = "\u2014"
             words = len(content.split())
             chars = len(content)
             _meta_body = (
@@ -1121,8 +1121,8 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 "%b %-d, %Y, %I:%M %p"
             )
         except Exception:
-            size = "—"
-            mtime = "—"
+            size = "\u2014"
+            mtime = "\u2014"
         words = len(content.split())
         chars = len(content)
         _meta_body = (
@@ -1199,7 +1199,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
             '<input class="path-input" type="text" name="path" '
             'placeholder="e.g. notes/meeting.md" required>'
             '<textarea class="editor-area" name="content" '
-            'placeholder="Start writing…"></textarea>'
+            'placeholder="Start writing\u2026"></textarea>'
             '<div class="action-bar">'
             f'<button type="submit" class="btn btn-save">{_icon("save")} Create</button>'
             f'<a href="/ui/browse/" class="btn btn-cancel">{_icon("x")} Cancel</a>'
