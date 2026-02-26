@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 stash-mcp = "stash_mcp.main:main"
+stash-mcp-stdio = "stash_mcp.server:run"
 
 [project.optional-dependencies]
 dev = [

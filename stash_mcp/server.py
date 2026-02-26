@@ -140,7 +140,8 @@ async def main():
     await mcp.run_stdio_async()
 
 
-if __name__ == "__main__":
+def run():
+    """Synchronous entry point for stdio MCP transport (used by uvx/extensions)."""
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -149,3 +150,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Server error: {e}", exc_info=True)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    run()
