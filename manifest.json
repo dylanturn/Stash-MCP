@@ -25,18 +25,38 @@
     "mcp_config": {
       "command": "uvx",
       "args": [
-        "mcp-proxy",
-        "--transport",
-        "streamablehttp",
-        "http://localhost:${user_config.port}/mcp"
+        "--from", "stash-mcp[search]",
+        "stash-mcp-stdio"
       ],
       "env": {
         "STASH_CONTENT_ROOT": "${user_config.content_dir}",
-        "STASH_PORT": "${user_config.port}",
         "STASH_READ_ONLY": "${user_config.read_only}",
         "STASH_SEARCH_ENABLED": "${user_config.search_enabled}",
         "STASH_SEARCH_EMBEDDER_MODEL": "${user_config.embedding_model}",
-        "STASH_GIT_TRACKING": "${user_config.git_tracking}"
+        "STASH_SEARCH_INDEX_DIR": "${user_config.search_index_dir}",
+        "STASH_SEARCH_CHUNK_SIZE": "${user_config.search_chunk_size}",
+        "STASH_SEARCH_CHUNK_OVERLAP": "${user_config.search_chunk_overlap}",
+        "STASH_CONTEXTUAL_RETRIEVAL": "${user_config.contextual_retrieval}",
+        "STASH_CONTEXTUAL_MODEL": "${user_config.contextual_model}",
+        "STASH_MODEL_CACHE_DIR": "${user_config.model_cache_dir}",
+        "STASH_CONTENT_PATHS": "${user_config.content_paths}",
+        "STASH_SERVER_NAME": "${user_config.server_name}",
+        "STASH_LOG_LEVEL": "${user_config.log_level}",
+        "STASH_GIT_TRACKING": "${user_config.git_tracking}",
+        "STASH_GIT_SYNC_ENABLED": "${user_config.git_sync_enabled}",
+        "STASH_GIT_SYNC_REMOTE": "${user_config.git_sync_remote}",
+        "STASH_GIT_SYNC_BRANCH": "${user_config.git_sync_branch}",
+        "STASH_GIT_SYNC_INTERVAL": "${user_config.git_sync_interval}",
+        "STASH_GIT_SYNC_RECURSIVE": "${user_config.git_sync_recursive}",
+        "STASH_GIT_SYNC_TOKEN": "${user_config.git_sync_token}",
+        "STASH_GIT_AUTHOR_DEFAULT": "${user_config.git_author}",
+        "STASH_TRANSACTION_TIMEOUT": "${user_config.transaction_timeout}",
+        "STASH_TRANSACTION_LOCK_WAIT": "${user_config.transaction_lock_wait}",
+        "STASH_GIT_CLONE_URL": "${user_config.git_clone_url}",
+        "STASH_GIT_CLONE_BRANCH": "${user_config.git_clone_branch}",
+        "STASH_GIT_CLONE_TOKEN": "${user_config.git_clone_token}",
+        "ANTHROPIC_API_KEY": "${user_config.anthropic_api_key}",
+        "OPENAI_API_KEY": "${user_config.openai_api_key}"
       }
     }
   },
@@ -44,16 +64,9 @@
     "content_dir": {
       "type": "directory",
       "title": "Content Directory",
-      "description": "Root directory for your content store",
+      "description": "Root directory for your content store. If using Git Clone, this is where the repo will be cloned to.",
       "required": true,
       "default": "${HOME}/stash-content"
-    },
-    "port": {
-      "type": "number",
-      "title": "Server Port",
-      "description": "Port the Stash-MCP HTTP server listens on",
-      "required": false,
-      "default": 8000
     },
     "read_only": {
       "type": "boolean",
@@ -61,24 +74,182 @@
       "description": "Restrict to read-only operations (no create, edit, delete, or move)",
       "default": false
     },
+    "server_name": {
+      "type": "string",
+      "title": "Server Name",
+      "description": "MCP server name identifier",
+      "required": false,
+      "default": "stash-mcp"
+    },
+    "log_level": {
+      "type": "string",
+      "title": "Log Level",
+      "description": "Logging verbosity (debug, info, warning, error)",
+      "required": false,
+      "default": "info"
+    },
+    "content_paths": {
+      "type": "string",
+      "title": "Content Path Filters",
+      "description": "Comma-separated glob patterns to filter which files are discoverable (e.g. 'docs/**,*.md'). Leave empty for all files.",
+      "required": false,
+      "default": ""
+    },
+    "git_clone_url": {
+      "type": "string",
+      "title": "Git Clone URL",
+      "description": "HTTPS URL of a GitHub repo to clone as the content directory (e.g. https://github.com/org/repo.git). Leave empty to use a local directory.",
+      "required": false,
+      "default": ""
+    },
+    "git_clone_branch": {
+      "type": "string",
+      "title": "Git Clone Branch",
+      "description": "Branch to checkout when cloning",
+      "required": false,
+      "default": "main"
+    },
+    "git_clone_token": {
+      "type": "string",
+      "title": "Git Clone Token",
+      "description": "GitHub Personal Access Token for cloning private repositories. Also used for git sync if Git Sync Token is not set separately.",
+      "required": false,
+      "default": ""
+    },
     "git_tracking": {
       "type": "boolean",
       "title": "Git Tracking",
-      "description": "Enable git-based change tracking for content history, diff, and blame. The content directory must already be a git repository.",
+      "description": "Enable git-based change tracking (log, diff, blame). The content directory must be a git repository.",
       "default": false
+    },
+    "git_sync_enabled": {
+      "type": "boolean",
+      "title": "Git Sync",
+      "description": "Enable periodic git pull to keep content fresh. Requires Git Tracking to be enabled.",
+      "default": false
+    },
+    "git_sync_remote": {
+      "type": "string",
+      "title": "Git Sync Remote",
+      "description": "Git remote name for sync pulls",
+      "required": false,
+      "default": "origin"
+    },
+    "git_sync_branch": {
+      "type": "string",
+      "title": "Git Sync Branch",
+      "description": "Branch to pull during sync",
+      "required": false,
+      "default": "main"
+    },
+    "git_sync_interval": {
+      "type": "number",
+      "title": "Git Sync Interval (seconds)",
+      "description": "How often to pull from remote (in seconds)",
+      "required": false,
+      "default": 60
+    },
+    "git_sync_recursive": {
+      "type": "boolean",
+      "title": "Recursive Submodules",
+      "description": "Include --recurse-submodules when pulling",
+      "default": false
+    },
+    "git_sync_token": {
+      "type": "string",
+      "title": "Git Sync Token",
+      "description": "GitHub PAT for authenticated git pulls. Falls back to Git Clone Token if not set.",
+      "required": false,
+      "default": ""
+    },
+    "git_author": {
+      "type": "string",
+      "title": "Git Author",
+      "description": "Default author for git commits (format: 'Name <email>')",
+      "required": false,
+      "default": "stash-mcp <stash@local>"
     },
     "search_enabled": {
       "type": "boolean",
       "title": "Enable Semantic Search",
-      "description": "Enable vector-based semantic search across content. Requires the search extras (uv sync --extra search).",
+      "description": "Enable vector-based semantic search across content",
       "default": false
     },
     "embedding_model": {
       "type": "string",
       "title": "Embedding Model",
-      "description": "Pydantic AI embedder model for semantic search (e.g. sentence-transformers:all-MiniLM-L6-v2, openai:text-embedding-3-small).",
+      "description": "Pydantic AI embedder model (e.g. sentence-transformers:all-MiniLM-L6-v2, openai:text-embedding-3-small)",
       "required": false,
       "default": "sentence-transformers:all-MiniLM-L6-v2"
+    },
+    "search_index_dir": {
+      "type": "directory",
+      "title": "Search Index Directory",
+      "description": "Directory to store the vector search index",
+      "required": false,
+      "default": "${HOME}/.stash-index"
+    },
+    "search_chunk_size": {
+      "type": "number",
+      "title": "Search Chunk Size",
+      "description": "Character count per text chunk for indexing",
+      "required": false,
+      "default": 1000
+    },
+    "search_chunk_overlap": {
+      "type": "number",
+      "title": "Search Chunk Overlap",
+      "description": "Character overlap between adjacent chunks",
+      "required": false,
+      "default": 100
+    },
+    "model_cache_dir": {
+      "type": "directory",
+      "title": "Model Cache Directory",
+      "description": "Directory for caching embedding model weights",
+      "required": false,
+      "default": "${HOME}/.stash-models"
+    },
+    "contextual_retrieval": {
+      "type": "boolean",
+      "title": "Contextual Retrieval",
+      "description": "Enrich chunks with contextual summaries during indexing (requires Anthropic API key)",
+      "default": false
+    },
+    "contextual_model": {
+      "type": "string",
+      "title": "Contextual Model",
+      "description": "Anthropic model for contextual retrieval enrichment",
+      "required": false,
+      "default": "claude-haiku-4-5-20251001"
+    },
+    "anthropic_api_key": {
+      "type": "string",
+      "title": "Anthropic API Key",
+      "description": "Required for contextual retrieval feature",
+      "required": false,
+      "default": ""
+    },
+    "openai_api_key": {
+      "type": "string",
+      "title": "OpenAI API Key",
+      "description": "Required when using OpenAI embedding models",
+      "required": false,
+      "default": ""
+    },
+    "transaction_timeout": {
+      "type": "number",
+      "title": "Transaction Timeout (seconds)",
+      "description": "Maximum duration for a write transaction before auto-abort",
+      "required": false,
+      "default": 300
+    },
+    "transaction_lock_wait": {
+      "type": "number",
+      "title": "Transaction Lock Wait (seconds)",
+      "description": "How long to wait for a transaction lock before failing",
+      "required": false,
+      "default": 120
     }
   },
   "tools": [
