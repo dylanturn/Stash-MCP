@@ -402,6 +402,88 @@ class GitBackend:
             raise RuntimeError(f"git push failed: {result.stderr.strip()}")
         logger.info("Pushed %s to %s/%s.", branch, remote, branch)
 
+    @classmethod
+    def clone(
+        cls,
+        url: str,
+        target_dir: Path,
+        branch: str = "main",
+        token: str | None = None,
+        recursive: bool = False,
+    ) -> "GitBackend":
+        """Clone a remote repository into *target_dir*.
+
+        If *token* is provided it is injected into the HTTPS URL for
+        authentication.  After the clone succeeds the token is removed from
+        the remote URL and re-applied via the credential-helper script so it
+        is not stored in plain text inside ``.git/config``.
+
+        Args:
+            url: HTTPS URL of the repository to clone.
+            target_dir: Directory to clone into (must not exist or be empty).
+            branch: Branch to checkout after cloning.
+            token: Optional personal-access token for private repos.
+            recursive: When True, clone with ``--recurse-submodules``.
+
+        Returns:
+            A :class:`GitBackend` instance pointed at the cloned repository.
+
+        Raises:
+            RuntimeError: If the clone fails (with an actionable message).
+        """
+        # Inject token into the URL only for the clone operation
+        if token:
+            if url.startswith("https://"):
+                clone_url = "https://x-access-token:" + token + "@" + url[len("https://"):]
+            else:
+                clone_url = url
+        else:
+            clone_url = url
+
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        clone_args = ["git", "clone", "--branch", branch]
+        if recursive:
+            clone_args.append("--recurse-submodules")
+        clone_args.extend([clone_url, str(target_dir)])
+
+        result = subprocess.run(clone_args, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            stderr = result.stderr or ""
+            if any(
+                phrase in stderr.lower()
+                for phrase in [
+                    "authentication",
+                    "permission denied",
+                    "could not read username",
+                    "403",
+                    "401",
+                    "invalid credentials",
+                ]
+            ):
+                raise RuntimeError(
+                    f"Git clone authentication failure: {stderr.strip()}. "
+                    "Check your STASH_GIT_CLONE_TOKEN."
+                )
+            raise RuntimeError(f"Git clone failed: {stderr.strip()}")
+
+        instance = cls(target_dir)
+
+        if token:
+            # Reset the remote URL to the original (without embedded token) …
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", url],
+                cwd=target_dir,
+                check=True,
+                capture_output=True,
+            )
+            # … then configure the credential helper so pulls still work.
+            instance._configure_credentials(token)
+
+        logger.info("Cloned %s (branch=%s) into %s", url, branch, target_dir)
+        return instance
+
     def pull(self, remote: str, branch: str, recursive: bool = False) -> PullResult:
         """Pull from *remote*/*branch* and return a :class:`PullResult`.
 
