@@ -208,7 +208,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
     # preserves the original signature so FastMCP generates the correct schema.
     _original_mcp_tool = mcp.tool
 
-    def _instrumented_mcp_tool(*deco_args, **deco_kwargs):
+    def _instrumented_tool(*deco_args, **deco_kwargs):
         orig_decorator = _original_mcp_tool(*deco_args, **deco_kwargs)
 
         def patching_decorator(fn):
@@ -236,7 +236,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         return patching_decorator
 
-    mcp.tool = _instrumented_mcp_tool
+    mcp.tool = _instrumented_tool
 
     # --- Resources ---
 

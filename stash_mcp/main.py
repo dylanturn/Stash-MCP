@@ -25,6 +25,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Mapping from event bus event types to metric event names
+_CONTENT_EVENT_METRIC_MAP = {
+    "content_created": "created",
+    "content_updated": "updated",
+    "content_deleted": "deleted",
+    "content_moved": "moved",
+}
+
 
 def _maybe_clone_repo() -> None:
     """Clone remote repo into content dir if STASH_GIT_CLONE_URL is configured."""
@@ -305,13 +313,7 @@ def create_app():
         logger.info(f"Content event: {event_type} {path} {kwargs}")
 
         # Record content lifecycle metric
-        _event_map = {
-            "content_created": "created",
-            "content_updated": "updated",
-            "content_deleted": "deleted",
-            "content_moved": "moved",
-        }
-        metric_event = _event_map.get(event_type)
+        metric_event = _CONTENT_EVENT_METRIC_MAP.get(event_type)
         if metric_event:
             try:
                 full_path = Config.CONTENT_DIR / path
