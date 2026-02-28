@@ -92,6 +92,21 @@ class Config:
     TRANSACTION_TIMEOUT: int = int(os.getenv("STASH_TRANSACTION_TIMEOUT", "300"))
     TRANSACTION_LOCK_WAIT: int = int(os.getenv("STASH_TRANSACTION_LOCK_WAIT", "120"))
 
+    # Metrics settings
+    METRICS_ENABLED: bool = os.getenv("STASH_METRICS_ENABLED", "true").lower() == "true"
+    METRICS_PATH: Path = Path(
+        os.getenv(
+            "STASH_METRICS_PATH",
+            str(
+                Path(
+                    os.getenv("STASH_CONTENT_ROOT", os.getenv("STASH_CONTENT_DIR", "/data/content"))
+                ).parent
+                / "metrics.csv"
+            ),
+        )
+    )
+    METRICS_RETENTION_DAYS: int = int(os.getenv("STASH_METRICS_RETENTION_DAYS", "90"))
+
     @classmethod
     def ensure_content_dir(cls) -> None:
         """Ensure content directory exists."""

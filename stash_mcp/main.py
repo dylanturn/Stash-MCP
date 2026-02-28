@@ -15,6 +15,7 @@ from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_UPDATED, add_listener, emit
 from .filesystem import FileSystem
 from .mcp_server import create_mcp_server
+from .metrics import get_metrics, init_metrics
 from .ui import create_ui_router
 
 # Configure logging
@@ -23,6 +24,14 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Mapping from event bus event types to metric event names
+_CONTENT_EVENT_METRIC_MAP = {
+    "content_created": "created",
+    "content_updated": "updated",
+    "content_deleted": "deleted",
+    "content_moved": "moved",
+}
 
 
 def _maybe_clone_repo() -> None:
@@ -190,6 +199,13 @@ def create_app():
     Config.ensure_content_dir()
     filesystem = FileSystem(Config.CONTENT_DIR, include_patterns=Config.CONTENT_PATHS)
 
+    # Initialise metrics collector (no-op when disabled)
+    init_metrics(
+        db_path=str(Config.METRICS_PATH),
+        enabled=Config.METRICS_ENABLED,
+        retention_days=Config.METRICS_RETENTION_DAYS,
+    )
+
     # Optionally create search engine
     search_engine = _create_search_engine()
     if search_engine is not None:
@@ -234,6 +250,7 @@ def create_app():
 
         async with mcp_lifespan(fastapi_app):
             # Startup: build search index in background (non-blocking)
+            get_metrics().record_server_event("startup")
             if search_engine is not None:
 
                 async def _do_build():
@@ -262,6 +279,8 @@ def create_app():
                     await sync_task
                 except asyncio.CancelledError:
                     pass
+            get_metrics().record_server_event("shutdown")
+            get_metrics().close()
 
     app = create_api(filesystem, lifespan=_combined_lifespan, search_engine=search_engine)
     ui_router = create_ui_router(filesystem, search_engine=search_engine)
@@ -292,6 +311,16 @@ def create_app():
     # Wire event bus: REST mutations emit MCP resource notifications
     def on_content_changed(event_type: str, path: str, **kwargs: str) -> None:
         logger.info(f"Content event: {event_type} {path} {kwargs}")
+
+        # Record content lifecycle metric
+        metric_event = _CONTENT_EVENT_METRIC_MAP.get(event_type)
+        if metric_event:
+            try:
+                full_path = Config.CONTENT_DIR / path
+                size = full_path.stat().st_size if full_path.is_file() else 0
+            except Exception:
+                size = 0
+            get_metrics().record_content_event(metric_event, path, size_bytes=size)
 
         # Async bridge: trigger search index updates from sync event bus
         if search_engine is not None:
