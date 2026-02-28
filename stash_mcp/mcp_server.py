@@ -1,8 +1,10 @@
 """MCP Server implementation for Stash using FastMCP."""
 
+import functools
 import hashlib
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
@@ -16,6 +18,7 @@ from pydantic import AnyUrl, BaseModel, Field
 from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
+from .metrics import get_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +202,41 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         version=Config.SERVER_VERSION,
         lifespan=lifespan,
     )
+
+    # Wrap mcp.tool() so every registered tool is automatically timed and
+    # its outcome recorded in the metrics collector.  Using functools.wraps
+    # preserves the original signature so FastMCP generates the correct schema.
+    _original_mcp_tool = mcp.tool
+
+    def _instrumented_mcp_tool(*deco_args, **deco_kwargs):
+        orig_decorator = _original_mcp_tool(*deco_args, **deco_kwargs)
+
+        def patching_decorator(fn):
+            tool_name = fn.__name__
+
+            @functools.wraps(fn)
+            async def _tracked(*args, **kwargs):
+                t0 = time.perf_counter()
+                try:
+                    result = await fn(*args, **kwargs)
+                    get_metrics().record_tool_call(
+                        tool_name, (time.perf_counter() - t0) * 1000, True
+                    )
+                    return result
+                except Exception as exc:
+                    get_metrics().record_tool_call(
+                        tool_name,
+                        (time.perf_counter() - t0) * 1000,
+                        False,
+                        type(exc).__name__,
+                    )
+                    raise
+
+            return orig_decorator(_tracked)
+
+        return patching_decorator
+
+    mcp.tool = _instrumented_mcp_tool
 
     # --- Resources ---
 
@@ -896,8 +934,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     t.strip() for t in file_types.split(",") if t.strip()
                 ]
 
+            t0 = time.perf_counter()
             results = await search_engine.search(
                 query, max_results=max_results, file_types=types_list
+            )
+            get_metrics().record_search_query(
+                query=query,
+                provider=Config.SEARCH_EMBEDDER_MODEL,
+                result_count=len(results),
+                duration_ms=(time.perf_counter() - t0) * 1000,
             )
 
             if not results:

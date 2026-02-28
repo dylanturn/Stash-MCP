@@ -8,6 +8,7 @@ import sys
 from .config import Config
 from .filesystem import FileSystem
 from .mcp_server import create_mcp_server
+from .metrics import get_metrics, init_metrics
 
 # Configure logging
 logging.basicConfig(
@@ -121,6 +122,13 @@ async def main():
     # Ensure content directory exists
     Config.ensure_content_dir()
 
+    # Initialise metrics collector (no-op when disabled)
+    init_metrics(
+        db_path=str(Config.METRICS_PATH),
+        enabled=Config.METRICS_ENABLED,
+        retention_days=Config.METRICS_RETENTION_DAYS,
+    )
+
     # Initialize filesystem
     filesystem = FileSystem(Config.CONTENT_DIR, include_patterns=Config.CONTENT_PATHS)
 
@@ -136,8 +144,13 @@ async def main():
         await search_engine.build_index(files)
         logger.info("Search index built")
 
+    get_metrics().record_server_event("startup")
     logger.info(f"Server running with content dir: {Config.CONTENT_DIR}")
-    await mcp.run_stdio_async()
+    try:
+        await mcp.run_stdio_async()
+    finally:
+        get_metrics().record_server_event("shutdown")
+        get_metrics().close()
 
 
 def run():
