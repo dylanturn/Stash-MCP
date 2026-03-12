@@ -255,6 +255,23 @@ class GitBackend:
         result = self._run(["git", "remote", "get-url", remote])
         return result.returncode == 0
 
+    def rename_remote(self, old_name: str, new_name: str) -> None:
+        """Rename a git remote from *old_name* to *new_name*.
+
+        Args:
+            old_name: Current remote name.
+            new_name: Desired remote name.
+
+        Raises:
+            RuntimeError: If the rename fails.
+        """
+        result = self._run(["git", "remote", "rename", old_name, new_name])
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"git remote rename {old_name!r} {new_name!r} failed: {result.stderr.strip()}"
+            )
+        logger.debug("Renamed remote '%s' to '%s'", old_name, new_name)
+
     def blame(
         self,
         path: str,

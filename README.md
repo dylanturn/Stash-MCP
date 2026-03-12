@@ -314,6 +314,18 @@ The server pulls from `STASH_GIT_SYNC_REMOTE`/`STASH_GIT_SYNC_BRANCH` every `STA
 
 **Authentication:** Provide `STASH_GIT_SYNC_TOKEN` for HTTPS token authentication. The token is injected via a local git credential helper stored at `.git/stash-credential-helper.sh` — no manual credential configuration is required.
 
+**Auto-clone on startup:** Set `STASH_GIT_SYNC_URL` to the HTTPS URL of the repository. When the content directory is empty, the server will clone from that URL using `STASH_GIT_SYNC_BRANCH` and `STASH_GIT_SYNC_TOKEN`, then configure the remote as `STASH_GIT_SYNC_REMOTE`. `STASH_GIT_TRACKING` is auto-enabled after a successful clone, so you do not need to set it explicitly.
+
+```yaml
+environment:
+  - STASH_GIT_SYNC_ENABLED=true
+  - STASH_GIT_SYNC_URL=https://github.com/org/content-repo.git
+  - STASH_GIT_SYNC_BRANCH=main
+  - STASH_GIT_SYNC_TOKEN=${GITHUB_TOKEN}
+```
+
+If the content directory already contains a git repository, the clone is skipped and sync proceeds as normal (the remote must already be configured).
+
 ```yaml
 environment:
   - STASH_GIT_TRACKING=true
@@ -362,7 +374,17 @@ environment:
   - STASH_GIT_TRACKING=true
 ```
 
-**Auto-syncing from a remote repo:**
+**Auto-syncing from a remote repo (empty content directory — auto-clones on startup):**
+```yaml
+environment:
+  - STASH_READ_ONLY=true
+  - STASH_GIT_SYNC_ENABLED=true
+  - STASH_GIT_SYNC_URL=https://github.com/org/content-repo.git
+  - STASH_GIT_SYNC_BRANCH=main
+  - STASH_GIT_SYNC_TOKEN=${GITHUB_TOKEN}
+```
+
+**Auto-syncing from a remote repo (content directory already initialised):**
 ```yaml
 environment:
   - STASH_READ_ONLY=true
@@ -437,6 +459,7 @@ environment:
 | `STASH_READ_ONLY` | `false` | Disable all write tools |
 | `STASH_GIT_TRACKING` | `false` | Enable git read tools and blame-enriched search results |
 | `STASH_GIT_SYNC_ENABLED` | `false` | Enable periodic pull from remote (requires `STASH_GIT_TRACKING=true`) |
+| `STASH_GIT_SYNC_URL` | — | HTTPS URL of the remote repository; when set, auto-clones into an empty content directory and auto-enables `STASH_GIT_TRACKING` |
 | `STASH_GIT_SYNC_REMOTE` | `origin` | Remote name to pull from |
 | `STASH_GIT_SYNC_BRANCH` | `main` | Branch to sync |
 | `STASH_GIT_SYNC_INTERVAL` | `60` | Seconds between pulls |
