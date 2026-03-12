@@ -35,8 +35,26 @@ _CONTENT_EVENT_METRIC_MAP = {
 
 
 def _maybe_clone_repo() -> None:
-    """Clone remote repo into content dir if STASH_GIT_CLONE_URL is configured."""
-    if not Config.GIT_CLONE_URL:
+    """Clone remote repo into content dir if a clone URL is configured.
+
+    Checks ``STASH_GIT_CLONE_URL`` first (legacy), then falls back to
+    ``STASH_GIT_SYNC_URL`` so that a single coherent set of sync env vars is
+    sufficient to bootstrap an empty content directory.
+    """
+    # Determine which URL / parameters to use
+    if Config.GIT_CLONE_URL:
+        clone_url = Config.GIT_CLONE_URL
+        clone_branch = Config.GIT_CLONE_BRANCH
+        clone_token = Config.GIT_CLONE_TOKEN
+        clone_remote = "origin"  # GitBackend.clone always uses "origin"
+        url_env_var = "STASH_GIT_CLONE_URL"
+    elif Config.GIT_SYNC_URL:
+        clone_url = Config.GIT_SYNC_URL
+        clone_branch = Config.GIT_SYNC_BRANCH
+        clone_token = Config.GIT_SYNC_TOKEN
+        clone_remote = Config.GIT_SYNC_REMOTE
+        url_env_var = "STASH_GIT_SYNC_URL"
+    else:
         return
 
     content_dir = Config.CONTENT_DIR
@@ -45,11 +63,16 @@ def _maybe_clone_repo() -> None:
         git_dir = content_dir / ".git"
         if git_dir.exists():
             logger.info("Content directory already contains a git repo, skipping clone")
+            if clone_url == Config.GIT_SYNC_URL:
+                # Auto-enable tracking so sync can proceed without requiring
+                # STASH_GIT_TRACKING=true to be set explicitly in this case.
+                Config.GIT_TRACKING = True
             return
         logger.error(
             "Content directory %s is non-empty but not a git repo. "
-            "Cannot clone into it. Clear the directory or remove STASH_GIT_CLONE_URL.",
+            "Cannot clone into it. Clear the directory or remove %s.",
             content_dir,
+            url_env_var,
         )
         raise SystemExit(1)
 
@@ -57,21 +80,32 @@ def _maybe_clone_repo() -> None:
 
     logger.info(
         "Cloning %s (branch=%s) into %s",
-        Config.GIT_CLONE_URL,
-        Config.GIT_CLONE_BRANCH,
+        clone_url,
+        clone_branch,
         content_dir,
     )
     try:
         GitBackend.clone(
-            url=Config.GIT_CLONE_URL,
+            url=clone_url,
             target_dir=content_dir,
-            branch=Config.GIT_CLONE_BRANCH,
-            token=Config.GIT_CLONE_TOKEN,
+            branch=clone_branch,
+            token=clone_token,
             recursive=Config.GIT_SYNC_RECURSIVE,
         )
     except RuntimeError as exc:
         logger.error("Clone failed: %s", exc)
         raise SystemExit(1) from exc
+
+    # If the desired sync remote name differs from the default "origin" set by
+    # GitBackend.clone(), rename it so that subsequent pulls use the right name.
+    if clone_remote != "origin":
+        try:
+            backend = GitBackend(content_dir)
+            backend.rename_remote("origin", clone_remote)
+        except RuntimeError as exc:
+            logger.error("Failed to rename remote: %s", exc)
+            raise SystemExit(1) from exc
+        logger.info("Renamed remote 'origin' to '%s'", clone_remote)
 
     Config.GIT_TRACKING = True
     logger.info("Clone complete. Git tracking auto-enabled.")

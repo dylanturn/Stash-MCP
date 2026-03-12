@@ -594,3 +594,141 @@ class TestMaybeCloneRepo:
 
         with pytest.raises(SystemExit):
             app_main._maybe_clone_repo()
+
+
+class TestMaybeCloneRepoSyncURL:
+    """Tests for _maybe_clone_repo when STASH_GIT_SYNC_URL is used."""
+
+    def test_sync_url_clones_into_empty_dir(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+        import stash_mcp.main as app_main
+
+        bare = tmp_path / "origin.git"
+        target = tmp_path / "content"
+        _init_bare_repo(bare)
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_URL", str(bare))
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_REMOTE", "origin")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_RECURSIVE", False)
+        monkeypatch.setattr(cfg.Config, "CONTENT_DIR", target)
+
+        app_main._maybe_clone_repo()
+
+        assert target.exists()
+        assert (target / ".git").exists()
+        assert cfg.Config.GIT_TRACKING is True
+
+    def test_sync_url_no_clone_url_is_noop_when_both_none(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_URL", None)
+        from stash_mcp.main import _maybe_clone_repo
+
+        _maybe_clone_repo()  # Should not raise
+
+    def test_sync_url_renames_remote_when_not_origin(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+        import stash_mcp.main as app_main
+
+        bare = tmp_path / "origin.git"
+        target = tmp_path / "content"
+        _init_bare_repo(bare)
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_URL", str(bare))
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_REMOTE", "upstream")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_RECURSIVE", False)
+        monkeypatch.setattr(cfg.Config, "CONTENT_DIR", target)
+
+        app_main._maybe_clone_repo()
+
+        assert (target / ".git").exists()
+        # Remote should be named "upstream", not "origin"
+        remote_url = subprocess.check_output(
+            ["git", "remote", "get-url", "upstream"], cwd=target, text=True
+        ).strip()
+        assert str(bare) in remote_url
+        # "origin" should no longer exist
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"], cwd=target, capture_output=True
+        )
+        assert result.returncode != 0
+
+    def test_sync_url_skips_clone_when_git_dir_exists(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+        import stash_mcp.main as app_main
+
+        bare = tmp_path / "origin.git"
+        target = tmp_path / "content"
+        _init_bare_repo(bare)
+
+        # Pre-clone so the .git dir already exists
+        GitBackend.clone(url=str(bare), target_dir=target, branch="main")
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_URL", str(bare))
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_REMOTE", "origin")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_RECURSIVE", False)
+        monkeypatch.setattr(cfg.Config, "CONTENT_DIR", target)
+        monkeypatch.setattr(cfg.Config, "GIT_TRACKING", False)
+
+        app_main._maybe_clone_repo()
+
+        # Should have auto-enabled GIT_TRACKING even though clone was skipped
+        assert cfg.Config.GIT_TRACKING is True
+
+    def test_sync_url_non_empty_non_git_dir_raises_system_exit(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+        import stash_mcp.main as app_main
+
+        target = tmp_path / "content"
+        target.mkdir()
+        (target / "some_file.txt").write_text("user data")
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_URL", "https://example.com/repo.git")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_REMOTE", "origin")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_RECURSIVE", False)
+        monkeypatch.setattr(cfg.Config, "CONTENT_DIR", target)
+
+        with pytest.raises(SystemExit):
+            app_main._maybe_clone_repo()
+
+    def test_git_clone_url_takes_precedence_over_sync_url(self, tmp_path, monkeypatch):
+        """STASH_GIT_CLONE_URL takes priority when both are set."""
+        import stash_mcp.config as cfg
+        import stash_mcp.main as app_main
+
+        bare = tmp_path / "origin.git"
+        target = tmp_path / "content"
+        _init_bare_repo(bare)
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", str(bare))
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_URL", "https://should-not-be-used.example.com/repo.git")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_REMOTE", "origin")
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_RECURSIVE", False)
+        monkeypatch.setattr(cfg.Config, "CONTENT_DIR", target)
+
+        app_main._maybe_clone_repo()
+
+        assert (target / ".git").exists()
+        assert cfg.Config.GIT_TRACKING is True
+        # Remote URL should be the bare repo, not the unused sync URL
+        remote_url = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"], cwd=target, text=True
+        ).strip()
+        assert str(bare) in remote_url

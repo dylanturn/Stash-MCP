@@ -81,6 +81,7 @@ class Config:
 
     # Git sync (requires GIT_TRACKING=true)
     GIT_SYNC_ENABLED: bool = os.getenv("STASH_GIT_SYNC_ENABLED", "false").lower() == "true"
+    GIT_SYNC_URL: str | None = os.getenv("STASH_GIT_SYNC_URL")
     GIT_SYNC_REMOTE: str = os.getenv("STASH_GIT_SYNC_REMOTE", "origin")
     GIT_SYNC_BRANCH: str = os.getenv("STASH_GIT_SYNC_BRANCH", "main")
     GIT_SYNC_INTERVAL: int = int(os.getenv("STASH_GIT_SYNC_INTERVAL", "60"))
