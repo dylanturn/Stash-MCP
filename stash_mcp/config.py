@@ -109,6 +109,18 @@ class Config:
     METRICS_RETENTION_DAYS: int = int(os.getenv("STASH_METRICS_RETENTION_DAYS", "90"))
 
     @classmethod
+    def get_effective_metrics_enabled(cls) -> bool:
+        """Return whether metrics collection is effectively enabled.
+
+        In read-only (stateless) mode the default flips to disabled to avoid
+        file corruption when multiple pods write to the same CSV concurrently.
+        Users can still explicitly opt in by setting STASH_METRICS_ENABLED=true.
+        """
+        if cls.READ_ONLY:
+            return os.getenv("STASH_METRICS_ENABLED", "false").lower() == "true"
+        return cls.METRICS_ENABLED
+
+    @classmethod
     def ensure_content_dir(cls) -> None:
         """Ensure content directory exists."""
         cls.CONTENT_DIR.mkdir(parents=True, exist_ok=True)

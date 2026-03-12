@@ -122,10 +122,13 @@ async def main():
     # Ensure content directory exists
     Config.ensure_content_dir()
 
-    # Initialise metrics collector (no-op when disabled)
+    # Initialise metrics collector (no-op when disabled).
+    # In read-only/stateless mode, metrics default to disabled to avoid file
+    # corruption from multiple pods writing concurrently.  Users can still opt
+    # in by setting STASH_METRICS_ENABLED=true explicitly.
     init_metrics(
         db_path=str(Config.METRICS_PATH),
-        enabled=Config.METRICS_ENABLED,
+        enabled=Config.get_effective_metrics_enabled(),
         retention_days=Config.METRICS_RETENTION_DAYS,
     )
 

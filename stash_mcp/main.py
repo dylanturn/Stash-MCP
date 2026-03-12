@@ -233,10 +233,13 @@ def create_app():
     Config.ensure_content_dir()
     filesystem = FileSystem(Config.CONTENT_DIR, include_patterns=Config.CONTENT_PATHS)
 
-    # Initialise metrics collector (no-op when disabled)
+    # Initialise metrics collector (no-op when disabled).
+    # In read-only/stateless mode, metrics default to disabled to avoid file
+    # corruption from multiple pods writing concurrently.  Users can still opt
+    # in by setting STASH_METRICS_ENABLED=true explicitly.
     init_metrics(
         db_path=str(Config.METRICS_PATH),
-        enabled=Config.METRICS_ENABLED,
+        enabled=Config.get_effective_metrics_enabled(),
         retention_days=Config.METRICS_RETENTION_DAYS,
     )
 
@@ -261,9 +264,11 @@ def create_app():
         transaction_manager = TransactionManager(filesystem, git_backend)
         fs_for_mcp = transaction_manager
 
-    # Create MCP http app first so we can wire its lifespan into FastAPI
+    # Create MCP http app first so we can wire its lifespan into FastAPI.
+    # In read-only mode, use stateless HTTP so each request is self-contained
+    # and any pod can serve any client (safe for horizontal scaling).
     mcp = create_mcp_server(fs_for_mcp, search_engine=search_engine, git_backend=git_backend)
-    mcp_http_app = mcp.http_app(path="/")
+    mcp_http_app = mcp.http_app(path="/", stateless_http=Config.READ_ONLY)
 
     # Build a combined lifespan that wraps the MCP lifespan and also
     # triggers the search index build on startup.  Using on_event("startup")
@@ -411,7 +416,10 @@ def main():
     logger.info(f"Server running at http://{Config.HOST}:{Config.PORT}")
     logger.info(f"API docs at http://{Config.HOST}:{Config.PORT}/docs")
     logger.info(f"UI at http://{Config.HOST}:{Config.PORT}/ui")
-    logger.info(f"MCP (Streamable HTTP) at http://{Config.HOST}:{Config.PORT}/mcp")
+    transport_label = "Stateless HTTP" if Config.READ_ONLY else "Streamable HTTP"
+    logger.info(f"MCP ({transport_label}) at http://{Config.HOST}:{Config.PORT}/mcp")
+    if Config.READ_ONLY:
+        logger.info("Stateless transport enabled — safe for horizontal scaling")
 
     uvicorn.run(
         app,
