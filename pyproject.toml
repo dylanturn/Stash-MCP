@@ -23,10 +23,12 @@ dependencies = [
     "pydantic>=2.9.0",
     "python-multipart>=0.0.9",
     "markdown>=3.7",
+    "tinyflux>=1.2.0",
 ]
 
 [project.scripts]
 stash-mcp = "stash_mcp.main:main"
+stash-mcp-stdio = "stash_mcp.server:run"
 
 [project.optional-dependencies]
 dev = [

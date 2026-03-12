@@ -410,3 +410,187 @@ class TestPullResult:
         assert r.modified_files == []
         assert r.deleted_files == []
         assert r.message == ""
+
+
+# ---------------------------------------------------------------------------
+# GitBackend.clone()
+# ---------------------------------------------------------------------------
+
+
+def _init_bare_repo(path: Path) -> None:
+    """Create a bare git repo at *path* with a single commit on ``main``."""
+    subprocess.run(["git", "init", "--bare", str(path)], check=True, capture_output=True)
+
+    # Create a temporary working tree to populate the bare repo
+    with TemporaryDirectory() as tmpwork:
+        work = Path(tmpwork)
+        subprocess.run(["git", "clone", str(path), str(work)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(work), "config", "user.email", "test@example.com"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "config", "user.name", "Test User"],
+            check=True, capture_output=True,
+        )
+        (work / "README.md").write_text("# Test Repo\n")
+        subprocess.run(["git", "-C", str(work), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-m", "Initial commit"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "push", "origin", "HEAD:main"],
+            check=True, capture_output=True,
+        )
+
+
+class TestGitBackendClone:
+    def test_clone_into_nonexistent_dir(self):
+        with TemporaryDirectory() as tmpdir:
+            bare = Path(tmpdir) / "origin.git"
+            target = Path(tmpdir) / "cloned"
+            _init_bare_repo(bare)
+            backend = GitBackend.clone(url=str(bare), target_dir=target, branch="main")
+            assert target.exists()
+            assert (target / ".git").exists()
+            assert (target / "README.md").exists()
+            assert isinstance(backend, GitBackend)
+            assert backend.content_dir == target
+
+    def test_clone_into_empty_existing_dir(self):
+        with TemporaryDirectory() as tmpdir:
+            bare = Path(tmpdir) / "origin.git"
+            target = Path(tmpdir) / "cloned"
+            target.mkdir()
+            _init_bare_repo(bare)
+            backend = GitBackend.clone(url=str(bare), target_dir=target, branch="main")
+            assert (target / "README.md").exists()
+            assert isinstance(backend, GitBackend)
+
+    def test_clone_log_has_initial_commit(self):
+        with TemporaryDirectory() as tmpdir:
+            bare = Path(tmpdir) / "origin.git"
+            target = Path(tmpdir) / "cloned"
+            _init_bare_repo(bare)
+            backend = GitBackend.clone(url=str(bare), target_dir=target, branch="main")
+            entries = backend.log()
+            assert any(e.message == "Initial commit" for e in entries)
+
+    def test_clone_bad_url_raises_runtime_error(self):
+        with TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "cloned"
+            with pytest.raises(RuntimeError, match="Git clone failed"):
+                GitBackend.clone(
+                    url="https://invalid.example.invalid/nonexistent.git",
+                    target_dir=target,
+                    branch="main",
+                )
+
+    def test_clone_token_injected_then_removed_from_remote_url(self):
+        """After clone, origin remote URL must NOT contain the token."""
+        with TemporaryDirectory() as tmpdir:
+            bare = Path(tmpdir) / "origin.git"
+            target = Path(tmpdir) / "cloned"
+            _init_bare_repo(bare)
+            # Use a fake token — local file:// clone won't use it but the
+            # post-clone URL rewrite still happens.
+            GitBackend.clone(
+                url=str(bare), target_dir=target, branch="main", token="secret-pat"
+            )
+            remote_url = subprocess.check_output(
+                ["git", "remote", "get-url", "origin"], cwd=target, text=True
+            ).strip()
+            assert "secret-pat" not in remote_url
+            assert str(bare) in remote_url
+
+    def test_clone_with_token_sets_up_credential_helper(self):
+        with TemporaryDirectory() as tmpdir:
+            bare = Path(tmpdir) / "origin.git"
+            target = Path(tmpdir) / "cloned"
+            _init_bare_repo(bare)
+            GitBackend.clone(
+                url=str(bare), target_dir=target, branch="main", token="mytoken"
+            )
+            helper = target / ".git" / "stash-credential-helper.sh"
+            assert helper.exists()
+            assert "mytoken" in helper.read_text()
+
+
+# ---------------------------------------------------------------------------
+# _maybe_clone_repo() helper (tested via main.py import)
+# ---------------------------------------------------------------------------
+
+
+class TestMaybeCloneRepo:
+    """Tests for the _maybe_clone_repo startup helper."""
+
+    def test_no_clone_url_is_noop(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", None)
+        from stash_mcp.main import _maybe_clone_repo
+
+        _maybe_clone_repo()  # Should not raise
+
+    def test_clone_url_clones_repo(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+        import stash_mcp.main as app_main
+
+        bare = tmp_path / "origin.git"
+        target = tmp_path / "content"
+        _init_bare_repo(bare)
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", str(bare))
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_RECURSIVE", False)
+        monkeypatch.setattr(cfg.Config, "CONTENT_DIR", target)
+
+        app_main._maybe_clone_repo()
+
+        assert target.exists()
+        assert (target / ".git").exists()
+        assert cfg.Config.GIT_TRACKING is True
+
+    def test_already_cloned_skips(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+        import stash_mcp.main as app_main
+
+        bare = tmp_path / "origin.git"
+        target = tmp_path / "content"
+        _init_bare_repo(bare)
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", str(bare))
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_RECURSIVE", False)
+        monkeypatch.setattr(cfg.Config, "CONTENT_DIR", target)
+
+        # First clone
+        app_main._maybe_clone_repo()
+        assert (target / ".git").exists()
+
+        # Reset tracking flag so we can confirm second call doesn't fail
+        monkeypatch.setattr(cfg.Config, "GIT_TRACKING", False)
+        # Second call should skip gracefully
+        app_main._maybe_clone_repo()
+        # GIT_TRACKING stays False (wasn't re-enabled since we skipped)
+        assert cfg.Config.GIT_TRACKING is False
+
+    def test_non_empty_non_git_dir_raises_system_exit(self, tmp_path, monkeypatch):
+        import stash_mcp.config as cfg
+        import stash_mcp.main as app_main
+
+        target = tmp_path / "content"
+        target.mkdir()
+        (target / "some_file.txt").write_text("user data")
+
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", "https://example.com/repo.git")
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_BRANCH", "main")
+        monkeypatch.setattr(cfg.Config, "GIT_CLONE_TOKEN", None)
+        monkeypatch.setattr(cfg.Config, "GIT_SYNC_RECURSIVE", False)
+        monkeypatch.setattr(cfg.Config, "CONTENT_DIR", target)
+
+        with pytest.raises(SystemExit):
+            app_main._maybe_clone_repo()

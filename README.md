@@ -402,6 +402,30 @@ Changing `STASH_SEARCH_EMBEDDER_MODEL` between restarts automatically clears the
 
 See [USAGE.md](USAGE.md) for detailed search setup instructions.
 
+### Local Metrics
+
+Stash-MCP collects **local, opt-out** usage metrics — nothing is sent externally. Metrics are stored in a [TinyFlux](https://github.com/citrusvanilla/tinyflux) time-series CSV file on disk and give operators visibility into tool call rates, response times, error rates, HTTP request patterns, content growth, and search performance.
+
+Metrics are **enabled by default**. To disable:
+
+```yaml
+environment:
+  - STASH_METRICS_ENABLED=false
+```
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `STASH_METRICS_ENABLED` | `true` | Set to `false` to disable all metrics collection |
+| `STASH_METRICS_PATH` | `{STASH_CONTENT_ROOT}/../metrics.csv` | Path to the TinyFlux CSV database file |
+| `STASH_METRICS_RETENTION_DAYS` | `90` | Auto-prune data points older than this many days (`0` = keep forever) |
+
+**What is collected:**
+- **Tool calls** — tool name, duration (ms), success/failure, error type, transport (stdio/http)
+- **HTTP requests** — method, endpoint path, status code class (2xx/4xx/5xx), duration (ms)
+- **Content events** — create/update/delete/move events with file extension and size
+- **Search queries** — provider, hashed query, result count, duration (ms)
+- **Server lifecycle** — startup and shutdown events
+
 ### Full Environment Variable Reference
 
 | Env Var | Default | Purpose |
@@ -427,6 +451,9 @@ See [USAGE.md](USAGE.md) for detailed search setup instructions.
 | `STASH_CONTEXTUAL_RETRIEVAL` | `false` | Enable Claude-powered contextual chunk enrichment |
 | `STASH_CONTEXTUAL_MODEL` | `claude-haiku-4-5-20251001` | Model for contextual retrieval |
 | `ANTHROPIC_API_KEY` | — | Required when contextual retrieval is enabled |
+| `STASH_METRICS_ENABLED` | `true` | Collect local usage metrics |
+| `STASH_METRICS_PATH` | `{content_root}/../metrics.csv` | TinyFlux CSV database file path |
+| `STASH_METRICS_RETENTION_DAYS` | `90` | Auto-prune points older than N days (0 = keep forever) |
 
 ## License
 

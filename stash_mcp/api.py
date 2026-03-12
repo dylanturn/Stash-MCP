@@ -2,10 +2,11 @@
 
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -18,6 +19,7 @@ from .filesystem import (
     InvalidPathError,
 )
 from .mcp_server import MIME_TYPES
+from .metrics import get_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,19 @@ def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> Fas
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _metrics_middleware(request: Request, call_next):
+        t0 = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - t0) * 1000
+        get_metrics().record_request(
+            method=request.method,
+            endpoint=request.url.path,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+        )
+        return response
 
     def _get_updated_at(relative_path: str) -> str | None:
         """Get file modification time as ISO string."""

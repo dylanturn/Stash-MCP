@@ -69,6 +69,13 @@ class Config:
         os.getenv("STASH_MODEL_CACHE_DIR", "/data/models")
     )
 
+    # Git clone-on-startup
+    GIT_CLONE_URL: str | None = os.getenv("STASH_GIT_CLONE_URL")
+    GIT_CLONE_BRANCH: str = os.getenv("STASH_GIT_CLONE_BRANCH", "main")
+    GIT_CLONE_TOKEN: str | None = os.getenv(
+        "STASH_GIT_CLONE_TOKEN", os.getenv("STASH_GIT_SYNC_TOKEN")
+    )
+
     # Git tracking
     GIT_TRACKING: bool = os.getenv("STASH_GIT_TRACKING", "false").lower() == "true"
 
@@ -84,6 +91,21 @@ class Config:
     # Transaction settings (only relevant when GIT_TRACKING=true and READ_ONLY=false)
     TRANSACTION_TIMEOUT: int = int(os.getenv("STASH_TRANSACTION_TIMEOUT", "300"))
     TRANSACTION_LOCK_WAIT: int = int(os.getenv("STASH_TRANSACTION_LOCK_WAIT", "120"))
+
+    # Metrics settings
+    METRICS_ENABLED: bool = os.getenv("STASH_METRICS_ENABLED", "true").lower() == "true"
+    METRICS_PATH: Path = Path(
+        os.getenv(
+            "STASH_METRICS_PATH",
+            str(
+                Path(
+                    os.getenv("STASH_CONTENT_ROOT", os.getenv("STASH_CONTENT_DIR", "/data/content"))
+                ).parent
+                / "metrics.csv"
+            ),
+        )
+    )
+    METRICS_RETENTION_DAYS: int = int(os.getenv("STASH_METRICS_RETENTION_DAYS", "90"))
 
     @classmethod
     def ensure_content_dir(cls) -> None:

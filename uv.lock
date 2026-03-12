@@ -1400,7 +1400,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.20.0"
+version = "2.21.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1412,9 +1412,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/5a/f495777c02625bfa18212b6e3b73f1893094f2bf660976eb4bc6f43a1ca2/openai-2.20.0.tar.gz", hash = "sha256:2654a689208cd0bf1098bb9462e8d722af5cbe961e6bba54e6f19fb843d88db1", size = 642355, upload-time = "2026-02-10T19:02:54.145Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/92/e5/3d197a0947a166649f566706d7a4c8f7fe38f1fa7b24c9bcffe4c7591d44/openai-2.21.0.tar.gz", hash = "sha256:81b48ce4b8bbb2cc3af02047ceb19561f7b1dc0d4e52d1de7f02abfd15aa59b7", size = 644374, upload-time = "2026-02-14T00:12:01.577Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b5/a0/cf4297aa51bbc21e83ef0ac018947fa06aea8f2364aad7c96cbf148590e6/openai-2.20.0-py3-none-any.whl", hash = "sha256:38d989c4b1075cd1f76abc68364059d822327cf1a932531d429795f4fc18be99", size = 1098479, upload-time = "2026-02-10T19:02:52.157Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/56/0a89092a453bb2c676d66abee44f863e742b2110d4dbb1dbcca3f7e5fc33/openai-2.21.0-py3-none-any.whl", hash = "sha256:0bc1c775e5b1536c294eded39ee08f8407656537ccc71b1004104fe1602e267c", size = 1103065, upload-time = "2026-02-14T00:11:59.603Z" },
 ]
 
 [[package]]
@@ -2410,6 +2410,7 @@ dependencies = [
     { name = "markdown" },
     { name = "pydantic" },
     { name = "python-multipart" },
+    { name = "tinyflux" },
     { name = "uvicorn" },
 ]
 
@@ -2437,14 +2438,16 @@ search-contextual = [
 ]
 search-openai = [
     { name = "numpy" },
+    { name = "openai" },
     { name = "pydantic-ai-slim", extra = ["openai"] },
+    { name = "tiktoken" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'search-contextual'", specifier = ">=0.40.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
-    { name = "fastmcp", specifier = ">=0.1.0" },
+    { name = "fastmcp", specifier = ">=2.0.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "markdown", specifier = ">=3.7" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26.0" },
@@ -2452,6 +2455,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'search-cohere'", specifier = ">=1.26.0" },
     { name = "numpy", marker = "extra == 'search-contextual'", specifier = ">=1.26.0" },
     { name = "numpy", marker = "extra == 'search-openai'", specifier = ">=1.26.0" },
+    { name = "openai", marker = "extra == 'search-openai'", specifier = "==2.21.0" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-ai-slim", extras = ["cohere"], marker = "extra == 'search-cohere'", specifier = ">=0.1.0" },
     { name = "pydantic-ai-slim", extras = ["openai"], marker = "extra == 'search-openai'", specifier = ">=0.1.0" },
@@ -2462,6 +2466,8 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7.0" },
+    { name = "tiktoken", marker = "extra == 'search-openai'", specifier = "==0.12.0" },
+    { name = "tinyflux", specifier = ">=1.2.0" },
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
 provides-extras = ["dev", "search", "search-openai", "search-cohere", "search-contextual"]
@@ -2532,6 +2538,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/28/c0/3c7a39ff68022ddfd7d93f3337ad90389a342f761c4d71de99a3ccc57857/tiktoken-0.12.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:54c891b416a0e36b8e2045b12b33dd66fb34a4fe7965565f1b482da50da3e86a", size = 1194908, upload-time = "2025-10-06T20:22:32.073Z" },
     { url = "https://files.pythonhosted.org/packages/ab/0d/c1ad6f4016a3968c048545f5d9b8ffebf577774b2ede3e2e352553b685fe/tiktoken-0.12.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:5edb8743b88d5be814b1a8a8854494719080c28faaa1ccbef02e87354fe71ef0", size = 1253706, upload-time = "2025-10-06T20:22:33.385Z" },
     { url = "https://files.pythonhosted.org/packages/af/df/c7891ef9d2712ad774777271d39fdef63941ffba0a9d59b7ad1fd2765e57/tiktoken-0.12.0-cp314-cp314t-win_amd64.whl", hash = "sha256:f61c0aea5565ac82e2ec50a05e02a6c44734e91b51c10510b084ea1b8e633a71", size = 920667, upload-time = "2025-10-06T20:22:34.444Z" },
+]
+
+[[package]]
+name = "tinyflux"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/62/d6/5e04766bead683b9fcb854eacf6aa5ea2a80acad921ddf47a0756460a5d1/tinyflux-1.2.0.tar.gz", hash = "sha256:727a069ea8e4946c7c607005d7637b9ca48a4e47a7f7b7d5fb39b3b30a4e1dc3", size = 65470, upload-time = "2026-01-26T18:41:48.336Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/b2/c91d46913cb02f89283faa47782a12ca3316ed84fcdd62fd303343f7c2a3/tinyflux-1.2.0-py3-none-any.whl", hash = "sha256:8af3b1f95bedaafb791c7c3b9c3e6e941f05623a470676401d9e4c0f068bbc7a", size = 38644, upload-time = "2026-01-26T18:41:46.902Z" },
 ]
 
 [[package]]
