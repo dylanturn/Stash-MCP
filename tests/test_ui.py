@@ -491,3 +491,98 @@ class TestUIEvents:
         assert args[0] == "content_moved"
         assert args[1] == "renamed.md"
         assert kwargs.get("source_path") == "hello.md"
+
+
+class TestUIReadOnly:
+    """Tests for read-only mode (STASH_READ_ONLY=true) in the UI."""
+
+    @pytest.fixture
+    def ro_client(self):
+        """Create a test client with UI router in read-only mode."""
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("hello.md", "# Hello World")
+            fs.write_file("docs/readme.md", "# README")
+
+            app = create_api(fs)
+            router = create_ui_router(fs, read_only=True)
+            app.include_router(router)
+            client = TestClient(app)
+            yield client
+
+    # --- UI elements hidden in read-only mode ---
+
+    def test_no_new_document_button(self, ro_client):
+        """Sidebar should not show the New Document button in read-only mode."""
+        response = ro_client.get("/ui/browse/")
+        assert response.status_code == 200
+        assert 'href="/ui/new"' not in response.text
+        assert "New Document" not in response.text
+
+    def test_no_edit_tab_in_browse(self, ro_client):
+        """File view should not show the Edit tab in read-only mode."""
+        response = ro_client.get("/ui/browse/hello.md")
+        assert response.status_code == 200
+        assert 'href="/ui/edit/hello.md"' not in response.text
+
+    def test_no_rename_button_in_browse(self, ro_client):
+        """File view should not show the Rename/Move button in read-only mode."""
+        response = ro_client.get("/ui/browse/hello.md")
+        assert response.status_code == 200
+        assert 'class="btn-rename"' not in response.text
+        assert "Rename / Move" not in response.text
+
+    def test_no_delete_button_in_browse(self, ro_client):
+        """File view should not show the Delete button in read-only mode."""
+        response = ro_client.get("/ui/browse/hello.md")
+        assert response.status_code == 200
+        assert 'class="btn-delete"' not in response.text
+
+    # --- Write endpoints return 403 in read-only mode ---
+
+    def test_edit_page_returns_403(self, ro_client):
+        """GET /ui/edit/ returns 403 in read-only mode."""
+        response = ro_client.get("/ui/edit/hello.md")
+        assert response.status_code == 403
+
+    def test_new_page_returns_403(self, ro_client):
+        """GET /ui/new returns 403 in read-only mode."""
+        response = ro_client.get("/ui/new")
+        assert response.status_code == 403
+
+    def test_save_returns_403(self, ro_client):
+        """POST /ui/save returns 403 in read-only mode."""
+        response = ro_client.post(
+            "/ui/save",
+            data={"path": "new.md", "content": "# New"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 403
+
+    def test_move_returns_403(self, ro_client):
+        """POST /ui/move returns 403 in read-only mode."""
+        response = ro_client.post(
+            "/ui/move/hello.md",
+            data={"destination": "renamed.md"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 403
+
+    def test_delete_returns_403(self, ro_client):
+        """POST /ui/delete returns 403 in read-only mode."""
+        response = ro_client.post("/ui/delete/hello.md", follow_redirects=False)
+        assert response.status_code == 403
+
+    # --- Read operations still work in read-only mode ---
+
+    def test_browse_still_works(self, ro_client):
+        """GET /ui/browse/ still works in read-only mode."""
+        response = ro_client.get("/ui/browse/")
+        assert response.status_code == 200
+        assert "hello.md" in response.text
+
+    def test_browse_file_still_works(self, ro_client):
+        """GET /ui/browse/<file> still works in read-only mode."""
+        response = ro_client.get("/ui/browse/hello.md")
+        assert response.status_code == 200
+        assert "Hello World" in response.text
