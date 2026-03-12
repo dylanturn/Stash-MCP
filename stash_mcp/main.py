@@ -411,7 +411,7 @@ def main():
     logger.info(f"Server running at http://{Config.HOST}:{Config.PORT}")
     logger.info(f"API docs at http://{Config.HOST}:{Config.PORT}/docs")
     logger.info(f"UI at http://{Config.HOST}:{Config.PORT}/ui")
-    logger.info(f"MCP (SSE) at http://{Config.HOST}:{Config.PORT}/mcp")
+    logger.info(f"MCP (Streamable HTTP) at http://{Config.HOST}:{Config.PORT}/mcp")
 
     uvicorn.run(
         app,
