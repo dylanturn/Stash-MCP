@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "stash": {
+      "type": "http",
+      "url": "${STASH_MCP_URL}"
+    }
+  }
+}

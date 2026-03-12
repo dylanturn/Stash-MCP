@@ -1,0 +1,11 @@
+{
+  "name": "stash-mcp",
+  "version": "0.1.0",
+  "description": "Connect to a Stash-MCP content store with smart workflows, transaction safety, and auto-bootstrapped usage patterns",
+  "author": {
+    "name": "Dylan Turnbull"
+  },
+  "repository": "https://github.com/dylanturn/Stash-MCP",
+  "license": "MIT",
+  "keywords": ["stash", "mcp", "content-store", "documentation", "knowledge-base"]
+}

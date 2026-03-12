@@ -1,0 +1,36 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "A Stash-MCP content store is connected. Before performing any content operations in this session, read the deployment-specific usage guide by calling read_content(\".stash/SKILL.md\"). This document contains conventions, directory structure, templates, and naming patterns specific to this content store. If the file does not exist, proceed without it — the plugin's built-in skill covers universal patterns.",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "start_content_transaction",
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "Before starting a new transaction, check for orphaned transactions by calling list_content_transactions() first. If a transaction is already active: (1) if this session owns it, decide whether to commit or abort it before starting a new one; (2) if another session owns it, inform the user that a transaction is in progress and wait rather than proceeding. Do NOT skip this check — orphaned transactions from crashed sessions will block all writes.",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "overwrite_content",
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "You are about to use overwrite_content, which replaces the entire file. Consider whether edit_content would be more appropriate. Use overwrite_content ONLY when: (1) you are regenerating the file entirely from scratch, or (2) the complete new content is intentionally different from the original. If you are modifying part of the file, use edit_content instead — it preserves content you didn't intend to change and is safer when working from partial context. If overwrite_content is genuinely the right choice here, proceed.",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}
