@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 
 import markdown as md
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileSystem
@@ -748,6 +748,7 @@ def _page(
     right: str = "",
     mode: str = "view",
     path: str = "",
+    read_only: bool = False,
 ) -> str:
     """Wrap content in the three-panel layout."""
     right_panel = f'<aside class="right-panel">{right}</aside>' if right else ""
@@ -756,14 +757,17 @@ def _page(
     mode_tabs = ""
     if path:
         view_cls = "mode-tab active" if mode == "view" else "mode-tab"
-        edit_cls = "mode-tab active" if mode == "edit" else "mode-tab"
         escaped_path = html.escape(path)
+        edit_tab = "" if read_only else (
+            f'<a class="{"mode-tab active" if mode == "edit" else "mode-tab"}" '
+            f'href="/ui/edit/{escaped_path}">'
+            f'{_icon("pencil")} Edit</a>'
+        )
         mode_tabs = (
             '<div class="mode-tabs">'
             f'<a class="{view_cls}" href="/ui/browse/{escaped_path}">'
             f'{_icon("eye")} View</a>'
-            f'<a class="{edit_cls}" href="/ui/edit/{escaped_path}">'
-            f'{_icon("pencil")} Edit</a>'
+            f'{edit_tab}'
             "</div>"
         )
 
@@ -810,15 +814,23 @@ def _page(
 </body></html>"""
 
 
-def _sidebar_html(filesystem: FileSystem, active: str = "", search_enabled: bool = False) -> str:
+def _sidebar_html(
+    filesystem: FileSystem,
+    active: str = "",
+    search_enabled: bool = False,
+    read_only: bool = False,
+) -> str:
     """Build sidebar HTML with header + search + tree."""
     tree = _build_tree_html(filesystem, active=active)
     vector_attr = ' data-vector-search="true"' if search_enabled else ""
     placeholder = "Search content\u2026" if search_enabled else "Search files..."
     results_div = '<div id="search-results" class="search-results"></div>' if search_enabled else ""
+    new_doc_btn = (
+        "" if read_only else f'<a href="/ui/new" class="btn-new">{_icon("plus")} New Document</a>'
+    )
     return (
         '<div class="sidebar-header">'
-        f'<a href="/ui/new" class="btn-new">{_icon("plus")} New Document</a>'
+        f'{new_doc_btn}'
         f'<div class="search-box"{vector_attr}>'
         f'<input type="text" id="tree-search" class="search-input" '
         f'placeholder="{placeholder}" aria-label="Search" '
@@ -835,12 +847,18 @@ def _sidebar_html(filesystem: FileSystem, active: str = "", search_enabled: bool
 # ---------------------------------------------------------------------------
 
 
-def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
+def create_ui_router(
+    filesystem: FileSystem,
+    search_engine=None,
+    read_only: bool = False,
+) -> APIRouter:
     """Create UI router with content browser & editor.
 
     Args:
         filesystem: Filesystem instance
         search_engine: Optional SearchEngine for vector search
+        read_only: When True, editing UI elements are hidden and write
+            endpoints return HTTP 403.
 
     Returns:
         FastAPI router for UI
@@ -860,7 +878,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
         """Browse a directory or view a file."""
         # Normalise empty / trailing slashes
         path = path.strip("/")
-        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled)
+        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled, read_only=read_only)
         breadcrumbs = _breadcrumbs_html(path)
 
         # Determine if path is a directory or a file
@@ -988,7 +1006,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 f'<span class="value">{words}</span></div>'
                 '</div>'
             )
-            _action_stack = (
+            _action_stack = "" if read_only else (
                 '<div class="action-stack">'
                 f'<button class="btn-rename" onclick="showRename(this)">'
                 f'{_icon("pen-line")} Rename / Move</button>'
@@ -1041,6 +1059,7 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
                 )
             return _page(
                 PurePosixPath(path).name, sidebar, center, right, mode="view", path=path,
+                read_only=read_only,
             )
 
         # path exists but is neither dir nor file
@@ -1087,8 +1106,10 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
     @router.get("/ui/edit/{path:path}", response_class=HTMLResponse)
     async def ui_edit(path: str) -> str:
         """Edit an existing file."""
+        if read_only:
+            return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
         path = path.strip("/")
-        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled)
+        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled, read_only=read_only)
         breadcrumbs = _breadcrumbs_html(path)
 
         try:
@@ -1184,13 +1205,16 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
         )
         return _page(
             f"Edit {path}", sidebar, center, right, mode="edit", path=path,
+            read_only=read_only,
         )
 
     # --- new file ---
     @router.get("/ui/new", response_class=HTMLResponse)
     async def ui_new() -> str:
         """Create a new file form."""
-        sidebar = _sidebar_html(filesystem, search_enabled=_search_enabled)
+        if read_only:
+            return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
+        sidebar = _sidebar_html(filesystem, search_enabled=_search_enabled, read_only=read_only)
         breadcrumbs = _breadcrumbs_html("")
         center = (
             f'<div class="breadcrumbs">{breadcrumbs}</div>'
@@ -1211,6 +1235,8 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
     @router.post("/ui/save")
     async def ui_save(request: Request, path: str = Form(...), content: str = Form(...)):
         """Save file content (create or update)."""
+        if read_only:
+            return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
         path = path.strip("/")
         try:
             is_new = not filesystem.file_exists(path)
@@ -1226,6 +1252,8 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
     @router.post("/ui/move/{path:path}")
     async def ui_move(path: str, destination: str = Form(...)):
         """Move/rename a file and redirect to the new location."""
+        if read_only:
+            return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
         path = path.strip("/")
         destination = destination.strip("/")
         try:
@@ -1240,6 +1268,8 @@ def create_ui_router(filesystem: FileSystem, search_engine=None) -> APIRouter:
     @router.post("/ui/delete/{path:path}")
     async def ui_delete(path: str):
         """Delete a file and redirect to parent directory."""
+        if read_only:
+            return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
         path = path.strip("/")
         parent = str(PurePosixPath(path).parent)
         if parent == ".":
