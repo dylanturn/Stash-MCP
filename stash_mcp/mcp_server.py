@@ -1,5 +1,6 @@
 """MCP Server implementation for Stash using FastMCP."""
 
+import asyncio
 import functools
 import hashlib
 import logging
@@ -553,7 +554,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             A dict with 'content' (file text), 'sha' (SHA-256 hex digest of
             the FULL file), and 'truncated' (bool)
         """
-        content = filesystem.read_file(path)
+        content = await asyncio.to_thread(filesystem.read_file, path)
         sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
         truncated = False
         if max_lines is not None:
@@ -601,7 +602,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         results = []
         for path in paths:
             try:
-                content = filesystem.read_file(path)
+                content = await asyncio.to_thread(filesystem.read_file, path)
                 sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 truncated = False
                 if max_lines is not None:
