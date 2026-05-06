@@ -14,6 +14,7 @@ from .api import create_api
 from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_UPDATED, add_listener, emit
 from .filesystem import FileSystem
+from .frontend import FRONTEND_DIR, mount_frontend
 from .mcp_server import create_mcp_server
 from .metrics import get_metrics, init_metrics
 from .ui import create_ui_router
@@ -321,9 +322,14 @@ def create_app():
             get_metrics().record_server_event("shutdown")
             get_metrics().close()
 
-    app = create_api(filesystem, lifespan=_combined_lifespan, search_engine=search_engine)
-    ui_router = create_ui_router(filesystem, search_engine=search_engine, read_only=Config.READ_ONLY)
-    app.include_router(ui_router)
+    app = create_api(
+        filesystem,
+        lifespan=_combined_lifespan,
+        search_engine=search_engine,
+        git_backend=git_backend,
+        git_overview_remote=Config.GIT_OVERVIEW_REMOTE,
+        git_overview_branch=Config.GIT_OVERVIEW_BRANCH,
+    )
 
     # Serve vendored static assets (highlight.js, mermaid.js, etc.)
     static_dir = Path(__file__).parent / "static"
@@ -331,6 +337,23 @@ def create_app():
 
     # Mount FastMCP server onto FastAPI for streamable HTTP transport
     app.mount("/mcp", mcp_http_app)
+
+    # Mount UI: when the React SPA dist exists, serve it at /ui and the legacy
+    # HTML UI at /ui/classic.  Without a dist, the legacy UI serves at /ui.
+    # The legacy router must be registered before the SPA mount so its specific
+    # routes take priority over the SPA catch-all.
+    has_frontend = FRONTEND_DIR.is_dir()
+    legacy_prefix = "/ui/classic" if has_frontend else "/ui"
+    ui_router = create_ui_router(
+        filesystem,
+        search_engine=search_engine,
+        read_only=Config.READ_ONLY,
+        prefix=legacy_prefix,
+    )
+    app.include_router(ui_router)
+
+    if has_frontend:
+        mount_frontend(app)
 
     # Normalize /mcp → /mcp/ so the mounted sub-app handles requests to
     # both paths without a 307 redirect.  Redirects can break MCP clients

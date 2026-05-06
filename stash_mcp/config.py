@@ -89,6 +89,10 @@ class Config:
     GIT_SYNC_TOKEN: str | None = os.getenv("STASH_GIT_SYNC_TOKEN")
     GIT_AUTHOR_DEFAULT: str = os.getenv("STASH_GIT_AUTHOR_DEFAULT", "stash-mcp <stash@local>")
 
+    # Git overview (UI comparison target)
+    GIT_OVERVIEW_REMOTE: str = os.getenv("STASH_GIT_OVERVIEW_REMOTE", "")
+    GIT_OVERVIEW_BRANCH: str = os.getenv("STASH_GIT_OVERVIEW_BRANCH", "")
+
     # Transaction settings (only relevant when GIT_TRACKING=true and READ_ONLY=false)
     TRANSACTION_TIMEOUT: int = int(os.getenv("STASH_TRANSACTION_TIMEOUT", "300"))
     TRANSACTION_LOCK_WAIT: int = int(os.getenv("STASH_TRANSACTION_LOCK_WAIT", "120"))

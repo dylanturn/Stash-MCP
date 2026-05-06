@@ -67,7 +67,14 @@ class TreeNode(BaseModel):
     children: list["TreeNode"] | None = None
 
 
-def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> FastAPI:
+def create_api(
+    filesystem: FileSystem,
+    lifespan=None,
+    search_engine=None,
+    git_backend=None,
+    git_overview_remote: str = "",
+    git_overview_branch: str = "",
+) -> FastAPI:
     """Create FastAPI application.
 
     Args:
@@ -306,6 +313,20 @@ def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> Fas
         except Exception as e:
             logger.error(f"Error moving content: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
+
+    # --- Git endpoints (only when git backend is available) ---
+
+    if git_backend is not None:
+
+        @app.get("/api/git/overview")
+        async def git_overview(max_commits: int = 20):
+            """Get git commit history overview."""
+            return await asyncio.to_thread(
+                git_backend.overview,
+                max_commits,
+                git_overview_remote,
+                git_overview_branch,
+            )
 
     # --- Search endpoints (only when search engine is available) ---
 

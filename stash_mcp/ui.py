@@ -170,20 +170,20 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} GB"
 
 
-def _breadcrumbs(path: str) -> list[tuple[str, str]]:
+def _breadcrumbs(path: str, prefix: str = "/ui") -> list[tuple[str, str]]:
     """Return list of (label, href) breadcrumb pairs."""
-    crumbs: list[tuple[str, str]] = [("Home", "/ui/browse/")]
+    crumbs: list[tuple[str, str]] = [("Home", f"{prefix}/browse/")]
     if not path:
         return crumbs
     parts = path.strip("/").split("/")
     for i, part in enumerate(parts):
-        href = "/ui/browse/" + "/".join(parts[: i + 1])
+        href = f"{prefix}/browse/" + "/".join(parts[: i + 1])
         crumbs.append((part, href))
     return crumbs
 
 
-def _breadcrumbs_html(path: str) -> str:
-    crumbs = _breadcrumbs(path)
+def _breadcrumbs_html(path: str, prefix: str = "/ui") -> str:
+    crumbs = _breadcrumbs(path, prefix)
     items = []
     for i, (label, href) in enumerate(crumbs):
         escaped = html.escape(label)
@@ -224,7 +224,7 @@ def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
     return dirs + readme + files
 
 
-def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
+def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "", prefix: str = "/ui") -> str:
     """Build recursive HTML for the sidebar tree."""
     try:
         entries = filesystem.list_files(rel)
@@ -237,7 +237,7 @@ def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") ->
         escaped = html.escape(name)
         if is_dir:
             open_attr = "open" if active.startswith(child) else ""
-            children_html = _build_tree_html(filesystem, child, active)
+            children_html = _build_tree_html(filesystem, child, active, prefix)
             escaped_child = html.escape(child)
             parts.append(
                 f'<details {open_attr} data-path="{escaped_child}">'
@@ -251,7 +251,7 @@ def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") ->
             icon = _file_icon(name)
             sel = ' class="tree-file selected"' if child == active else ' class="tree-file"'
             escaped_child = html.escape(child)
-            parts.append(f'<a href="/ui/browse/{escaped_child}"{sel}>{icon} {escaped}</a>')
+            parts.append(f'<a href="{prefix}/browse/{escaped_child}"{sel}>{icon} {escaped}</a>')
     return "\n".join(parts)
 
 
@@ -617,7 +617,7 @@ function handleSearch(query){
       box.classList.add('active');
       if(tree)tree.style.display='none';
     }
-    fetch('/ui/search?q='+encodeURIComponent(query))
+    fetch(_uiPrefix+'/search?q='+encodeURIComponent(query))
       .then(function(r){return r.json();})
       .then(function(data){
         if(!box)return;
@@ -626,7 +626,7 @@ function handleSearch(query){
           data.results.forEach(function(r){
             var snippet=r.content||'';
             if(snippet.length>120)snippet=snippet.substring(0,120)+'\u2026';
-            h+='<a class="search-result" href="/ui/browse/'+encodeURIComponent(r.file_path)+'">'
+            h+='<a class="search-result" href="'+_uiPrefix+'/browse/'+encodeURIComponent(r.file_path)+'">'
               +'<span class="search-result-path">'+_escHtml(r.file_path)+'</span>'
               +'<span class="search-result-snippet">'+_escHtml(snippet)+'</span>'
               +'</a>';
@@ -749,6 +749,7 @@ def _page(
     mode: str = "view",
     path: str = "",
     read_only: bool = False,
+    prefix: str = "/ui",
 ) -> str:
     """Wrap content in the three-panel layout."""
     right_panel = f'<aside class="right-panel">{right}</aside>' if right else ""
@@ -760,12 +761,12 @@ def _page(
         escaped_path = html.escape(path)
         edit_tab = "" if read_only else (
             f'<a class="{"mode-tab active" if mode == "edit" else "mode-tab"}" '
-            f'href="/ui/edit/{escaped_path}">'
+            f'href="{prefix}/edit/{escaped_path}">'
             f'{_icon("pencil")} Edit</a>'
         )
         mode_tabs = (
             '<div class="mode-tabs">'
-            f'<a class="{view_cls}" href="/ui/browse/{escaped_path}">'
+            f'<a class="{view_cls}" href="{prefix}/browse/{escaped_path}">'
             f'{_icon("eye")} View</a>'
             f'{edit_tab}'
             "</div>"
@@ -810,6 +811,7 @@ def _page(
 {right_panel}
 </div>
 </div>
+<script>var _uiPrefix='{prefix}';</script>
 <script>{_JS}</script>
 </body></html>"""
 
@@ -819,14 +821,15 @@ def _sidebar_html(
     active: str = "",
     search_enabled: bool = False,
     read_only: bool = False,
+    prefix: str = "/ui",
 ) -> str:
     """Build sidebar HTML with header + search + tree."""
-    tree = _build_tree_html(filesystem, active=active)
+    tree = _build_tree_html(filesystem, active=active, prefix=prefix)
     vector_attr = ' data-vector-search="true"' if search_enabled else ""
     placeholder = "Search content\u2026" if search_enabled else "Search files..."
     results_div = '<div id="search-results" class="search-results"></div>' if search_enabled else ""
     new_doc_btn = (
-        "" if read_only else f'<a href="/ui/new" class="btn-new">{_icon("plus")} New Document</a>'
+        "" if read_only else f'<a href="{prefix}/new" class="btn-new">{_icon("plus")} New Document</a>'
     )
     return (
         '<div class="sidebar-header">'
@@ -851,6 +854,7 @@ def create_ui_router(
     filesystem: FileSystem,
     search_engine=None,
     read_only: bool = False,
+    prefix: str = "/ui",
 ) -> APIRouter:
     """Create UI router with content browser & editor.
 
@@ -859,6 +863,7 @@ def create_ui_router(
         search_engine: Optional SearchEngine for vector search
         read_only: When True, editing UI elements are hidden and write
             endpoints return HTTP 403.
+        prefix: URL prefix for all UI routes (e.g. "/ui" or "/ui/classic").
 
     Returns:
         FastAPI router for UI
@@ -866,20 +871,20 @@ def create_ui_router(
     _search_enabled = search_engine is not None
     router = APIRouter()
 
-    # --- redirect /ui to /ui/browse/ ---
-    @router.get("/ui", response_class=RedirectResponse)
+    # --- redirect prefix to prefix/browse/ ---
+    @router.get(prefix, response_class=RedirectResponse)
     async def ui_home():
         """Redirect to browse root."""
-        return RedirectResponse(url="/ui/browse/", status_code=302)
+        return RedirectResponse(url=f"{prefix}/browse/", status_code=302)
 
     # --- browse (directory listing or file view) ---
-    @router.get("/ui/browse/{path:path}", response_class=HTMLResponse)
+    @router.get(f"{prefix}/browse/{{path:path}}", response_class=HTMLResponse)
     async def ui_browse(path: str) -> str:
         """Browse a directory or view a file."""
         # Normalise empty / trailing slashes
         path = path.strip("/")
-        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled, read_only=read_only)
-        breadcrumbs = _breadcrumbs_html(path)
+        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled, read_only=read_only, prefix=prefix)
+        breadcrumbs = _breadcrumbs_html(path, prefix)
 
         # Determine if path is a directory or a file
         try:
@@ -889,7 +894,7 @@ def create_ui_router(
                 f'<div class="breadcrumbs">{breadcrumbs}</div>'
                 '<div class="error-msg">Invalid path.</div>'
             )
-            return _page("Error", sidebar, center)
+            return _page("Error", sidebar, center, prefix=prefix)
 
         # --- directory listing ---
         if full.is_dir():
@@ -905,7 +910,7 @@ def create_ui_router(
                 escaped_child = html.escape(child)
                 if is_dir:
                     rows += (
-                        f'<tr><td class="dir"><a href="/ui/browse/{escaped_child}">'
+                        f'<tr><td class="dir"><a href="{prefix}/browse/{escaped_child}">'
                         f"{_icon('folder')} {escaped}/</a></td>"
                         "<td>directory</td><td>\u2014</td><td>\u2014</td></tr>"
                     )
@@ -923,7 +928,7 @@ def create_ui_router(
                         mtime = "\u2014"
                     icon = _file_icon(name)
                     rows += (
-                        f'<tr><td class="name"><a href="/ui/browse/{escaped_child}">'
+                        f'<tr><td class="name"><a href="{prefix}/browse/{escaped_child}">'
                         f"{icon} {escaped}</a></td>"
                         f"<td>{html.escape(_mime_type(child))}</td>"
                         f"<td>{size}</td><td>{mtime}</td></tr>"
@@ -944,7 +949,7 @@ def create_ui_router(
                 f"<h1>{html.escape(title)}</h1>"
                 f"{table}"
             )
-            return _page(f"Browse {title}", sidebar, center)
+            return _page(f"Browse {title}", sidebar, center, prefix=prefix)
 
         # --- file view ---
         if full.is_file():
@@ -955,7 +960,7 @@ def create_ui_router(
                     f'<div class="breadcrumbs">{breadcrumbs}</div>'
                     f'<div class="error-msg">Error reading file: {html.escape(str(exc))}</div>'
                 )
-                return _page("Error", sidebar, center)
+                return _page("Error", sidebar, center, prefix=prefix)
 
             escaped_content = html.escape(content)
             toc_html = ""
@@ -1010,7 +1015,7 @@ def create_ui_router(
                 '<div class="action-stack">'
                 f'<button class="btn-rename" onclick="showRename(this)">'
                 f'{_icon("pen-line")} Rename / Move</button>'
-                f'<form method="post" action="/ui/move/{html.escape(path)}" '
+                f'<form method="post" action="{prefix}/move/{html.escape(path)}" '
                 f'class="rename-form">'
                 f'<input type="text" name="destination" class="rename-input" '
                 f'value="{html.escape(path)}">'
@@ -1021,7 +1026,7 @@ def create_ui_router(
                 "</div></form>"
                 f'<button class="btn-delete" onclick="showConfirm(this)">'
                 f'{_icon("trash-2")} Delete</button>'
-                f'<form method="post" action="/ui/delete/{html.escape(path)}" '
+                f'<form method="post" action="{prefix}/delete/{html.escape(path)}" '
                 f'style="display:none" '
                 f'class="del-form">'
                 '<div class="confirm-row">'
@@ -1059,7 +1064,7 @@ def create_ui_router(
                 )
             return _page(
                 PurePosixPath(path).name, sidebar, center, right, mode="view", path=path,
-                read_only=read_only,
+                read_only=read_only, prefix=prefix,
             )
 
         # path exists but is neither dir nor file
@@ -1067,10 +1072,10 @@ def create_ui_router(
             f'<div class="breadcrumbs">{breadcrumbs}</div>'
             '<div class="error-msg">Path not found.</div>'
         )
-        return _page("Not Found", sidebar, center)
+        return _page("Not Found", sidebar, center, prefix=prefix)
 
-    # also handle bare /ui/browse/ (no trailing path)
-    @router.get("/ui/browse/", response_class=HTMLResponse)
+    # also handle bare prefix/browse/ (no trailing path)
+    @router.get(f"{prefix}/browse/", response_class=HTMLResponse)
     async def ui_browse_root() -> str:
         """Browse root directory."""
         return await ui_browse("")
@@ -1079,7 +1084,7 @@ def create_ui_router(
     if search_engine is not None:
         from fastapi.responses import JSONResponse
 
-        @router.get("/ui/search")
+        @router.get(f"{prefix}/search")
         async def ui_search(q: str = "", max_results: int = 10):
             """Search content using the vector search engine."""
             if not q.strip():
@@ -1103,14 +1108,14 @@ def create_ui_router(
             )
 
     # --- edit ---
-    @router.get("/ui/edit/{path:path}", response_class=HTMLResponse)
+    @router.get(f"{prefix}/edit/{{path:path}}", response_class=HTMLResponse)
     async def ui_edit(path: str) -> str:
         """Edit an existing file."""
         if read_only:
             return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
         path = path.strip("/")
-        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled, read_only=read_only)
-        breadcrumbs = _breadcrumbs_html(path)
+        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled, read_only=read_only, prefix=prefix)
+        breadcrumbs = _breadcrumbs_html(path, prefix)
 
         try:
             content = filesystem.read_file(path)
@@ -1119,16 +1124,16 @@ def create_ui_router(
                 f'<div class="breadcrumbs">{breadcrumbs}</div>'
                 f'<div class="error-msg">Error: {html.escape(str(exc))}</div>'
             )
-            return _page("Error", sidebar, center)
+            return _page("Error", sidebar, center, prefix=prefix)
 
         escaped = html.escape(content)
         center = (
-            f'<form class="editor-form" method="post" action="/ui/save">'
+            f'<form class="editor-form" method="post" action="{prefix}/save">'
             f'<input type="hidden" name="path" value="{html.escape(path)}">'
             f'<textarea class="editor-area" name="content">{escaped}</textarea>'
             '<div class="action-bar">'
             f'<button type="submit" class="btn btn-save">{_icon("save")} Save</button>'
-            f'<a href="/ui/browse/{html.escape(path)}" class="btn btn-discard">'
+            f'<a href="{prefix}/browse/{html.escape(path)}" class="btn btn-discard">'
             f'{_icon("x")} Discard</a>'
             "</div></form>"
         )
@@ -1182,7 +1187,7 @@ def create_ui_router(
             '<div class="action-stack">'
             f'<button class="btn-rename" onclick="showRename(this)">'
             f'{_icon("pen-line")} Rename / Move</button>'
-            f'<form method="post" action="/ui/move/{html.escape(path)}" '
+            f'<form method="post" action="{prefix}/move/{html.escape(path)}" '
             f'class="rename-form">'
             f'<input type="text" name="destination" class="rename-input" '
             f'value="{html.escape(path)}">'
@@ -1193,7 +1198,7 @@ def create_ui_router(
             "</div></form>"
             f'<button class="btn-delete" onclick="showConfirm(this)">'
             f'{_icon("trash-2")} Delete</button>'
-            f'<form method="post" action="/ui/delete/{html.escape(path)}" '
+            f'<form method="post" action="{prefix}/delete/{html.escape(path)}" '
             f'style="display:none" '
             f'class="del-form">'
             '<div class="confirm-row">'
@@ -1205,34 +1210,34 @@ def create_ui_router(
         )
         return _page(
             f"Edit {path}", sidebar, center, right, mode="edit", path=path,
-            read_only=read_only,
+            read_only=read_only, prefix=prefix,
         )
 
     # --- new file ---
-    @router.get("/ui/new", response_class=HTMLResponse)
+    @router.get(f"{prefix}/new", response_class=HTMLResponse)
     async def ui_new() -> str:
         """Create a new file form."""
         if read_only:
             return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
-        sidebar = _sidebar_html(filesystem, search_enabled=_search_enabled, read_only=read_only)
-        breadcrumbs = _breadcrumbs_html("")
+        sidebar = _sidebar_html(filesystem, search_enabled=_search_enabled, read_only=read_only, prefix=prefix)
+        breadcrumbs = _breadcrumbs_html("", prefix)
         center = (
             f'<div class="breadcrumbs">{breadcrumbs}</div>'
             "<h1>New Document</h1>"
-            '<form method="post" action="/ui/save">'
+            f'<form method="post" action="{prefix}/save">'
             '<input class="path-input" type="text" name="path" '
             'placeholder="e.g. notes/meeting.md" required>'
             '<textarea class="editor-area" name="content" '
             'placeholder="Start writing\u2026"></textarea>'
             '<div class="action-bar">'
             f'<button type="submit" class="btn btn-save">{_icon("save")} Create</button>'
-            f'<a href="/ui/browse/" class="btn btn-cancel">{_icon("x")} Cancel</a>'
+            f'<a href="{prefix}/browse/" class="btn btn-cancel">{_icon("x")} Cancel</a>'
             "</div></form>"
         )
-        return _page("New Document", sidebar, center)
+        return _page("New Document", sidebar, center, prefix=prefix)
 
     # --- save (handles both create and edit) ---
-    @router.post("/ui/save")
+    @router.post(f"{prefix}/save")
     async def ui_save(request: Request, path: str = Form(...), content: str = Form(...)):
         """Save file content (create or update)."""
         if read_only:
@@ -1245,11 +1250,11 @@ def create_ui_router(
         except Exception as exc:
             logger.error(f"UI save error: {exc}")
             # Fall back to edit page with error shown via redirect
-            return RedirectResponse(url=f"/ui/edit/{path}", status_code=303)
-        return RedirectResponse(url=f"/ui/browse/{path}", status_code=303)
+            return RedirectResponse(url=f"{prefix}/edit/{path}", status_code=303)
+        return RedirectResponse(url=f"{prefix}/browse/{path}", status_code=303)
 
     # --- move / rename ---
-    @router.post("/ui/move/{path:path}")
+    @router.post(f"{prefix}/move/{{path:path}}")
     async def ui_move(path: str, destination: str = Form(...)):
         """Move/rename a file and redirect to the new location."""
         if read_only:
@@ -1261,11 +1266,11 @@ def create_ui_router(
             emit(CONTENT_MOVED, destination, source_path=path)
         except Exception as exc:
             logger.error(f"UI move error: {exc}")
-            return RedirectResponse(url=f"/ui/browse/{path}", status_code=303)
-        return RedirectResponse(url=f"/ui/browse/{destination}", status_code=303)
+            return RedirectResponse(url=f"{prefix}/browse/{path}", status_code=303)
+        return RedirectResponse(url=f"{prefix}/browse/{destination}", status_code=303)
 
     # --- delete ---
-    @router.post("/ui/delete/{path:path}")
+    @router.post(f"{prefix}/delete/{{path:path}}")
     async def ui_delete(path: str):
         """Delete a file and redirect to parent directory."""
         if read_only:
@@ -1279,6 +1284,6 @@ def create_ui_router(
             emit(CONTENT_DELETED, path)
         except Exception as exc:
             logger.error(f"UI delete error: {exc}")
-        return RedirectResponse(url=f"/ui/browse/{parent}", status_code=303)
+        return RedirectResponse(url=f"{prefix}/browse/{parent}", status_code=303)
 
     return router

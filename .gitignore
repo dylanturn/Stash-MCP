@@ -1,3 +1,7 @@
+# React frontend build artifacts
+stash_ui/node_modules/
+stash_ui/dist/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

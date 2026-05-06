@@ -24,6 +24,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "markdown>=3.7",
     "tinyflux>=1.2.0",
+    "aiofiles>=24.1.0",
 ]
 
 [project.scripts]

@@ -1,0 +1,35 @@
+@import './fonts.css';
+@import './tailwind.css';
+@import './theme.css';
+
+/* Stash-MCP Custom Styles */
+
+/* Custom scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--stash-border);
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--stash-text-secondary);
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  opacity: 1;
+}
+
+/* Ensure body uses Stash-MCP base background */
+body {
+  background-color: var(--stash-bg-base) !important;
+}

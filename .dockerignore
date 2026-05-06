@@ -14,3 +14,5 @@ dist
 build
 .env
 .envrc
+stash_ui/node_modules
+stash_ui/dist

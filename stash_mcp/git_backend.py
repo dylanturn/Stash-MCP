@@ -145,6 +145,63 @@ def _parse_author_string(author: str) -> tuple[str, str]:
     return author.strip(), ""
 
 
+def _parse_diff_hunks(diff_text: str) -> list[dict]:
+    """Parse unified diff text into DiffLine dicts for the UI."""
+    lines: list[dict] = []
+    current_old = 0
+    current_new = 0
+    in_hunk = False
+
+    for line in diff_text.splitlines():
+        if line.startswith("@@"):
+            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if match:
+                current_old = int(match.group(1))
+                current_new = int(match.group(2))
+            in_hunk = True
+            continue
+
+        if not in_hunk:
+            continue
+
+        if line.startswith("+"):
+            lines.append(
+                {"type": "add", "lineNumber": current_new, "content": line[1:]}
+            )
+            current_new += 1
+        elif line.startswith("-"):
+            lines.append(
+                {"type": "delete", "lineNumber": current_old, "content": line[1:]}
+            )
+            current_old += 1
+        elif line.startswith("\\"):
+            # "\ No newline at end of file" — skip
+            continue
+        elif line.startswith(" "):
+            lines.append(
+                {"type": "context", "lineNumber": current_new, "content": line[1:]}
+            )
+            current_old += 1
+            current_new += 1
+        else:
+            # Non-diff line (e.g. start of next section) — end of hunk
+            in_hunk = False
+
+    return lines
+
+
+def _extract_diff_path(prefix_line: str) -> str | None:
+    """Extract file path from a ``---`` or ``+++`` diff header line."""
+    rest = prefix_line[4:]  # strip "--- " or "+++ "
+    if rest == "/dev/null":
+        return None
+    if rest.startswith('"') and rest.endswith('"'):
+        rest = rest[1:-1]
+    if rest.startswith("a/") or rest.startswith("b/"):
+        return rest[2:]
+    return rest
+
+
 class GitBackend:
     """Wraps git CLI operations used by Stash-MCP."""
 
@@ -579,3 +636,206 @@ class GitBackend:
             deleted_files=deleted,
             message=result.stdout.strip(),
         )
+
+    # ------------------------------------------------------------------
+    # Overview (UI data)
+    # ------------------------------------------------------------------
+
+    def _current_branch(self) -> str:
+        result = self._run(["git", "branch", "--show-current"])
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        return "main"
+
+    def _default_branch(self) -> str:
+        """Detect the remote HEAD branch (e.g. 'main' or 'master')."""
+        result = self._run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"]
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Returns e.g. "origin/main" — strip the remote prefix
+            return result.stdout.strip().split("/", 1)[-1]
+        return "main"
+
+    def _ahead_behind(self, comparison_ref: str) -> tuple[int, int]:
+        """Return (ahead, behind) counts for HEAD vs *comparison_ref*."""
+        result = self._run(
+            ["git", "rev-list", "--left-right", "--count",
+             f"HEAD...{comparison_ref}"]
+        )
+        if result.returncode != 0:
+            return (0, 0)
+        parts = result.stdout.strip().split()
+        if len(parts) == 2:
+            try:
+                return int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
+        return (0, 0)
+
+    def _parse_patch_files(
+        self, patch_content: str, commit_short: str
+    ) -> list[dict]:
+        """Split a commit's patch output into per-file change dicts."""
+        changes: list[dict] = []
+        file_diffs = re.split(r"^diff --git ", patch_content, flags=re.MULTILINE)
+
+        for idx, section in enumerate(file_diffs):
+            if not section.strip():
+                continue
+
+            full_diff = "diff --git " + section
+            old_path: str | None = None
+            new_path: str | None = None
+            status = "modified"
+
+            for line in full_diff.splitlines():
+                if line.startswith("--- "):
+                    extracted = _extract_diff_path(line)
+                    if extracted is None:
+                        status = "added"
+                    else:
+                        old_path = extracted
+                elif line.startswith("+++ "):
+                    extracted = _extract_diff_path(line)
+                    if extracted is None:
+                        status = "deleted"
+                    else:
+                        new_path = extracted
+                elif line.startswith("new file mode"):
+                    status = "added"
+                elif line.startswith("deleted file mode"):
+                    status = "deleted"
+                elif "rename from" in line:
+                    status = "renamed"
+
+            # Fallback: extract paths from diff header
+            if new_path is None and old_path is None:
+                header = full_diff.splitlines()[0]
+                m = re.match(r"diff --git a/(.*?) b/(.*?)$", header)
+                if m:
+                    old_path = m.group(1)
+                    new_path = m.group(2)
+
+            display_path = new_path or old_path
+            if not display_path:
+                continue
+
+            name = display_path.rsplit("/", 1)[-1]
+            diff_lines = _parse_diff_hunks(full_diff)
+            additions = sum(1 for d in diff_lines if d["type"] == "add")
+            deletions = sum(1 for d in diff_lines if d["type"] == "delete")
+
+            change: dict = {
+                "id": f"{commit_short}-{idx}",
+                "path": display_path,
+                "name": name,
+                "status": status,
+                "additions": additions,
+                "deletions": deletions,
+                "diff": diff_lines,
+            }
+            if status == "renamed" and old_path and old_path != new_path:
+                change["oldPath"] = old_path
+
+            changes.append(change)
+
+        return changes
+
+    def _parse_log_with_patches(
+        self, output: str
+    ) -> tuple[list[dict], list[dict]]:
+        """Parse ``git log -p`` output into commit and change lists."""
+        commits: list[dict] = []
+        all_changes: list[dict] = []
+
+        blocks = output.split("__COMMIT__\x00")
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+
+            first_nl = block.find("\n")
+            header = block[:first_nl] if first_nl != -1 else block
+            patch = block[first_nl + 1 :] if first_nl != -1 else ""
+
+            parts = header.split("\x00")
+            if len(parts) < 4:
+                continue
+
+            commit_hash, author, date_str, message = (
+                parts[0],
+                parts[1],
+                parts[2],
+                parts[3],
+            )
+            short = commit_hash[:7]
+
+            file_changes = self._parse_patch_files(patch, short)
+            change_ids = [c["id"] for c in file_changes]
+            all_changes.extend(file_changes)
+
+            commits.append(
+                {
+                    "id": f"commit-{short}",
+                    "hash": short,
+                    "message": message,
+                    "author": author,
+                    "date": date_str,
+                    "fileChanges": change_ids,
+                    "branch": "feature",
+                }
+            )
+
+        return commits, all_changes
+
+    def overview(
+        self,
+        max_commits: int = 20,
+        remote: str = "",
+        branch: str = "",
+    ) -> dict:
+        """Build a complete git overview for the UI.
+
+        Args:
+            max_commits: Maximum number of commits to include.
+            remote: Remote name for comparison (e.g. ``"origin"``).
+                Falls back to ``"origin"`` when empty.
+            branch: Branch name for comparison (e.g. ``"main"``).
+                Falls back to the remote's default branch when empty.
+
+        Returns a dict matching the frontend ``GitBranchInfo`` shape.
+        """
+        current = self._current_branch()
+        compare_remote = remote or "origin"
+        compare_branch = branch or self._default_branch()
+        comparison_ref = f"{compare_remote}/{compare_branch}"
+
+        ahead, behind = self._ahead_behind(comparison_ref)
+
+        result = self._run(
+            [
+                "git",
+                "log",
+                f"--max-count={max_commits}",
+                "--format=__COMMIT__%x00%H%x00%an%x00%aI%x00%s",
+                "-p",
+                "-M",
+            ]
+        )
+
+        if result.returncode != 0:
+            commits, changes = [], []
+        else:
+            commits, changes = self._parse_log_with_patches(result.stdout)
+
+        return {
+            "currentBranch": current,
+            "baseBranch": compare_branch,
+            "commitsAhead": ahead,
+            "commitsBehind": behind,
+            "commits": commits,
+            "changes": changes,
+            "baseBranchChanges": [],
+            "branchPointDate": None,
+        }
