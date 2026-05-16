@@ -171,6 +171,66 @@ Run the server as a stdio subprocess directly from your MCP client config:
 }
 ```
 
+### MCP with an API token (auth-enabled deployments)
+
+When Stash-MCP runs with `STASH_AUTH_ENABLED=true`, every request must
+carry credentials and a tenant + store slug.
+
+1. Sign into the web UI at `https://your-host/ui` (OIDC).
+2. Open `/ui/account/tokens` and mint a token. Copy it once — Stash
+   never shows it again.
+3. Configure your MCP client with the token as a bearer header and
+   point it at `/mcp/<tenant>/<store>/`:
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "url": "https://stash.example.com/mcp/acme/docs/",
+      "headers": {
+        "Authorization": "Bearer stash_pat_..."
+      }
+    }
+  }
+}
+```
+
+For REST API access from a script:
+
+```bash
+curl -H "Authorization: Bearer stash_pat_..." \
+  https://stash.example.com/api/acme/docs/tree
+```
+
+To rotate a token, mint a new one and revoke the old one on
+`/ui/account/tokens`. MCP clients using the revoked token will start
+getting `401`.
+
+### Managing tenants, stores, and memberships
+
+Auth-enabled deployments ship the `stash-mcp-cli` admin tool:
+
+```bash
+# Tenants
+uv run stash-mcp-cli tenant create --slug acme --name "Acme Inc"
+uv run stash-mcp-cli tenant list
+
+# Stores (each lives at $STASH_CONTENT_ROOT/<tenant_id>/<store_slug>/)
+uv run stash-mcp-cli store create --tenant acme --slug docs --display-name "Docs"
+uv run stash-mcp-cli store create --tenant acme --slug docs \
+  --remote https://github.com/acme/docs.git --branch main
+uv run stash-mcp-cli store list --tenant acme
+
+# Manual memberships (these win over IdP group sync)
+uv run stash-mcp-cli membership grant \
+  --tenant acme --user-email alice@x --role admin
+uv run stash-mcp-cli membership revoke <membership-id>
+uv run stash-mcp-cli user list
+```
+
+Group-derived memberships (driven by `STASH_OIDC_ADMIN_GROUP`) refresh on
+every OIDC login. Manual memberships are not overwritten by group sync.
+
 ### Troubleshooting MCP Connections
 
 **"Connection refused" errors**

@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { Navigate } from 'react-router';
 import { FileNode, apiTreeToFileNodes } from '../types';
-import { getTree, getContent, putContent, deleteContent, createContent, moveContent, getGitOverview } from '../../api/client';
+import { ConcurrentEditError } from '../../api/fetch';
+import { useStore } from '../StoreContext';
+import { StorePicker } from '../components/StorePicker';
 import { FileTree } from '../components/FileTree';
 import { DocumentViewer } from '../components/DocumentViewer';
 import { DirectoryListing } from '../components/DirectoryListing';
@@ -17,8 +20,10 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { GitBranchInfo } from '../mockData/gitChanges';
 
 export function DocumentsPage() {
+  const { stores, current, loading: storeLoading, client } = useStore();
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
   const [selectedFile, setSelectedFile] = useState<FileNode | null>(null);
+  const [selectedEtag, setSelectedEtag] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isContentLoading, setIsContentLoading] = useState(false);
   const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(true);
@@ -34,10 +39,12 @@ export function DocumentsPage() {
   const [sectionsTitle, setSectionsTitle] = useState<string>('Sections');
   const [gitInfo, setGitInfo] = useState<GitBranchInfo | null>(null);
 
-  // Fetch the file tree from the API on mount
+  // Fetch the file tree from the API. Bound to the currently-selected
+  // store via the API client returned from `useStore`.
   const refreshTree = useCallback(async () => {
+    if (!client) return;
     try {
-      const tree = await getTree();
+      const tree = await client.getTree();
       setFileTree(apiTreeToFileNodes(tree));
     } catch (err) {
       console.error('Failed to load file tree:', err);
@@ -45,14 +52,22 @@ export function DocumentsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [client]);
 
+  // Reload tree + git overview whenever the active store changes. Also
+  // clears any selection from the previous store so the editor doesn't
+  // hold a stale ETag.
   useEffect(() => {
+    if (!client) return;
+    setIsLoading(true);
+    setSelectedFile(null);
+    setSelectedEtag(null);
     refreshTree();
-    getGitOverview().then((data) => {
+    client.getGitOverview().then((data) => {
       if (data) setGitInfo(data as GitBranchInfo);
+      else setGitInfo(null);
     });
-  }, [refreshTree]);
+  }, [client, refreshTree]);
 
   // Clear navigation when a directory is selected
   useEffect(() => {
@@ -70,20 +85,24 @@ export function DocumentsPage() {
   const handleSelectFile = useCallback(async (file: FileNode) => {
     if (file.type === 'folder') {
       setSelectedFile(file);
+      setSelectedEtag(null);
       return;
     }
 
-    // If content is already loaded, just select it
-    if (file.content !== undefined) {
+    // If content is already loaded, just select it. Skip the cached
+    // shortcut after a save/move/etc that bumped the ETag — we always
+    // refetch when no ETag is in state for the file.
+    if (file.content !== undefined && selectedEtag !== null) {
       setSelectedFile(file);
       return;
     }
 
+    if (!client) return;
     setIsContentLoading(true);
     setSelectedFile(file);
 
     try {
-      const data = await getContent(file.path);
+      const { content: data, etag } = await client.getContent(file.path);
       const enrichedFile: FileNode = {
         ...file,
         content: data.content ?? '',
@@ -92,6 +111,7 @@ export function DocumentsPage() {
         mimeType: data.mime_type ?? undefined,
       };
       setSelectedFile(enrichedFile);
+      setSelectedEtag(etag);
 
       // Also update the file in the tree so re-selecting doesn't re-fetch
       setFileTree((prev) => updateFileInTree(prev, file.id, enrichedFile));
@@ -101,7 +121,7 @@ export function DocumentsPage() {
     } finally {
       setIsContentLoading(false);
     }
-  }, []);
+  }, [client, selectedEtag]);
 
   const updateFileInTree = (
     nodes: FileNode[],
@@ -121,10 +141,14 @@ export function DocumentsPage() {
   };
 
   const handleSaveFile = async (content: string) => {
-    if (!selectedFile) return;
+    if (!selectedFile || !client) return;
 
     try {
-      await putContent(selectedFile.path, content);
+      const { etag } = await client.putContent(
+        selectedFile.path,
+        content,
+        selectedEtag
+      );
       const updatedFile: FileNode = {
         ...selectedFile,
         content,
@@ -132,20 +156,51 @@ export function DocumentsPage() {
         lastModified: new Date().toISOString(),
       };
       setSelectedFile(updatedFile);
+      setSelectedEtag(etag);
       setFileTree((prev) => updateFileInTree(prev, selectedFile.id, updatedFile));
       toast.success('Document saved');
     } catch (err) {
+      if (err instanceof ConcurrentEditError) {
+        // Reload server copy so the user sees what's there now; the
+        // editor's unsaved buffer is lost. v1 ships discard only; a
+        // diff/overwrite affordance is a follow-on (spec 06).
+        toast.error(
+          'Another writer changed this file. Reloaded the latest version.'
+        );
+        const path = selectedFile.path;
+        try {
+          const { content: data, etag } = await client.getContent(path);
+          const reloaded: FileNode = {
+            ...selectedFile,
+            content: data.content ?? '',
+            size: data.content
+              ? new TextEncoder().encode(data.content).length
+              : 0,
+            lastModified: data.updated_at ?? undefined,
+            mimeType: data.mime_type ?? undefined,
+          };
+          setSelectedFile(reloaded);
+          setSelectedEtag(etag);
+          setFileTree((prev) =>
+            updateFileInTree(prev, selectedFile.id, reloaded)
+          );
+        } catch (reloadErr) {
+          console.error('Failed to reload after 412:', reloadErr);
+        }
+        return;
+      }
       console.error('Failed to save file:', err);
       toast.error('Failed to save document');
     }
   };
 
   const handleDeleteFile = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || !client) return;
 
     try {
-      await deleteContent(selectedFile.path);
+      await client.deleteContent(selectedFile.path);
       setSelectedFile(null);
+      setSelectedEtag(null);
       await refreshTree();
       toast.success('Document deleted');
     } catch (err) {
@@ -164,11 +219,12 @@ export function DocumentsPage() {
   };
 
   const handleMoveItem = async (item: FileNode) => {
+    if (!client) return;
     const destination = window.prompt(`Move "${item.name}" to (new path):`, item.path);
     if (!destination || destination === item.path) return;
 
     try {
-      await moveContent(item.path, destination);
+      await client.moveContent(item.path, destination);
       await refreshTree();
       toast.success(`Moved to ${destination}`);
     } catch (err) {
@@ -178,14 +234,16 @@ export function DocumentsPage() {
   };
 
   const handleDeleteItemFromListing = async (item: FileNode) => {
+    if (!client) return;
     const itemType = item.type === 'folder' ? 'directory' : 'file';
     const confirmed = window.confirm(`Are you sure you want to delete ${itemType} "${item.name}"?`);
     if (!confirmed) return;
 
     try {
-      await deleteContent(item.path);
+      await client.deleteContent(item.path);
       if (selectedFile?.id === item.id) {
         setSelectedFile(null);
+        setSelectedEtag(null);
       }
       await refreshTree();
       toast.success(`${item.type === 'folder' ? 'Directory' : 'File'} deleted`);
@@ -196,8 +254,9 @@ export function DocumentsPage() {
   };
 
   const handleCreateDocument = async (path: string, content: string, _template: string) => {
+    if (!client) return;
     try {
-      await createContent(path, content);
+      await client.createContent(path, content);
       await refreshTree();
 
       // Select the newly created file
@@ -241,6 +300,36 @@ export function DocumentsPage() {
     },
     []
   );
+
+  if (storeLoading) {
+    return (
+      <div
+        className="h-screen w-screen flex items-center justify-center"
+        style={{ backgroundColor: 'var(--stash-bg-base)' }}
+      >
+        <div className="flex items-center gap-3">
+          <Loader2
+            className="w-5 h-5 animate-spin"
+            style={{ color: 'var(--stash-accent)' }}
+          />
+          <span style={{ color: 'var(--stash-text-secondary)' }}>
+            Loading stores...
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // The URL pointed at a tenant/store the user can't see (or that
+  // doesn't exist for them). Bounce: no stores → /no-stores; otherwise
+  // land them on the first one they do have.
+  if (!current) {
+    if (stores.length === 0) return <Navigate to="/no-stores" replace />;
+    const first = stores[0];
+    return (
+      <Navigate to={`/${first.tenant_slug}/${first.slug}`} replace />
+    );
+  }
 
   if (isLoading) {
     return (
@@ -300,6 +389,29 @@ export function DocumentsPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <StorePicker />
+          <a
+            href="/ui/account/tokens"
+            className="px-3 py-1.5 rounded border text-sm"
+            style={{
+              borderColor: 'var(--stash-border)',
+              color: 'var(--stash-text-secondary)',
+            }}
+            title="Manage API tokens"
+          >
+            Tokens
+          </a>
+          <a
+            href="/auth/logout"
+            className="px-3 py-1.5 rounded border text-sm"
+            style={{
+              borderColor: 'var(--stash-border)',
+              color: 'var(--stash-text-secondary)',
+            }}
+            title="Sign out"
+          >
+            Sign out
+          </a>
           <button
             onClick={() => setIsLeftPanelOpen(!isLeftPanelOpen)}
             className="p-2 rounded transition-all duration-150"

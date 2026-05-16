@@ -29,7 +29,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
 from ..config import Config
-from ..db.models import ApiToken, AuditEvent
+from ..db.models import ApiToken, AuditEvent, Store, Tenant
 from ..db.session import get_session
 from ..errors import (
     Forbidden,
@@ -215,6 +215,83 @@ async def logout_get(request: Request) -> RedirectResponse:
     return await logout(request)
 
 
+class MeResponse(BaseModel):
+    user_id: UUID
+    oidc_sub: str
+    email: str
+    display_name: str
+    auth_method: str
+    tenant_roles: dict[str, str]
+
+
+class StoreSummary(BaseModel):
+    id: UUID
+    slug: str
+    display_name: str
+    tenant_id: UUID
+    tenant_slug: str
+    tenant_display_name: str
+    role: str
+
+
+@router.get("/me", response_model=MeResponse)
+async def me() -> MeResponse:
+    """Return the current principal as JSON for the SPA to consume.
+
+    Any authenticated method is accepted; the upstream auth middleware
+    has already populated the contextvar. A 401 from this endpoint is
+    the SPA's cue to bounce the browser through ``/auth/login``.
+    """
+    p = current_principal()
+    if p is None:
+        raise Unauthenticated("login required")
+    return MeResponse(
+        user_id=p.user_id,
+        oidc_sub=p.oidc_sub,
+        email=p.email,
+        display_name=p.display_name,
+        auth_method=p.auth_method,
+        tenant_roles={str(tid): r for tid, r in p.tenant_roles.items()},
+    )
+
+
+@router.get("/stores", response_model=list[StoreSummary])
+async def my_stores(
+    session: AsyncSession = Depends(get_session),
+) -> list[StoreSummary]:
+    """Stores the current principal can access across all their tenant memberships.
+
+    Includes ``tenant_slug`` so the SPA can build ``/ui/<tenant>/<store>/``
+    URLs without a second lookup. Empty list when the principal has no
+    memberships — the SPA renders ``/no-stores`` for that case.
+    """
+    p = current_principal()
+    if p is None:
+        raise Unauthenticated("login required")
+    tenant_ids = list(p.tenant_roles.keys())
+    if not tenant_ids:
+        return []
+    stmt = (
+        select(Store, Tenant)
+        .join(Tenant, Tenant.id == Store.tenant_id)
+        .where(Store.tenant_id.in_(tenant_ids))
+        .order_by(Tenant.slug, Store.slug)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        StoreSummary(
+            id=store.id,
+            slug=store.slug,
+            display_name=store.display_name,
+            tenant_id=tenant.id,
+            tenant_slug=tenant.slug,
+            tenant_display_name=tenant.display_name,
+            role=p.tenant_roles[tenant.id],
+        )
+        for store, tenant in rows
+    ]
+
+
 @router.get("/tokens", response_model=list[TokenInfo])
 async def list_tokens(
     principal: Principal = Depends(require_session),
@@ -332,4 +409,6 @@ __all__ = [
     "TokenCreate",
     "TokenIssued",
     "TokenInfo",
+    "MeResponse",
+    "StoreSummary",
 ]
