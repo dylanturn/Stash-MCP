@@ -1,5 +1,6 @@
 """Filesystem layer for content management."""
 
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -289,6 +290,27 @@ class FileSystem:
         except Exception as e:
             logger.error(f"Error deleting file '{relative_path}': {e}")
             raise FileSystemError(f"Failed to delete file: {e}")
+
+    def content_hash(self, relative_path: str) -> str:
+        """Return the SHA-256 hex digest of a file's bytes.
+
+        Used as the ETag for non-git-tracked stores. Reads the file in
+        binary so the hash matches regardless of line-ending handling.
+
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            InvalidPathError: If path is invalid or not a file
+        """
+        full_path = self._resolve_path(relative_path)
+        if not full_path.exists():
+            raise FileNotFoundError(f"File '{relative_path}' not found")
+        if not full_path.is_file():
+            raise InvalidPathError(f"Path '{relative_path}' is not a file")
+        h = hashlib.sha256()
+        with full_path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
 
     def file_exists(self, relative_path: str) -> bool:
         """Check if a file exists.

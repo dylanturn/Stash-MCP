@@ -181,22 +181,64 @@ def parse_markdown_structure(content: str) -> list[dict]:
     return _build_heading_tree(flat_headings)
 
 
-def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=None) -> FastMCP:
+USE_CURRENT_STORE = object()
+"""Sentinel passed to :func:`create_mcp_server` in auth mode — tool
+bodies then resolve the FS / git_backend from
+:func:`stash_mcp.routing.context.current_store` at call time."""
+
+
+def create_mcp_server(
+    filesystem_or_resolver,
+    search_engine=None,
+    git_backend=None,
+) -> FastMCP:
     """Create and configure the FastMCP server.
 
     Args:
-        filesystem: Filesystem instance for content management
+        filesystem_or_resolver: Either a :class:`FileSystem` (legacy
+            single-store mode) or the :data:`USE_CURRENT_STORE` sentinel
+            (auth mode, where tool bodies resolve the FS from
+            :func:`current_store` at call time).
         search_engine: Optional SearchEngine instance for semantic search
-        git_backend: Optional GitBackend instance for git tools
+        git_backend: Optional GitBackend instance for git tools (legacy mode)
 
     Returns:
         Configured FastMCP server
     """
 
+    _auth_mode = filesystem_or_resolver is USE_CURRENT_STORE
+
+    def _fs():
+        """Resolve the FileSystem (or TransactionManager) for the in-flight call."""
+        if _auth_mode:
+            from .routing.context import require_store
+
+            return require_store().fs_for_mcp
+        return filesystem_or_resolver
+
+    def _bare_fs():
+        """Resolve the bare FileSystem for path checks."""
+        if _auth_mode:
+            from .routing.context import require_store
+
+            return require_store().filesystem
+        return filesystem_or_resolver
+
+    def _git_backend():
+        """Resolve the git backend for the in-flight call, if any."""
+        if _auth_mode:
+            from .routing.context import current_store
+
+            store = current_store()
+            return store.git_backend if store is not None else None
+        return git_backend
+
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
         """Lifespan handler to inject filesystem into context."""
-        yield {"fs": filesystem}
+        # In auth mode the FS is per-store; tool bodies resolve it via
+        # current_store() — nothing useful to put here.
+        yield {"fs": None if _auth_mode else filesystem_or_resolver}
 
     mcp = FastMCP(
         name=Config.SERVER_NAME,
@@ -243,23 +285,27 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     # Register only README.md files as resources (for resources/list).
     # All other files are accessible via tools and the resource template.
-    for file_path in filesystem.list_all_files():
-        if not _is_resource_file(file_path):
-            continue
-        uri = f"stash://{file_path}"
-        mime = _get_mime_type(file_path)
-        desc = _get_description(filesystem, file_path)
-        fp = file_path  # capture for closure
+    # In auth mode there's no single store to enumerate; the resource
+    # template below still works for ad-hoc reads, and 06's UI/SPA
+    # picker will own per-store resource registration.
+    if not _auth_mode:
+        for file_path in filesystem_or_resolver.list_all_files():
+            if not _is_resource_file(file_path):
+                continue
+            uri = f"stash://{file_path}"
+            mime = _get_mime_type(file_path)
+            desc = _get_description(filesystem_or_resolver, file_path)
+            fp = file_path  # capture for closure
 
-        mcp.add_resource(
-            FunctionResource(
-                uri=AnyUrl(uri),
-                name=file_path,
-                description=desc,
-                mime_type=mime,
-                fn=lambda _fp=fp: filesystem.read_file(_fp),
+            mcp.add_resource(
+                FunctionResource(
+                    uri=AnyUrl(uri),
+                    name=file_path,
+                    description=desc,
+                    mime_type=mime,
+                    fn=lambda _fp=fp: filesystem_or_resolver.read_file(_fp),
+                )
             )
-        )
 
     def _register_resource(path: str) -> bool:
         """Add a file to the MCP resource registry if it is a README.md.
@@ -269,12 +315,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         """
         if not _is_resource_file(path):
             return False
+        if _auth_mode:
+            # Per-store resource registration is owned by 06's SPA picker.
+            return False
         uri = f"stash://{path}"
         mcp.add_resource(FunctionResource(
             uri=AnyUrl(uri), name=path,
-            description=_get_description(filesystem, path),
+            description=_get_description(filesystem_or_resolver, path),
             mime_type=_get_mime_type(path),
-            fn=lambda _fp=path: filesystem.read_file(_fp),
+            fn=lambda _fp=path: filesystem_or_resolver.read_file(_fp),
         ))
         return True
 
@@ -302,7 +351,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
     def read_resource(path: str) -> str:
         """Read a file by its path."""
         try:
-            return filesystem.read_file(path)
+            return _fs().read_file(path)
         except FileNotFoundError:
             raise ValueError(f"Resource not found: stash://{path}")
         except InvalidPathError as e:
@@ -334,11 +383,11 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 path: File path relative to content root
                 content: File content
             """
-            if filesystem.file_exists(path):
+            if _fs().file_exists(path):
                 raise ValueError(
                     f"File already exists: {path}. Use update_content to modify existing files."
                 )
-            filesystem.write_file(path, content)
+            _fs().write_file(path, content)
             if _register_resource(path):
                 await ctx.send_resource_list_changed()
             emit(CONTENT_CREATED, path)
@@ -368,8 +417,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 content: New file content
                 sha: SHA-256 hex digest of the current file content (from read_content)
             """
-            if filesystem.file_exists(path):
-                current = filesystem.read_file(path)
+            if _fs().file_exists(path):
+                current = _fs().read_file(path)
                 current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
                 if sha != current_sha:
                     raise ValueError(
@@ -380,7 +429,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 raise FileNotFoundError(
                     f"File '{path}' does not exist. Use create_content for new files."
                 )
-            filesystem.write_file(path, content)
+            _fs().write_file(path, content)
             if _is_resource_file(path):
                 uri = AnyUrl(f"stash://{path}")
                 await ctx.session.send_resource_updated(uri=uri)
@@ -416,7 +465,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             Returns:
                 A dict with path, result status, and new_sha
             """
-            current = filesystem.read_file(file_path)
+            current = _fs().read_file(file_path)
             current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
             if sha != current_sha:
                 raise ValueError(
@@ -424,7 +473,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     "The file may have changed since it was last read."
                 )
             new_content = _apply_edits(current, edits, file_path)
-            filesystem.write_file(file_path, new_content)
+            _fs().write_file(file_path, new_content)
             if _is_resource_file(file_path):
                 uri = AnyUrl(f"stash://{file_path}")
                 await ctx.session.send_resource_updated(uri=uri)
@@ -465,7 +514,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             # Phase 1: read all files and validate SHAs
             originals: dict[str, str] = {}
             for op in edit_operations:
-                current = filesystem.read_file(op.file_path)
+                current = _fs().read_file(op.file_path)
                 current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
                 if op.sha != current_sha:
                     raise ValueError(
@@ -482,7 +531,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             # Phase 3: write all files and send notifications
             results = []
             for op in edit_operations:
-                filesystem.write_file(op.file_path, new_contents[op.file_path])
+                _fs().write_file(op.file_path, new_contents[op.file_path])
                 if _is_resource_file(op.file_path):
                     uri = AnyUrl(f"stash://{op.file_path}")
                     await ctx.session.send_resource_updated(uri=uri)
@@ -515,14 +564,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             Returns:
                 Confirmation message
             """
-            current = filesystem.read_file(path)
+            current = _fs().read_file(path)
             current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
             if sha != current_sha:
                 raise ValueError(
                     f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
                     "The file may have changed since it was last read."
                 )
-            filesystem.delete_file(path)
+            _fs().delete_file(path)
             if _unregister_resource(path):
                 await ctx.send_resource_list_changed()
             emit(CONTENT_DELETED, path)
@@ -554,7 +603,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             A dict with 'content' (file text), 'sha' (SHA-256 hex digest of
             the FULL file), and 'truncated' (bool)
         """
-        content = await asyncio.to_thread(filesystem.read_file, path)
+        content = await asyncio.to_thread(_fs().read_file, path)
         sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
         truncated = False
         if max_lines is not None:
@@ -602,7 +651,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         results = []
         for path in paths:
             try:
-                content = await asyncio.to_thread(filesystem.read_file, path)
+                content = await asyncio.to_thread(_fs().read_file, path)
                 sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 truncated = False
                 if max_lines is not None:
@@ -641,12 +690,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             A formatted string listing the files and directories
         """
         if recursive:
-            files = filesystem.list_all_files(path)
+            files = _fs().list_all_files(path)
             if not files:
                 return f"No files found under '{path or '/'}'"
             return "\n".join(files)
         else:
-            items = filesystem.list_files(path)
+            items = _fs().list_files(path)
             lines = []
             for name, is_dir in items:
                 prefix = "📁 " if is_dir else "📄 "
@@ -682,7 +731,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             raise ValueError(
                 f"inspect_content_structure only supports markdown files (.md, .markdown). Got: {path}"
             )
-        content = filesystem.read_file(path)
+        content = _fs().read_file(path)
         sections = parse_markdown_structure(content)
         title = None
         for heading in sections:
@@ -729,7 +778,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                         f"inspect_content_structure only supports markdown files "
                         f"(.md, .markdown). Got: {path}"
                     )
-                content = filesystem.read_file(path)
+                content = _fs().read_file(path)
                 sections = parse_markdown_structure(content)
                 title = None
                 for s in sections:
@@ -774,7 +823,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             Returns:
                 Confirmation message
             """
-            filesystem.move_file(source_path, dest_path)
+            _fs().move_file(source_path, dest_path)
             source_was_resource = _unregister_resource(source_path)
             dest_is_resource = _register_resource(dest_path)
             if source_was_resource or dest_is_resource:
@@ -807,7 +856,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             Returns:
                 A dict with 'source', 'destination', and 'files_moved' count
             """
-            moved_files = filesystem.move_directory(source_path, dest_path)
+            moved_files = _fs().move_directory(source_path, dest_path)
 
             # Handle resource registration changes for any README.md files
             resources_changed = False
@@ -875,9 +924,9 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 )
 
             for m in moves:
-                if not filesystem.file_exists(m.source_path):
+                if not _fs().file_exists(m.source_path):
                     raise ValueError(f"Source file not found: {m.source_path}")
-                dst = filesystem._resolve_path(m.dest_path)
+                dst = _bare_fs()._resolve_path(m.dest_path)
                 if dst.exists():
                     raise ValueError(f"Destination already exists: {m.dest_path}")
 
@@ -885,7 +934,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             resources_changed = False
 
             for m in moves:
-                filesystem.move_file(m.source_path, m.dest_path)
+                _fs().move_file(m.source_path, m.dest_path)
                 if _unregister_resource(m.source_path):
                     resources_changed = True
                 if _register_resource(m.dest_path):
@@ -966,8 +1015,19 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             return "\n".join(lines)
 
     # --- Git tools (registered only when GIT_TRACKING is enabled) ---
+    # In auth mode the per-store git_backend is resolved at call time;
+    # registration happens unconditionally so multi-store servers expose
+    # git tools regardless of which store the caller targets.
 
-    if git_backend is not None:
+    def _require_git_backend():
+        gb = _git_backend()
+        if gb is None:
+            raise ValueError(
+                "Git tracking is not enabled for this store."
+            )
+        return gb
+
+    if _auth_mode or git_backend is not None:
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -990,7 +1050,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             """
             import asyncio
 
-            entries = await asyncio.to_thread(git_backend.log, path, max_count)
+            entries = await asyncio.to_thread(_require_git_backend().log, path, max_count)
             if not entries:
                 return f"No git history found for '{path}'."
             lines = []
@@ -1021,7 +1081,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             """
             import asyncio
 
-            return await asyncio.to_thread(git_backend.diff, path, ref)
+            return await asyncio.to_thread(_require_git_backend().diff, path, ref)
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -1047,7 +1107,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             import asyncio
 
             blame_lines = await asyncio.to_thread(
-                git_backend.blame, path, start_line, end_line
+                _require_git_backend().blame, path, start_line, end_line
             )
             if not blame_lines:
                 return f"No blame data available for '{path}'."
@@ -1061,12 +1121,35 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     # --- Transaction tools (only when write mode + git tracking are both active) ---
 
-    if not Config.READ_ONLY and git_backend is not None:
+    if not Config.READ_ONLY and (_auth_mode or git_backend is not None):
         from .transactions import TransactionError, TransactionManager
 
-        tm = filesystem if isinstance(filesystem, TransactionManager) else None
+        if _auth_mode:
+            def _resolve_tm():
+                from .routing.context import require_store
 
-        if tm is not None:
+                store_tm = require_store().transaction_manager
+                if store_tm is None:
+                    raise ValueError(
+                        "Transactions are not available for this store "
+                        "(no git tracking)."
+                    )
+                return store_tm
+
+            _have_tm = True
+        else:
+            _legacy_tm = (
+                filesystem_or_resolver
+                if isinstance(filesystem_or_resolver, TransactionManager)
+                else None
+            )
+
+            def _resolve_tm():
+                return _legacy_tm
+
+            _have_tm = _legacy_tm is not None
+
+        if _have_tm:
 
             @mcp.tool(
                 annotations=ToolAnnotations(
@@ -1091,7 +1174,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 """
                 session_id = str(id(ctx.session))
                 try:
-                    txn_id = await tm.start_transaction(
+                    txn_id = await _resolve_tm().start_transaction(
                         session_id,
                         Config.TRANSACTION_TIMEOUT,
                         Config.TRANSACTION_LOCK_WAIT,
@@ -1130,7 +1213,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 sync_remote = Config.GIT_SYNC_REMOTE if Config.GIT_SYNC_ENABLED else None
                 sync_branch = Config.GIT_SYNC_BRANCH if Config.GIT_SYNC_ENABLED else None
                 try:
-                    await tm.end_transaction(
+                    await _resolve_tm().end_transaction(
                         session_id, message, author, sync_remote, sync_branch
                     )
                 except TransactionError as exc:
@@ -1157,7 +1240,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 """
                 session_id = str(id(ctx.session))
                 try:
-                    await tm.abort_transaction(session_id)
+                    await _resolve_tm().abort_transaction(session_id)
                 except TransactionError as exc:
                     raise ValueError(str(exc))
                 return "Transaction aborted."
@@ -1183,6 +1266,6 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     transaction details.
                 """
                 session_id = str(id(ctx.session))
-                return tm.get_transaction_status(session_id)
+                return _resolve_tm().get_transaction_status(session_id)
 
     return mcp
