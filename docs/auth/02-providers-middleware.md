@@ -233,15 +233,31 @@ Key responsibilities:
 - Extract claims. Read `sub`, `email`, `name` (or `preferred_username` as
   fallback). Read the configured `OIDC_GROUPS_CLAIM` from claims.
 - Upsert `users` row by `oidc_sub`. Update `last_login_at`.
-- Refresh `memberships` for this user from the groups claim:
-  - If `OIDC_ADMIN_GROUP` is in the user's groups, upsert a
+- Refresh `memberships` for this user from the groups claim. **Manual
+  wins** (locked in `README.md`):
+  - For each tenant the user already has a `source='manual'` row on,
+    **skip the group-derived upsert entirely** — no role change, no
+    source flip, no delete. Manual is sticky.
+  - For tenants without a manual row: if `OIDC_ADMIN_GROUP` is in the
+    user's groups, upsert
     `memberships(user_id, tenant_id=<default tenant>, role='admin',
-    source='oidc_group')` row.
-  - For groups not matching, delete any `memberships(source='oidc_group')`
-    rows that no longer apply. Don't touch `source='manual'` rows.
+    source='oidc_group')`. If the user's previous group-derived role
+    differs, write an `audit_events` row with `action='membership.synced'`
+    and `detail={"old_role": ..., "new_role": "admin"}`.
+  - Delete any `memberships(source='oidc_group')` rows whose groups
+    are no longer present in the claim. Write an `audit_events` row
+    with `action='membership.synced'` and
+    `detail={"old_role": ..., "new_role": null}` for each deletion.
+  - Never touch `source='manual'` rows.
   - v1 only mints admin memberships from groups. Non-admin tenant
     memberships come via the admin API in 05.
-- Build and return `Principal`.
+- Build and return `Principal`. **Caching note:** wrap the upsert +
+  membership refresh in a small async LRU keyed by `(sub, iat)` (or
+  `jti` if present) so MCP clients hammering tools at high rate don't
+  re-hit the DB on every call. Cache TTL = `min(exp - iat, 5min)`. The
+  cache stores the built `Principal`. Returning a cached Principal also
+  skips the `last_login_at` UPDATE — accept staleness within one JWT
+  lifetime.
 
 A "default tenant" is auto-created if it doesn't exist — slug `default`,
 display_name `Default tenant`. This is the tenant that admin memberships
@@ -385,11 +401,23 @@ sees them).
   - Unknown `kid` triggers JWKS refresh; second call succeeds.
   - Membership refresh: pre-existing `oidc_group` membership for a removed
     group is deleted; `manual` membership for the same tenant is preserved.
+  - **Manual wins (D5 regression):** user has `source='manual', role='member'`
+    on default tenant and is in `OIDC_ADMIN_GROUP`. After login, the row
+    is unchanged (still member, still manual) and **no** `oidc_group`
+    row is created for the same tenant.
+  - **Audit on group sync:** group-derived role added → `audit_events`
+    row with `action='membership.synced'`, `actor_kind='system'`,
+    `detail` carries old/new roles. Group-derived role removed → another
+    audit row with `new_role: null`.
+  - **JWT cache:** two consecutive auths with the same JWT make exactly
+    one DB upsert. Different `iat` (re-issued JWT) bypasses the cache.
 - `tests/auth/test_api_token_provider.py`
   - Valid token → Principal with `auth_method='api_token'`.
   - Revoked token → AuthError.
   - Expired token → AuthError.
-  - Wrong HMAC key (simulating key rotation gone wrong) → returns None.
+  - Rotated key path: token row has `key_version=1`, env keys list is
+    `[K2, K1]` → verify succeeds against `keys[1]=K1`.
+  - Token row `key_version` not in keys list (rotated out) → AuthError.
   - Non-stash prefix → returns None (no AuthError).
 - `tests/auth/test_session_provider.py`
   - Cookie roundtrip → same user.

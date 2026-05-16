@@ -38,7 +38,23 @@ the specs below. Cite this file if anything tries to deviate.
 - **Persistence:** SQLAlchemy 2.x async + Alembic. SQLite for dev, Postgres
   for prod — swap via `DATABASE_URL`. Auth state in SQL; content stays
   file/git.
-- **Token hashing:** HMAC-SHA256 (no password hashing needed — no passwords).
+- **Token hashing:** HMAC-SHA256 with **versioned keys**. `api_tokens.key_version`
+  smallint stores which key hashed each row. `STASH_AUTH_TOKEN_HMAC_KEYS` is
+  a comma-separated list — the first entry is the active signer, the rest
+  are accepted on verify so a rotation doesn't invalidate live tokens. New
+  rows always write `key_version=<index of first key>`. Rolling forward is
+  prepend-and-restart; rolling back the list drops the keys at the end.
+- **Membership precedence:** OIDC-group-derived and manual memberships
+  collide on `UNIQUE (user_id, tenant_id)`. **Manual wins.** On OIDC
+  login, if a `source='manual'` row exists for the user on a tenant, the
+  group-derived upsert is *skipped* (no role change, no source flip).
+  Group churn is therefore invisible to manually-granted users — this is
+  intentional: manual grants are an escape hatch and shouldn't silently
+  flip back when the IdP's groups change.
+- **Audit log:** an `audit_events` table in the v1 schema records token
+  issuance/revocation, manual membership grants, OIDC group-derived role
+  changes, store provisioning, and store deletion. Append-only, no UI in
+  v1 — consumed via SQL by operators. Schema in `01-persistence.md`.
 - **Routing:** Path-based. `/mcp/<tenant>/<store>/` and `/api/<tenant>/<store>/*`.
   Both slugs are on the wire — tenant is *not* inferred from the principal,
   because a user may be a member of multiple tenants.

@@ -89,14 +89,26 @@ DATABASE_URL: str = os.getenv(
     "sqlite+aiosqlite:////data/stash-auth.db",
 )
 
-# HMAC key used to hash API tokens at rest. Required when AUTH is enabled
-# (validated in 02). Read it here so it's available to db/auth modules
-# regardless of whether middleware has been wired up yet.
-AUTH_TOKEN_HMAC_KEY: str | None = os.getenv("STASH_AUTH_TOKEN_HMAC_KEY")
+# HMAC keys for API tokens. Comma-separated list — the FIRST entry is the
+# active signer; the rest are accepted on verify so an operator can rotate
+# without invalidating live tokens. Each api_tokens row records which key
+# index hashed it (key_version column) so verification can route to the
+# right key directly instead of trying all of them.
+#
+# Operators rolling forward: prepend a new key, restart.  After enough
+# time for any caller to refresh, drop the old key from the tail.
+#
+# Required when AUTH is enabled (validated in 02). Read it here so it's
+# available to db/auth modules regardless of whether middleware has been
+# wired up yet.
+AUTH_TOKEN_HMAC_KEYS: list[str] = [
+    k.strip() for k in os.getenv("STASH_AUTH_TOKEN_HMAC_KEYS", "").split(",")
+    if k.strip()
+]
 ```
 
-No runtime validation in this chunk — 02 will fail-fast if AUTH is on without
-the HMAC key set.
+No runtime validation in this chunk — 02 will fail-fast if AUTH is on with
+an empty key list.
 
 ### Schema
 
@@ -142,27 +154,54 @@ api_tokens
   id            UUID PK
   user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE
   token_hash    TEXT UNIQUE NOT NULL    -- HMAC-SHA256 of the secret part
+  key_version   SMALLINT NOT NULL       -- index into AUTH_TOKEN_HMAC_KEYS used to hash this row
   name          TEXT NOT NULL           -- human label
   scopes        TEXT NOT NULL           -- comma-joined; v1 just "read,write,admin"
   expires_at    TIMESTAMPTZ
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
   last_used_at  TIMESTAMPTZ
   revoked_at    TIMESTAMPTZ
+
+audit_events
+  id            UUID PK
+  occurred_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL   -- nullable for system actors (OIDC group sync)
+  actor_kind    TEXT NOT NULL CHECK (actor_kind IN ('user','system','api_token'))
+  action        TEXT NOT NULL           -- e.g. 'token.issued', 'membership.granted'
+  target_kind   TEXT                    -- 'token','membership','store','tenant','user'
+  target_id     TEXT                    -- UUID-as-text; left flexible since some targets predate their rows
+  tenant_id     UUID REFERENCES tenants(id) ON DELETE SET NULL  -- scope, when applicable
+  detail        TEXT                    -- JSON-as-text; small structured payload, no secrets
 ```
 
 Notes:
 
 - `memberships.source` distinguishes group-claim-derived rows (refreshed on
   every OIDC login) from manually granted rows (used for users who don't
-  match any OIDC group but were added via admin API). v1 only writes
-  `oidc_group`, but the column is in the schema so 05 can add manual grants
-  without a migration.
+  match any OIDC group but were added via admin API). **Precedence is
+  locked in the README: manual wins.** If a `(user_id, tenant_id)` row
+  exists with `source='manual'`, the OIDC login skips the
+  group-derived upsert entirely — no role change, no source flip. Tests
+  in 02 must exercise this. `manual` rows are only created/deleted
+  through the admin API in 05.
 - `stores.git_remote_url` is nullable because the on-disk repo may be local-
   only. When the registry initializes a store with no remote, it creates a
   bare init (no clone).
 - `api_tokens.scopes` is a flat comma-joined string for v1 simplicity. If
   we need richer scopes later we can swap to a JSON column without a data
   migration (SQLite TEXT and Postgres JSONB both round-trip strings fine).
+- `api_tokens.key_version` records which entry in `AUTH_TOKEN_HMAC_KEYS`
+  hashed this row. Verify path reads the key at that index; mint path
+  always writes `key_version=0` (the active signer). If the key at the
+  recorded index has been removed from the env list, verification fails
+  closed — the operator chose to invalidate that key.
+- `audit_events` is append-only. No UPDATE or DELETE issued by application
+  code; only DBA tooling touches it. Listed actions for v1:
+  `token.issued`, `token.revoked`, `membership.granted` (manual),
+  `membership.revoked` (manual), `membership.synced` (OIDC group →
+  role created/changed/deleted), `store.provisioned`, `store.deleted`,
+  `tenant.created`, `tenant.deleted`. `detail` carries a small JSON
+  payload — never the token secret, never the HMAC, never the JWT.
 
 ### `stash_mcp/db/engine.py`
 
@@ -303,13 +342,25 @@ def generate_token() -> str:
     return TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_RANDOM_BYTES)
 
 def hash_token(token: str, *, key: str) -> str:
-    """HMAC-SHA256 of the token using the deployment's HMAC key.
-    Returns hex digest. The key is never persisted with the hash."""
+    """HMAC-SHA256 of the token using one deployment HMAC key.
+    Returns hex digest. Callers use ``hash_with_active_key`` for new tokens
+    and ``verify_token`` for existing rows."""
     return hmac.new(key.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
 
-def verify_token(token: str, expected_hash: str, *, key: str) -> bool:
-    """Constant-time comparison."""
-    return hmac.compare_digest(hash_token(token, key=key), expected_hash)
+def hash_with_active_key(token: str, *, keys: list[str]) -> tuple[str, int]:
+    """Hash with keys[0]. Returns (hash, key_version=0). Caller persists both."""
+    if not keys:
+        raise ValueError("AUTH_TOKEN_HMAC_KEYS is empty")
+    return hash_token(token, key=keys[0]), 0
+
+def verify_token(
+    token: str, expected_hash: str, *, keys: list[str], key_version: int,
+) -> bool:
+    """Constant-time comparison against the key recorded for this row.
+    Fails closed if the recorded key has been rotated out of the list."""
+    if key_version < 0 or key_version >= len(keys):
+        return False
+    return hmac.compare_digest(hash_token(token, key=keys[key_version]), expected_hash)
 
 def looks_like_stash_token(value: str) -> bool:
     """Cheap prefix check so the ApiTokenAuthProvider can skip JWT-shaped values."""
@@ -335,17 +386,30 @@ Or document `alembic upgrade head` in the spec for 06.
 ## Test plan
 
 - `tests/auth/test_token_hashing.py`
-  - Round-trip: generate → hash → verify true with same key.
-  - Wrong key → verify false.
+  - Round-trip: generate → `hash_with_active_key` → verify true with the
+    same keys list and recorded key_version.
+  - Verify with `key_version=0` against a keys list whose [0] entry has
+    rotated → verify false (fails closed).
+  - Rotation: hash with `keys=[K1]`, then verify with `keys=[K2, K1]` and
+    `key_version=1` → true (old key still accepted because still in list).
+  - Out-of-range `key_version` → verify false (no IndexError).
   - Tampered token → verify false.
   - Constant-time comparison doesn't short-circuit (smoke test).
   - `looks_like_stash_token` true/false on shaped/unshaped values.
 - `tests/db/test_models_roundtrip.py`
-  - Spin up an in-memory SQLite engine (`sqlite+aiosqlite:///:memory:`).
+  - Spin up SQLite via `create_async_engine(..., poolclass=StaticPool,
+    connect_args={"check_same_thread": False})` against
+    `sqlite+aiosqlite:///:memory:` so all connections share the in-memory
+    DB. (Without StaticPool, each connection gets its own DB and tests
+    silently see empty state.)
   - Run Alembic upgrade head against it.
   - Insert one of each entity and read it back; verify FK constraints
     reject orphaned memberships.
   - `UNIQUE (tenant_id, slug)` on `stores` rejects duplicates.
+  - `api_tokens.key_version` round-trips as smallint.
+  - `audit_events` insert with `actor_user_id=NULL` (system actor) and
+    with a real user_id; both read back; deleting the user sets
+    `actor_user_id=NULL` (ON DELETE SET NULL).
 
 No tests for the Principal class — it's a dataclass; `has_role_on` is
 exercised in 02's middleware tests.
@@ -353,7 +417,8 @@ exercised in 02's middleware tests.
 ## Acceptance
 
 - `uv run alembic upgrade head` against a fresh sqlite file produces the
-  five tables with all constraints.
+  six tables (tenants, users, memberships, stores, api_tokens,
+  audit_events) with all constraints.
 - `uv run pytest tests/auth tests/db` passes.
 - `ruff check stash_mcp/auth stash_mcp/db` clean.
 - Importing `stash_mcp.main` still works (no eager DB connections — engine
@@ -373,5 +438,10 @@ None. Everything in this chunk is mechanical given the locked decisions in
 - When generating the Alembic baseline, hand-write it from `models.py`
   rather than autogenerating — autogeneration's diff output is noisy and
   this is the first migration, so we want it readable.
-- `Config.AUTH_TOKEN_HMAC_KEY` is `str | None` here on purpose. 02 will
-  validate it's set when auth is on.
+- `Config.AUTH_TOKEN_HMAC_KEYS` is a `list[str]` here and may be empty —
+  02 fails-fast when auth is on and the list is empty. Token mint always
+  writes `key_version=0`; verify uses the row's recorded `key_version`.
+- The `audit_events` table is created in this chunk but **nothing writes
+  to it yet**. Writers land alongside the actions they record: 02 writes
+  `membership.synced`, 05 writes `token.*`, `membership.{granted,revoked}`,
+  `store.*`, `tenant.*`. This keeps 01 mechanical (schema only).
