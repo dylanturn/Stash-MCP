@@ -77,6 +77,14 @@
 
 ## Quick Start
 
+> **Running on the open internet?** Use the auth-enabled deployment.
+> Stash-MCP ships two shapes: a single-principal *auth-disabled* mode
+> for solo / homelab use (the default, documented below), and an
+> *auth-enabled* multi-tenant mode with OIDC login, per-user API
+> tokens, and `/api/<tenant>/<store>/*` routing. See
+> [`docs/deployment.md`](docs/deployment.md) for the env vars and
+> [`docs/auth/README.md`](docs/auth/README.md) for the design rationale.
+
 ### Claude Desktop Extension (One-Click Install)
 
 The easiest way to use Stash-MCP with Claude Desktop is via the `.mcpb` Desktop Extension:
