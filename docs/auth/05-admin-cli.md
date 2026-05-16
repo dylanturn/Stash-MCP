@@ -302,6 +302,13 @@ The `token` field appears ONLY in the POST response. Subsequent GETs
 return `{"id": ..., "name": ..., "last_used_at": ...}` without the
 secret.
 
+Every successful mint writes `audit_events(action='token.issued',
+actor_user_id=<minter>, actor_kind='user', target_kind='token',
+target_id=<new token id>, detail={"name": ..., "scopes": [...],
+"expires_at": ...})`. Revoke writes `action='token.revoked'`. The
+audit row is committed in the same transaction as the token-row
+change, so the audit log can't drift from the table state.
+
 ### `/admin/*` endpoints
 
 All under `Depends(require_admin)` which checks `principal.has_role_on(<default tenant>, "admin")`. In v1 admin is global (granted on the
@@ -337,6 +344,21 @@ on-disk directory. The on-disk delete is recursive and final — there's
 no soft-delete. Document this in the response with a confirmation flag:
 `DELETE /admin/tenants/{id}/stores/{slug}?confirm=true`. Without
 `confirm=true`, returns 400.
+
+**Audit writes for `/admin/*`:**
+| Action | Endpoint |
+|---|---|
+| `tenant.created` | `POST /admin/tenants` |
+| `tenant.deleted` | `DELETE /admin/tenants/{id}` |
+| `store.provisioned` | `POST /admin/tenants/{id}/stores` |
+| `store.deleted` | `DELETE /admin/tenants/{id}/stores/{slug}` (the row that survives the cascade) |
+| `membership.granted` | `POST /admin/memberships` |
+| `membership.revoked` | `DELETE /admin/memberships/{id}` |
+| `user.deleted` | `DELETE /admin/users/{id}` |
+
+All audit rows carry `actor_user_id=<admin>`, `actor_kind='user'`, and
+the `tenant_id` of the affected scope where applicable. Same
+"committed in the same transaction" rule as token mint.
 
 ### CLI
 
