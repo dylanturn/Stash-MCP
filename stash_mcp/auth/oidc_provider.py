@@ -19,21 +19,19 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 from authlib.jose.errors import JoseError
-from sqlalchemy import select
 from starlette.requests import Request
 
 from ..config import Config
-from ..db.models import AuditEvent, Membership, Tenant, User
 from ..db.session import get_sessionmaker
 from .principal import Principal, Role
 from .provider import AuthError, AuthProvider
 from .tokens import looks_like_stash_token
+from .users import upsert_user_and_memberships
 
 logger = logging.getLogger(__name__)
 
@@ -237,52 +235,13 @@ class OIDCAuthProvider(AuthProvider):
     # --- Principal materialisation -----------------------------------------
 
     async def _materialize_principal(self, claims: dict) -> Principal:
-        sub = claims["sub"]
-        email = _first_str(claims, ["email"]) or ""
-        display_name = (
-            _first_str(claims, ["name", "preferred_username", "email"]) or sub
-        )
-
-        groups_raw = claims.get(Config.OIDC_GROUPS_CLAIM, [])
-        if not isinstance(groups_raw, list):
-            groups_raw = []
-        groups: set[str] = {g for g in groups_raw if isinstance(g, str)}
-
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            # Upsert user.
-            user = (
-                await session.execute(select(User).where(User.oidc_sub == sub))
-            ).scalar_one_or_none()
-            now = datetime.now(UTC)
-            if user is None:
-                user = User(
-                    oidc_sub=sub,
-                    email=email,
-                    display_name=display_name,
-                    last_login_at=now,
-                )
-                session.add(user)
-                await session.flush()
-            else:
-                # Keep profile fields fresh.
-                if email and user.email != email:
-                    user.email = email
-                if display_name and user.display_name != display_name:
-                    user.display_name = display_name
-                user.last_login_at = now
-
-            # Group → admin membership sync. Manual wins (see README).
-            await self._sync_admin_membership(session, user, groups)
-
-            # Load memberships freshly for the Principal.
-            await session.refresh(user, attribute_names=["memberships"])
+            user = await upsert_user_and_memberships(session, claims)
             tenant_roles: dict = {
                 m.tenant_id: _coerce_role(m.role) for m in user.memberships
             }
-
             await session.commit()
-
             principal = Principal(
                 user_id=user.id,
                 oidc_sub=user.oidc_sub,
@@ -293,134 +252,6 @@ class OIDCAuthProvider(AuthProvider):
                 claims=dict(claims),
             )
         return principal
-
-    async def _sync_admin_membership(
-        self, session, user: User, groups: set[str]
-    ) -> None:
-        """Maintain a group-derived admin membership on the default tenant.
-
-        Rules (locked in README.md):
-
-        - For tenants the user has a ``source='manual'`` row on: skip entirely.
-        - Otherwise, if ``OIDC_ADMIN_GROUP`` ∈ groups → upsert
-          ``source='oidc_group', role='admin'`` on the default tenant.
-        - For any existing ``source='oidc_group'`` row whose group no longer
-          applies, delete it.
-        - Audit every change via ``audit_events``.
-        """
-        admin_group = Config.OIDC_ADMIN_GROUP
-        if not admin_group:
-            return  # no admin sync configured
-
-        # Existing memberships, keyed by tenant_id.
-        existing = (
-            await session.execute(
-                select(Membership).where(Membership.user_id == user.id)
-            )
-        ).scalars().all()
-        by_tenant: dict[Any, Membership] = {m.tenant_id: m for m in existing}
-
-        default_tenant = await self._ensure_default_tenant(session)
-
-        # Manual on the default tenant? Manual wins — skip this tenant
-        # entirely, and don't create a parallel oidc_group row.
-        existing_on_default = by_tenant.get(default_tenant.id)
-        manual_on_default = (
-            existing_on_default is not None
-            and existing_on_default.source == "manual"
-        )
-
-        admin_wanted = admin_group in groups
-        if admin_wanted and not manual_on_default:
-            if existing_on_default is None:
-                session.add(
-                    Membership(
-                        user_id=user.id,
-                        tenant_id=default_tenant.id,
-                        role="admin",
-                        source="oidc_group",
-                    )
-                )
-                _audit(
-                    session,
-                    user,
-                    default_tenant.id,
-                    old_role=None,
-                    new_role="admin",
-                )
-            else:
-                # Pre-existing oidc_group row. Update role if drifted.
-                if existing_on_default.role != "admin":
-                    _audit(
-                        session,
-                        user,
-                        default_tenant.id,
-                        old_role=existing_on_default.role,
-                        new_role="admin",
-                    )
-                    existing_on_default.role = "admin"
-                # No-op if already admin.
-
-        # Remove stale oidc_group rows. Only the default tenant is in scope
-        # in v1, so any oidc_group row that ISN'T on default — or that is on
-        # default but the user is no longer in the admin group — gets pruned.
-        for tenant_id, m in by_tenant.items():
-            if m.source != "oidc_group":
-                continue
-            if tenant_id == default_tenant.id and admin_wanted and not manual_on_default:
-                continue  # we just kept/created this one
-            _audit(
-                session,
-                user,
-                tenant_id,
-                old_role=m.role,
-                new_role=None,
-            )
-            await session.delete(m)
-
-    async def _ensure_default_tenant(self, session) -> Tenant:
-        tenant = (
-            await session.execute(
-                select(Tenant).where(Tenant.slug == _DEFAULT_TENANT_SLUG)
-            )
-        ).scalar_one_or_none()
-        if tenant is None:
-            tenant = Tenant(
-                slug=_DEFAULT_TENANT_SLUG,
-                display_name=_DEFAULT_TENANT_DISPLAY_NAME,
-            )
-            session.add(tenant)
-            await session.flush()
-        return tenant
-
-
-def _audit(
-    session,
-    user: User,
-    tenant_id: Any,
-    *,
-    old_role: str | None,
-    new_role: str | None,
-) -> None:
-    session.add(
-        AuditEvent(
-            actor_user_id=user.id,
-            actor_kind="system",
-            action="membership.synced",
-            target_kind="membership",
-            target_id=str(user.id),
-            tenant_id=tenant_id,
-            detail=json.dumps({"old_role": old_role, "new_role": new_role}),
-        )
-    )
-
-
-def _first_str(d: dict, keys: list[str]) -> str | None:
-    for k in keys:
-        v = d.get(k)
-        if isinstance(v, str) and v:
-            return v
-    return None
 
 
 def _b64url_decode(value: str) -> bytes:
