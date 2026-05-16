@@ -11,9 +11,13 @@ interface FileTreeProps {
   onClearSelection?: () => void;
   onNewDocument: () => void;
   onOpenSettings?: () => void;
+  onOpenOrgSettings?: () => void;
   onMoveItem?: (item: FileNode) => void;
   onDeleteItem?: (item: FileNode) => void;
   gitInfo?: GitBranchInfo;
+  userName: string;
+  userEmail: string;
+  isTenantAdmin: boolean;
 }
 
 interface FileTreeItemProps {
@@ -116,7 +120,7 @@ function FileTreeItem({ node, level, selectedFile, onSelectFile, onMoveItem, onD
   );
 }
 
-export function FileTree({ tree, selectedFile, onSelectFile, onClearSelection, onNewDocument, onOpenSettings, onMoveItem, onDeleteItem, gitInfo }: FileTreeProps) {
+export function FileTree({ tree, selectedFile, onSelectFile, onClearSelection, onNewDocument, onOpenSettings, onOpenOrgSettings, onMoveItem, onDeleteItem, gitInfo, userName, userEmail, isTenantAdmin }: FileTreeProps) {
   const [searchQuery, setSearchQuery] = useState('');
 
   const filterTree = (nodes: FileNode[], query: string): FileNode[] => {
@@ -259,9 +263,11 @@ export function FileTree({ tree, selectedFile, onSelectFile, onClearSelection, o
 
       {/* User Badge */}
       <UserBadge
-        name="Dylan Turner"
-        email="dylan@example.com"
+        name={userName}
+        email={userEmail}
+        showOrgSettings={isTenantAdmin}
         onOpenSettings={onOpenSettings}
+        onOpenOrgSettings={onOpenOrgSettings}
       />
     </div>
   );

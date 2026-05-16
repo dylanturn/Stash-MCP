@@ -1,14 +1,26 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { User, Settings, LogOut, ChevronUp } from 'lucide-react';
+import { Settings, Building2, LogOut, ChevronUp } from 'lucide-react';
 
 interface UserBadgeProps {
   name: string;
   email: string;
   avatarUrl?: string;
+  // Show the "Organization Settings" menu entry. Reserved for tenant
+  // admins so non-admins don't see (or attempt to use) controls they
+  // can't apply.
+  showOrgSettings?: boolean;
   onOpenSettings?: () => void;
+  onOpenOrgSettings?: () => void;
 }
 
-export function UserBadge({ name, email, avatarUrl, onOpenSettings }: UserBadgeProps) {
+export function UserBadge({
+  name,
+  email,
+  avatarUrl,
+  showOrgSettings = false,
+  onOpenSettings,
+  onOpenOrgSettings,
+}: UserBadgeProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -31,11 +43,12 @@ export function UserBadge({ name, email, avatarUrl, onOpenSettings }: UserBadgeP
 
   const handleMenuAction = (action: string) => {
     setIsMenuOpen(false);
-    if (action === 'settings' && onOpenSettings) {
-      onOpenSettings();
-    } else {
-      // Mock actions - in real implementation, these would trigger actual auth flows
-      console.log(`User action: ${action}`);
+    if (action === 'settings') {
+      onOpenSettings?.();
+    } else if (action === 'org-settings') {
+      onOpenOrgSettings?.();
+    } else if (action === 'logout') {
+      window.location.href = '/auth/logout';
     }
   };
 
@@ -82,8 +95,27 @@ export function UserBadge({ name, email, avatarUrl, onOpenSettings }: UserBadgeP
             }}
           >
             <Settings className="w-4 h-4" />
-            <span>Settings</span>
+            <span>Account Settings</span>
           </button>
+          {showOrgSettings && (
+            <button
+              onClick={() => handleMenuAction('org-settings')}
+              className="w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-all duration-150"
+              style={{
+                backgroundColor: 'transparent',
+                color: 'var(--stash-text-primary)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = 'var(--stash-bg-hover)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+              }}
+            >
+              <Building2 className="w-4 h-4" />
+              <span>Organization Settings</span>
+            </button>
+          )}
           <div style={{ height: '1px', backgroundColor: 'var(--stash-border)' }} />
           <button
             onClick={() => handleMenuAction('logout')}

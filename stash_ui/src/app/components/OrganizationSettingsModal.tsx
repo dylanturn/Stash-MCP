@@ -8,20 +8,18 @@ import {
   Lock,
   LockOpen,
   Edit2,
-  Palette,
 } from "lucide-react";
 import {
   CreateServerModal,
   ServerConfig,
 } from "./CreateServerModal";
-import { AppearanceSettings } from "./AppearanceSettings";
 
 interface OrganizationSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type SettingsTab = "general" | "servers" | "appearance";
+type SettingsTab = "general" | "servers";
 
 export function OrganizationSettingsModal({
   isOpen,
@@ -42,11 +40,6 @@ export function OrganizationSettingsModal({
       id: "servers" as SettingsTab,
       label: "MCP Servers",
       icon: Server,
-    },
-    {
-      id: "appearance" as SettingsTab,
-      label: "Appearance",
-      icon: Palette,
     },
   ];
 
@@ -144,7 +137,6 @@ export function OrganizationSettingsModal({
           <div className="flex-1 overflow-y-auto p-6">
             {activeTab === "general" && <GeneralSettings />}
             {activeTab === "servers" && <ServerSettings />}
-            {activeTab === "appearance" && <AppearanceSettings />}
           </div>
         </div>
       </div>

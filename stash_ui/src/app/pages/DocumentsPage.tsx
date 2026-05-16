@@ -11,6 +11,7 @@ import { MetadataPanel } from '../components/MetadataPanel';
 import { OverviewContent } from '../components/OverviewContent';
 import { NewDocumentModal } from '../components/NewDocumentModal';
 import { OrganizationSettingsModal } from '../components/OrganizationSettingsModal';
+import { UserSettingsModal } from '../components/UserSettingsModal';
 import { Heading } from '../components/TableOfContents';
 import { Endpoint } from '../components/EndpointsList';
 import { Section } from '../components/SectionsList';
@@ -23,11 +24,13 @@ export function DocumentsPage() {
   const {
     stores,
     current,
+    me,
     loading: storeLoading,
     error: storeError,
     authDisabled,
     client,
   } = useStore();
+  const isTenantAdmin = current?.role === 'admin';
   // The latest client. Async fetches capture this at call time so they
   // can detect that they're stale (the user switched stores while the
   // request was in flight) and drop their result instead of stomping the
@@ -44,7 +47,8 @@ export function DocumentsPage() {
   const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(true);
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
   const [isNewDocModalOpen, setIsNewDocModalOpen] = useState(false);
-  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isUserSettingsOpen, setIsUserSettingsOpen] = useState(false);
+  const [isOrgSettingsOpen, setIsOrgSettingsOpen] = useState(false);
   const [headings, setHeadings] = useState<Heading[]>([]);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
@@ -539,10 +543,16 @@ export function DocumentsPage() {
                 onSelectFile={handleSelectFile}
                 onClearSelection={() => setSelectedFile(null)}
                 onNewDocument={() => setIsNewDocModalOpen(true)}
-                onOpenSettings={() => setIsSettingsModalOpen(true)}
+                onOpenSettings={() => setIsUserSettingsOpen(true)}
+                onOpenOrgSettings={
+                  isTenantAdmin ? () => setIsOrgSettingsOpen(true) : undefined
+                }
                 onMoveItem={handleMoveItem}
                 onDeleteItem={handleDeleteItemFromListing}
                 gitInfo={gitInfo ?? undefined}
+                userName={me?.display_name ?? me?.email ?? 'Signed in'}
+                userEmail={me?.email ?? ''}
+                isTenantAdmin={isTenantAdmin}
               />
             </Panel>
             <PanelResizeHandle
@@ -670,11 +680,25 @@ export function DocumentsPage() {
         onCreate={handleCreateDocument}
       />
 
-      {/* Organization Settings Modal */}
-      <OrganizationSettingsModal
-        isOpen={isSettingsModalOpen}
-        onClose={() => setIsSettingsModalOpen(false)}
-      />
+      {/* User (Account) Settings Modal */}
+      {me && (
+        <UserSettingsModal
+          isOpen={isUserSettingsOpen}
+          onClose={() => setIsUserSettingsOpen(false)}
+          me={me}
+          stores={stores}
+        />
+      )}
+
+      {/* Organization Settings Modal — admins only. The badge dropdown
+          gates the entry point, but guard here too in case the modal
+          state is forced open through some other path. */}
+      {isTenantAdmin && (
+        <OrganizationSettingsModal
+          isOpen={isOrgSettingsOpen}
+          onClose={() => setIsOrgSettingsOpen(false)}
+        />
+      )}
     </div>
   );
 }
