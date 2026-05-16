@@ -17,8 +17,32 @@ function StoreShell() {
 }
 
 function RootRedirect() {
-  const { stores, loading } = useStore();
+  const { stores, loading, error, authDisabled } = useStore();
   if (loading) return null;
+  if (authDisabled) {
+    return (
+      <div className="h-screen w-screen flex items-center justify-center p-6">
+        <div className="max-w-md text-center space-y-3">
+          <h1 className="text-xl">Auth not enabled</h1>
+          <p className="text-sm opacity-70">
+            This Stash deployment is running with{' '}
+            <code>STASH_AUTH_ENABLED=false</code>. The React UI requires
+            an auth-enabled backend. Use the server-rendered UI instead.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="h-screen w-screen flex items-center justify-center p-6">
+        <div className="max-w-md text-center space-y-3">
+          <h1 className="text-xl">Couldn't load stores</h1>
+          <p className="text-sm opacity-70">{error}</p>
+        </div>
+      </div>
+    );
+  }
   if (stores.length === 0) return <Navigate to="/no-stores" replace />;
   const first = stores[0];
   return <Navigate to={`/${first.tenant_slug}/${first.slug}`} replace />;

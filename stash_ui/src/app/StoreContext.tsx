@@ -2,12 +2,20 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 import { useNavigate, useParams } from 'react-router';
 import { getMyStores, StoreSummary } from '../api/auth';
 import { ApiClient, createApiClient } from '../api/client';
+import { HttpError } from '../api/fetch';
 
 interface StoreContextValue {
   stores: StoreSummary[];
   current: StoreSummary | null;
   loading: boolean;
+  // Populated when /auth/stores returned a non-404 failure. Distinct from
+  // `stores.length === 0` (which means "authed but no memberships") and
+  // from `authDisabled` (which means "this backend has no /auth/* router").
   error: string | null;
+  // `/auth/stores` returned 404, i.e. the backend was built without auth.
+  // The SPA is only supported on auth-enabled deployments — render a
+  // clear message instead of falling into the /no-stores flow.
+  authDisabled: boolean;
   setCurrent: (tenantSlug: string, storeSlug: string) => void;
   client: ApiClient | null;
 }
@@ -19,6 +27,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [current, setCurrentState] = useState<StoreSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [authDisabled, setAuthDisabled] = useState(false);
   const navigate = useNavigate();
   const params = useParams();
 
@@ -40,7 +49,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       })
       .catch((err) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
+        if (err instanceof HttpError && err.status === 404) {
+          setAuthDisabled(true);
+        } else {
+          setError(err instanceof Error ? err.message : String(err));
+        }
         setLoading(false);
       });
     return () => {
@@ -54,12 +67,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // Keep `current` in sync with the URL when the user navigates via the
   // store picker or browser nav. The picker calls `setCurrent` which in
   // turn `navigate()`s, then this effect picks up the new params.
+  //
+  // If the URL points at a store the user doesn't have — directly typed,
+  // bookmarked, or revoked since their last visit — null out `current`
+  // so consumers can render their own redirect/empty state instead of
+  // continuing to operate on the previously-selected store.
   useEffect(() => {
     if (stores.length === 0) return;
+    if (!params.tenant || !params.store) return;
     const match = stores.find(
       (s) => s.tenant_slug === params.tenant && s.slug === params.store
     );
-    if (match && match !== current) setCurrentState(match);
+    if (match) {
+      if (match !== current) setCurrentState(match);
+    } else if (current !== null) {
+      setCurrentState(null);
+    }
   }, [params.tenant, params.store, stores, current]);
 
   function setCurrent(tenantSlug: string, storeSlug: string) {
@@ -79,7 +102,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <StoreCtx.Provider
-      value={{ stores, current, loading, error, setCurrent, client }}
+      value={{ stores, current, loading, error, authDisabled, setCurrent, client }}
     >
       {children}
     </StoreCtx.Provider>

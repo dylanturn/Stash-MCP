@@ -70,8 +70,17 @@ listing what's missing. See `Config.validate_auth_config()` in
 
 ### Postgres setup
 
-For production use Postgres. Stash uses `asyncpg`; install it as part of
-the deployment (it's pulled in by the main package).
+For production use Postgres. Stash talks to it via `asyncpg`, which is
+**not** a base dependency — pull it in via the `postgres` extra:
+
+```bash
+uv sync --extra postgres
+# or, with pip:
+pip install 'stash-mcp[postgres]'
+```
+
+Then create the database, point `STASH_DATABASE_URL` at it, and run the
+migrations:
 
 ```bash
 createdb stash

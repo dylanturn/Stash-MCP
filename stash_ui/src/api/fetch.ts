@@ -72,6 +72,26 @@ export async function stashFetch(
       }
       throw new ProblemError(problem);
     }
+    // Legacy `{ "detail": "..." }` shape and arbitrary JSON. Read the body
+    // best-effort so the caller surfaces something more useful than
+    // `Failed to ...: ${statusText}`.
+    let message = res.statusText || `HTTP ${res.status}`;
+    if (contentType.includes('application/json')) {
+      try {
+        const body = (await res.json()) as unknown;
+        if (
+          body &&
+          typeof body === 'object' &&
+          'detail' in body &&
+          typeof (body as { detail: unknown }).detail === 'string'
+        ) {
+          message = (body as { detail: string }).detail;
+        }
+      } catch {
+        // Fall through to statusText.
+      }
+    }
+    throw new HttpError(res.status, message);
   }
 
   return res;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Navigate } from 'react-router';
 import { FileNode, apiTreeToFileNodes } from '../types';
 import { ConcurrentEditError } from '../../api/fetch';
@@ -20,7 +20,22 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { GitBranchInfo } from '../mockData/gitChanges';
 
 export function DocumentsPage() {
-  const { stores, current, loading: storeLoading, client } = useStore();
+  const {
+    stores,
+    current,
+    loading: storeLoading,
+    error: storeError,
+    authDisabled,
+    client,
+  } = useStore();
+  // The latest client. Async fetches capture this at call time so they
+  // can detect that they're stale (the user switched stores while the
+  // request was in flight) and drop their result instead of stomping the
+  // newly-loaded store's state.
+  const clientRef = useRef(client);
+  useEffect(() => {
+    clientRef.current = client;
+  });
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
   const [selectedFile, setSelectedFile] = useState<FileNode | null>(null);
   const [selectedEtag, setSelectedEtag] = useState<string | null>(null);
@@ -40,17 +55,22 @@ export function DocumentsPage() {
   const [gitInfo, setGitInfo] = useState<GitBranchInfo | null>(null);
 
   // Fetch the file tree from the API. Bound to the currently-selected
-  // store via the API client returned from `useStore`.
+  // store via the API client returned from `useStore`. Captures the
+  // active client at call time and drops the result if the user
+  // switched stores while the request was in flight.
   const refreshTree = useCallback(async () => {
     if (!client) return;
+    const reqClient = client;
     try {
-      const tree = await client.getTree();
+      const tree = await reqClient.getTree();
+      if (clientRef.current !== reqClient) return;
       setFileTree(apiTreeToFileNodes(tree));
     } catch (err) {
+      if (clientRef.current !== reqClient) return;
       console.error('Failed to load file tree:', err);
       toast.error('Failed to load file tree');
     } finally {
-      setIsLoading(false);
+      if (clientRef.current === reqClient) setIsLoading(false);
     }
   }, [client]);
 
@@ -59,11 +79,13 @@ export function DocumentsPage() {
   // hold a stale ETag.
   useEffect(() => {
     if (!client) return;
+    const reqClient = client;
     setIsLoading(true);
     setSelectedFile(null);
     setSelectedEtag(null);
     refreshTree();
-    client.getGitOverview().then((data) => {
+    reqClient.getGitOverview().then((data) => {
+      if (clientRef.current !== reqClient) return;
       if (data) setGitInfo(data as GitBranchInfo);
       else setGitInfo(null);
     });
@@ -81,47 +103,69 @@ export function DocumentsPage() {
     }
   }, [selectedFile]);
 
+  // Identifies the latest file-load request. Async fetches compare this
+  // against their own request id when they resolve so a slow load doesn't
+  // overwrite a newer selection's content.
+  const latestSelectionRef = useRef(0);
+
   // Load file content from the API when a file is selected
   const handleSelectFile = useCallback(async (file: FileNode) => {
     if (file.type === 'folder') {
+      latestSelectionRef.current += 1;
       setSelectedFile(file);
       setSelectedEtag(null);
       return;
     }
 
-    // If content is already loaded, just select it. Skip the cached
-    // shortcut after a save/move/etc that bumped the ETag — we always
-    // refetch when no ETag is in state for the file.
-    if (file.content !== undefined && selectedEtag !== null) {
+    // Cache hit: the FileNode carries its own content + ETag from a
+    // prior load. Use both — using the globally-tracked `selectedEtag`
+    // here would risk sending the previously-loaded file's ETag on the
+    // next save (false 412).
+    if (file.content !== undefined && file.etag) {
+      latestSelectionRef.current += 1;
       setSelectedFile(file);
+      setSelectedEtag(file.etag);
       return;
     }
 
     if (!client) return;
+    const reqClient = client;
+    const reqId = ++latestSelectionRef.current;
     setIsContentLoading(true);
     setSelectedFile(file);
+    setSelectedEtag(null);
 
     try {
-      const { content: data, etag } = await client.getContent(file.path);
+      const { content: data, etag } = await reqClient.getContent(file.path);
+      // Drop the result if the user switched stores or files while the
+      // request was in flight.
+      if (clientRef.current !== reqClient || latestSelectionRef.current !== reqId) {
+        return;
+      }
       const enrichedFile: FileNode = {
         ...file,
         content: data.content ?? '',
         size: data.content ? new TextEncoder().encode(data.content).length : 0,
         lastModified: data.updated_at ?? undefined,
         mimeType: data.mime_type ?? undefined,
+        etag: etag ?? undefined,
       };
       setSelectedFile(enrichedFile);
       setSelectedEtag(etag);
-
-      // Also update the file in the tree so re-selecting doesn't re-fetch
+      // Also update the file in the tree so re-selecting doesn't re-fetch.
       setFileTree((prev) => updateFileInTree(prev, file.id, enrichedFile));
     } catch (err) {
+      if (clientRef.current !== reqClient || latestSelectionRef.current !== reqId) {
+        return;
+      }
       console.error('Failed to load file content:', err);
       toast.error('Failed to load file content');
     } finally {
-      setIsContentLoading(false);
+      if (clientRef.current === reqClient && latestSelectionRef.current === reqId) {
+        setIsContentLoading(false);
+      }
     }
-  }, [client, selectedEtag]);
+  }, [client]);
 
   const updateFileInTree = (
     nodes: FileNode[],
@@ -154,6 +198,7 @@ export function DocumentsPage() {
         content,
         size: new TextEncoder().encode(content).length,
         lastModified: new Date().toISOString(),
+        etag: etag ?? undefined,
       };
       setSelectedFile(updatedFile);
       setSelectedEtag(etag);
@@ -178,6 +223,7 @@ export function DocumentsPage() {
               : 0,
             lastModified: data.updated_at ?? undefined,
             mimeType: data.mime_type ?? undefined,
+            etag: etag ?? undefined,
           };
           setSelectedFile(reloaded);
           setSelectedEtag(etag);
@@ -256,10 +302,12 @@ export function DocumentsPage() {
   const handleCreateDocument = async (path: string, content: string, _template: string) => {
     if (!client) return;
     try {
-      await client.createContent(path, content);
+      const { etag } = await client.createContent(path, content);
       await refreshTree();
 
-      // Select the newly created file
+      // Select the newly created file. Capturing the create ETag here is
+      // load-bearing — without it the next save would send whatever ETag
+      // happened to be in `selectedEtag` from the previous selection.
       const newFile: FileNode = {
         id: path,
         name: path.split('/').pop() || 'untitled',
@@ -269,8 +317,11 @@ export function DocumentsPage() {
         content,
         size: new TextEncoder().encode(content).length,
         lastModified: new Date().toISOString(),
+        etag: etag ?? undefined,
       };
+      latestSelectionRef.current += 1;
       setSelectedFile(newFile);
+      setSelectedEtag(etag);
       setIsNewDocModalOpen(false);
       toast.success('Document created');
     } catch (err) {
@@ -322,8 +373,16 @@ export function DocumentsPage() {
 
   // The URL pointed at a tenant/store the user can't see (or that
   // doesn't exist for them). Bounce: no stores → /no-stores; otherwise
-  // land them on the first one they do have.
+  // land them on the first one they do have. Auth-disabled and outright
+  // errors render their own state at the root route, but we surface them
+  // here too in case the user deep-linked.
   if (!current) {
+    if (authDisabled) {
+      return <Navigate to="/" replace />;
+    }
+    if (storeError) {
+      return <Navigate to="/" replace />;
+    }
     if (stores.length === 0) return <Navigate to="/no-stores" replace />;
     const first = stores[0];
     return (
