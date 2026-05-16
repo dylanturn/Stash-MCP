@@ -1,0 +1,36 @@
+issuer: http://localhost:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+grpc:
+  addr: 0.0.0.0:5557
+
+oauth2:
+  skipApprovalScreen: true
+  alwaysShowLoginScreen: false
+
+staticClients:
+  - id: stash-mcp
+    name: Stash-MCP (dev)
+    secret: dev-secret-do-not-use-in-prod
+    redirectURIs:
+      - http://localhost:8000/auth/callback
+
+enablePasswordDB: true
+
+# Preseeded user: alice@example.test / password (bcrypt cost 10).
+# DO NOT use this config in production — the client secret is checked in
+# and the password is the literal string "password".
+staticPasswords:
+  - email: alice@example.test
+    hash: "$2b$10$MMP31TvSDN4dpm3P3/vncug/gpgZkUR0AfnLQx/VuzY/q394aRuVq"
+    username: alice
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+    groups:
+      - stash-admins
+
+connectors: []
