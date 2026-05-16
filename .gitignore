@@ -2,6 +2,8 @@
 stash_ui/node_modules/
 stash_ui/dist/
 
+.claude/worktrees
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
