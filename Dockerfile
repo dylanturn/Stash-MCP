@@ -25,8 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY stash_mcp ./stash_mcp
+COPY alembic ./alembic
 
 # Copy built frontend assets from stage 1
 COPY --from=frontend /build/dist ./stash_ui/dist
