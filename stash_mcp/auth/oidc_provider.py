@@ -26,7 +26,6 @@ import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 from authlib.jose.errors import JoseError
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 from starlette.requests import Request
 
 from ..config import Config

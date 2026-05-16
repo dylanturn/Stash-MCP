@@ -509,7 +509,10 @@ def create_mcp_server(
             # Reject duplicate file paths
             paths = [op.file_path for op in edit_operations]
             if len(paths) != len(set(paths)):
-                raise ValueError("Duplicate file_path entries are not allowed in a single edit_content_batch call.")
+                raise ValueError(
+                    "Duplicate file_path entries are not allowed in a single "
+                    "edit_content_batch call."
+                )
 
             # Phase 1: read all files and validate SHAs
             originals: dict[str, str] = {}
@@ -526,7 +529,9 @@ def create_mcp_server(
             # Phase 2: apply all edits in memory
             new_contents: dict[str, str] = {}
             for op in edit_operations:
-                new_contents[op.file_path] = _apply_edits(originals[op.file_path], op.edits, op.file_path)
+                new_contents[op.file_path] = _apply_edits(
+                    originals[op.file_path], op.edits, op.file_path
+                )
 
             # Phase 3: write all files and send notifications
             results = []
@@ -593,7 +598,8 @@ def create_mcp_server(
     ) -> dict:
         """
         Read and return the contents of a file along with its SHA-256 hash.
-        The SHA will be required for update and delete operations to ensure the file has not changed since it was read.
+        The SHA will be required for update and delete operations to ensure the file has
+        not changed since it was read.
 
         Args:
             path: File path relative to content root
@@ -729,7 +735,8 @@ def create_mcp_server(
         suffix = PurePosixPath(path).suffix.lower()
         if suffix not in {".md", ".markdown"}:
             raise ValueError(
-                f"inspect_content_structure only supports markdown files (.md, .markdown). Got: {path}"
+                "inspect_content_structure only supports markdown files (.md, .markdown). "
+                f"Got: {path}"
             )
         content = _fs().read_file(path)
         sections = parse_markdown_structure(content)

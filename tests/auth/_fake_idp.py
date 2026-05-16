@@ -8,7 +8,6 @@ hit our in-memory router instead of the network.
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from dataclasses import dataclass, field

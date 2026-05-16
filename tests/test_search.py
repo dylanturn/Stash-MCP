@@ -738,7 +738,6 @@ class TestStartupIndexBuild:
         Previously this used @app.on_event('startup') which is silently
         ignored when a lifespan handler is set on the FastAPI app.
         """
-        import asyncio
 
         from fastapi.testclient import TestClient
 

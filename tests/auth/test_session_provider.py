@@ -17,7 +17,7 @@ def _request_with_cookie(cookie_value: str | None) -> Request:
         headers.append(
             (
                 b"cookie",
-                f"{Config.SESSION_COOKIE_NAME}={cookie_value}".encode("utf-8"),
+                f"{Config.SESSION_COOKIE_NAME}={cookie_value}".encode(),
             )
         )
     scope = {

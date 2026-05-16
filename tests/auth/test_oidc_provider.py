@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 
 import pytest
 from sqlalchemy import select
@@ -205,7 +204,6 @@ async def test_group_removal_deletes_oidc_group_row(auth_db, idp, provider):
 
 async def test_audit_events_on_membership_sync(auth_db, idp, provider):
     """Group-derived role added → one audit row. Removed → another row."""
-    import time as _t
 
     t1 = idp.sign(sub="alice-sub", groups=["stash-admins"])
     await provider.authenticate(_request_with_bearer(t1))
@@ -255,7 +253,6 @@ async def test_jwt_cache_skips_db(auth_db, idp, provider):
 
 async def test_jwt_cache_bypassed_for_new_iat(auth_db, idp, provider):
     """Re-issued JWT (different iat) bypasses the cache and re-hits the DB."""
-    import time as _t
 
     t1 = idp.sign(sub="alice-sub", groups=[])
     await provider.authenticate(_request_with_bearer(t1))
