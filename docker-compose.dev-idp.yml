@@ -1,0 +1,35 @@
+# Development-only OIDC IdP for local Stash-MCP auth flows.
+#
+# Brings up a `dex` instance with one preseeded user (alice@example.test /
+# password) in the `stash-admins` group, configured as the `stash-mcp` OAuth
+# client with redirect_uri http://localhost:8000/auth/callback.
+#
+# Usage:
+#   docker compose -f docker-compose.dev-idp.yml up
+#
+# Then point Stash-MCP at it:
+#   STASH_AUTH_ENABLED=true
+#   STASH_OIDC_DISCOVERY_URL=http://localhost:5556/dex/.well-known/openid-configuration
+#   STASH_OIDC_CLIENT_ID=stash-mcp
+#   STASH_OIDC_CLIENT_SECRET=dev-secret-do-not-use-in-prod
+#   STASH_OIDC_ADMIN_GROUP=stash-admins
+#
+# Never use this configuration in production — the client secret is checked
+# in and the user's password is the literal string "password".
+
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    container_name: stash-mcp-dev-dex
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    ports:
+      - "5556:5556"  # HTTP / OIDC endpoints
+      - "5557:5557"  # gRPC (not used by stash, exposed for parity)
+    volumes:
+      - ./.dev/dex-config.yaml:/etc/dex/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:5556/dex/.well-known/openid-configuration"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s

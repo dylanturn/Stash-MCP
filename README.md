@@ -280,6 +280,19 @@ Environment variables:
 - `STASH_PORT` - Server port (default: `8000`)
 - `STASH_LOG_LEVEL` - Logging level (default: `info`)
 
+### Running with auth (preview)
+
+Auth is opt-in via `STASH_AUTH_ENABLED=true`. When enabled, every request to
+`/api/*` and `/mcp/*` must carry one of: a signed session cookie (browser
+UI), a Stash-issued API token (`Authorization: Bearer stash_pat_…`), or a
+valid OIDC bearer JWT. Required env vars: `STASH_DATABASE_URL`,
+`STASH_AUTH_TOKEN_HMAC_KEYS`, `STASH_OIDC_DISCOVERY_URL`,
+`STASH_OIDC_CLIENT_ID`, `STASH_OIDC_CLIENT_SECRET`, `STASH_SESSION_SECRET`,
+`STASH_OIDC_ADMIN_GROUP`. For local development, `docker compose -f
+docker-compose.dev-idp.yml up` brings up a preseeded dex instance. The
+admin login flow, token-management UI, and per-store routing land in later
+chunks — see `docs/auth/` for the spec chain.
+
 ### Read-Only Mode
 
 Set `STASH_READ_ONLY=true` to disable all write tools. In this mode the server only exposes read resources and tools — agents can read and search content but cannot create, update, delete, or move files, and transaction tools are not registered.

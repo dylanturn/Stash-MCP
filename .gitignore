@@ -1,3 +1,5 @@
+**/node_modules
+
 # React frontend build artifacts
 stash_ui/node_modules/
 stash_ui/dist/

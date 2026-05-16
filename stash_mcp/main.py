@@ -11,6 +11,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api import create_api
+from .auth.api_token_provider import ApiTokenAuthProvider
+from .auth.middleware import StashAuthMiddleware
+from .auth.oidc_provider import OIDCAuthProvider
+from .auth.session_provider import SessionCookieAuthProvider
 from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_UPDATED, add_listener, emit
 from .filesystem import FileSystem
@@ -230,6 +234,7 @@ async def _git_sync_loop(
 
 def create_app():
     """Create and configure the FastAPI application."""
+    Config.validate_auth_config()
     _maybe_clone_repo()
     Config.ensure_content_dir()
     filesystem = FileSystem(Config.CONTENT_DIR, include_patterns=Config.CONTENT_PATHS)
@@ -369,6 +374,19 @@ def create_app():
             await self.app(scope, receive, send)
 
     app.add_middleware(_MCPSlashMiddleware)
+
+    # Auth middleware sits in front of both /api and /mcp. When
+    # AUTH_ENABLED=false it short-circuits and existing behavior is preserved.
+    # Provider order is intentional: cookies are cheapest to check, API tokens
+    # next, JWT validation (with JWKS + crypto) most expensive — the middleware
+    # short-circuits on the first success.
+    if Config.AUTH_ENABLED:
+        auth_providers = [
+            SessionCookieAuthProvider(),
+            ApiTokenAuthProvider(),
+            OIDCAuthProvider(),
+        ]
+        app.add_middleware(StashAuthMiddleware, providers=auth_providers)
 
     # Wire event bus: REST mutations emit MCP resource notifications
     def on_content_changed(event_type: str, path: str, **kwargs: str) -> None:

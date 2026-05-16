@@ -130,6 +130,65 @@ class Config:
         if k.strip()
     ]
 
+    # Auth toggle. When False, the middleware does nothing and existing
+    # behavior is preserved. When True, the middleware enforces auth on every
+    # request and the rest of the auth env (OIDC + HMAC + session) must be set.
+    AUTH_ENABLED: bool = os.getenv("STASH_AUTH_ENABLED", "false").lower() == "true"
+
+    # OIDC config. Discovery URL is the only required entry — everything else
+    # (authorize/token/jwks/userinfo URLs) is read from the well-known doc.
+    OIDC_DISCOVERY_URL: str | None = os.getenv("STASH_OIDC_DISCOVERY_URL")
+    OIDC_CLIENT_ID: str | None = os.getenv("STASH_OIDC_CLIENT_ID")
+    OIDC_CLIENT_SECRET: str | None = os.getenv("STASH_OIDC_CLIENT_SECRET")
+    # Optional; defaults to OIDC_CLIENT_ID at validation time.
+    OIDC_AUDIENCE: str | None = os.getenv("STASH_OIDC_AUDIENCE")
+    OIDC_SCOPES: str = os.getenv("STASH_OIDC_SCOPES", "openid profile email groups")
+
+    # Group claim → role mapping (locked in design doc).
+    OIDC_GROUPS_CLAIM: str = os.getenv("STASH_OIDC_GROUPS_CLAIM", "groups")
+    OIDC_ADMIN_GROUP: str | None = os.getenv("STASH_OIDC_ADMIN_GROUP")
+
+    # Session cookies (browser UI). The secret signs cookies; rotating it
+    # invalidates every active session. Cookie is httpOnly, Secure,
+    # SameSite=Lax.
+    SESSION_SECRET: str | None = os.getenv("STASH_SESSION_SECRET")
+    SESSION_COOKIE_NAME: str = os.getenv("STASH_SESSION_COOKIE_NAME", "stash_session")
+    SESSION_MAX_AGE_SECONDS: int = int(os.getenv("STASH_SESSION_MAX_AGE", "43200"))
+
+    @classmethod
+    def validate_auth_config(cls) -> None:
+        """Fail fast when AUTH_ENABLED=true but required vars are missing.
+
+        Called from ``main.create_app`` after env is loaded. Raises
+        ``SystemExit(1)`` with a clear message so the server doesn't come up
+        in a half-configured state.
+        """
+        if not cls.AUTH_ENABLED:
+            return
+
+        missing: list[str] = []
+        if not cls.DATABASE_URL:
+            missing.append("STASH_DATABASE_URL")
+        if not cls.AUTH_TOKEN_HMAC_KEYS:
+            missing.append("STASH_AUTH_TOKEN_HMAC_KEYS")
+        if not cls.OIDC_DISCOVERY_URL:
+            missing.append("STASH_OIDC_DISCOVERY_URL")
+        if not cls.OIDC_CLIENT_ID:
+            missing.append("STASH_OIDC_CLIENT_ID")
+        if not cls.OIDC_CLIENT_SECRET:
+            missing.append("STASH_OIDC_CLIENT_SECRET")
+        if not cls.SESSION_SECRET:
+            missing.append("STASH_SESSION_SECRET")
+        if not cls.OIDC_ADMIN_GROUP:
+            missing.append("STASH_OIDC_ADMIN_GROUP")
+
+        if missing:
+            msg = (
+                "STASH_AUTH_ENABLED=true but required env vars are unset: "
+                + ", ".join(missing)
+            )
+            raise SystemExit(msg)
+
     @classmethod
     def get_effective_metrics_enabled(cls) -> bool:
         """Return whether metrics collection is effectively enabled.
