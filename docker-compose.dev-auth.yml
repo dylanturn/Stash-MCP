@@ -79,7 +79,7 @@ services:
     entrypoint: ["sh", "-c"]
     command:
       - |
-        uv run stash-mcp-migrate upgrade head && \
+        uv run alembic upgrade head && \
         exec uv run stash-mcp
     restart: unless-stopped
 
