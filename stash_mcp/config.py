@@ -89,6 +89,10 @@ class Config:
     GIT_SYNC_TOKEN: str | None = os.getenv("STASH_GIT_SYNC_TOKEN")
     GIT_AUTHOR_DEFAULT: str = os.getenv("STASH_GIT_AUTHOR_DEFAULT", "stash-mcp <stash@local>")
 
+    # Git overview (UI comparison target)
+    GIT_OVERVIEW_REMOTE: str = os.getenv("STASH_GIT_OVERVIEW_REMOTE", "")
+    GIT_OVERVIEW_BRANCH: str = os.getenv("STASH_GIT_OVERVIEW_BRANCH", "")
+
     # Transaction settings (only relevant when GIT_TRACKING=true and READ_ONLY=false)
     TRANSACTION_TIMEOUT: int = int(os.getenv("STASH_TRANSACTION_TIMEOUT", "300"))
     TRANSACTION_LOCK_WAIT: int = int(os.getenv("STASH_TRANSACTION_LOCK_WAIT", "120"))
@@ -107,6 +111,24 @@ class Config:
         )
     )
     METRICS_RETENTION_DAYS: int = int(os.getenv("STASH_METRICS_RETENTION_DAYS", "90"))
+
+    # Auth / persistence — defaults assume same `/data` layout as content + metrics.
+    # Connection string accepts sqlite+aiosqlite:// or postgresql+asyncpg://.
+    DATABASE_URL: str = os.getenv(
+        "STASH_DATABASE_URL",
+        "sqlite+aiosqlite:////data/stash-auth.db",
+    )
+
+    # HMAC keys for API tokens. Comma-separated list — the FIRST entry is the
+    # active signer; the rest are accepted on verify so an operator can rotate
+    # without invalidating live tokens. Each api_tokens row records which key
+    # index hashed it (key_version column) so verification can route to the
+    # right key directly instead of trying all of them.
+    AUTH_TOKEN_HMAC_KEYS: list[str] = [
+        k.strip()
+        for k in os.getenv("STASH_AUTH_TOKEN_HMAC_KEYS", "").split(",")
+        if k.strip()
+    ]
 
     @classmethod
     def get_effective_metrics_enabled(cls) -> bool:

@@ -1,3 +1,17 @@
+# ============================================================
+# Stage 1: Build React frontend
+# ============================================================
+FROM node:22-alpine AS frontend
+
+WORKDIR /build
+COPY stash_ui/package.json stash_ui/package-lock.json* ./
+RUN npm ci
+COPY stash_ui/ .
+RUN npm run build
+
+# ============================================================
+# Stage 2: Python runtime
+# ============================================================
 FROM python:3.12-slim
 
 # Set working directory
@@ -13,6 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy project files
 COPY pyproject.toml uv.lock README.md ./
 COPY stash_mcp ./stash_mcp
+
+# Copy built frontend assets from stage 1
+COPY --from=frontend /build/dist ./stash_ui/dist
 
 # Install dependencies with uv
 # Use --extra search to include semantic search support (numpy + pydantic-ai).
