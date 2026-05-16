@@ -112,6 +112,24 @@ class Config:
     )
     METRICS_RETENTION_DAYS: int = int(os.getenv("STASH_METRICS_RETENTION_DAYS", "90"))
 
+    # Auth / persistence — defaults assume same `/data` layout as content + metrics.
+    # Connection string accepts sqlite+aiosqlite:// or postgresql+asyncpg://.
+    DATABASE_URL: str = os.getenv(
+        "STASH_DATABASE_URL",
+        "sqlite+aiosqlite:////data/stash-auth.db",
+    )
+
+    # HMAC keys for API tokens. Comma-separated list — the FIRST entry is the
+    # active signer; the rest are accepted on verify so an operator can rotate
+    # without invalidating live tokens. Each api_tokens row records which key
+    # index hashed it (key_version column) so verification can route to the
+    # right key directly instead of trying all of them.
+    AUTH_TOKEN_HMAC_KEYS: list[str] = [
+        k.strip()
+        for k in os.getenv("STASH_AUTH_TOKEN_HMAC_KEYS", "").split(",")
+        if k.strip()
+    ]
+
     @classmethod
     def get_effective_metrics_enabled(cls) -> bool:
         """Return whether metrics collection is effectively enabled.
