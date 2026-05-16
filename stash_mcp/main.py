@@ -237,49 +237,107 @@ async def _git_sync_loop(
 
 
 def _create_auth_enabled_app() -> FastAPI:
-    """Minimal app scaffold for AUTH_ENABLED=True.
+    """Build the per-store routed app when ``AUTH_ENABLED=True``.
 
-    Routing into per-store ``/api/<tenant>/<store>/*`` and
-    ``/mcp/<tenant>/<store>/`` lives in spec 04. Until that lands, ``/api``
-    and ``/mcp`` return 503 so misconfigured deployments fail loudly
-    instead of silently serving the wrong content. The auth middleware
-    still runs, so the UI redirect-to-login flow from spec 02 keeps
-    working.
+    Mounts the MCP and REST handlers at ``/api`` and ``/mcp`` exactly as
+    in legacy mode; a :class:`StoreResolverMiddleware` rewrites
+    ``/api/<tenant>/<store>/*`` and ``/mcp/<tenant>/<store>/*`` to the
+    canonical paths and sets the per-request ``current_store``
+    contextvar. The MCP and API handlers read the store from that
+    contextvar via the :data:`USE_CURRENT_STORE` sentinel.
+
+    Search is disabled in auth mode for v1 — a single shared index
+    would leak content across tenants. See spec 04 open questions.
     """
-    # Touch the registry so it's instantiated and ready for 04 to consume.
-    get_store_registry()
+    from .api import USE_CURRENT_STORE as API_USE_CURRENT_STORE
+    from .mcp_server import USE_CURRENT_STORE as MCP_USE_CURRENT_STORE
+    from .routing import StoreResolverMiddleware
 
-    app = FastAPI()
+    registry = get_store_registry()
 
-    async def _not_wired() -> JSONResponse:
+    # Initialise metrics (auth mode shares the same opt-out behaviour).
+    init_metrics(
+        db_path=str(Config.METRICS_PATH),
+        enabled=Config.get_effective_metrics_enabled(),
+        retention_days=Config.METRICS_RETENTION_DAYS,
+    )
+
+    # Per-store routing means tools and REST handlers resolve their
+    # FileSystem at request time. No single search engine, no single
+    # git_backend at construction time.
+    mcp = create_mcp_server(MCP_USE_CURRENT_STORE)
+    mcp_http_app = mcp.http_app(path="/", stateless_http=Config.READ_ONLY)
+    mcp_lifespan = mcp_http_app.lifespan
+
+    @asynccontextmanager
+    async def _auth_lifespan(fastapi_app):
+        async with mcp_lifespan(fastapi_app):
+            get_metrics().record_server_event("startup")
+            yield
+            get_metrics().record_server_event("shutdown")
+            get_metrics().close()
+
+    app = create_api(API_USE_CURRENT_STORE, lifespan=_auth_lifespan)
+
+    # Search endpoint shim: explicit 503 when a client asks for search
+    # under auth mode, so it surfaces clearly rather than 404-ing.
+    @app.get("/api/{tenant}/{store}/search")
+    async def _search_disabled(tenant: str, store: str):
         return JSONResponse(
             {
                 "error": "service_unavailable",
                 "detail": (
-                    "STASH_AUTH_ENABLED=true: per-store routing has not been "
-                    "wired in this build. See docs/auth/04-routing.md."
+                    "Semantic search is disabled when STASH_AUTH_ENABLED=true "
+                    "(would leak content across tenants)."
                 ),
             },
             status_code=503,
         )
 
-    @app.get("/api/health")
-    async def _health() -> dict[str, str]:
-        return {"status": "ok"}
-
-    _methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
-    app.add_api_route("/api/{path:path}", _not_wired, methods=_methods)
-    app.add_api_route("/mcp", _not_wired, methods=_methods)
-    app.add_api_route("/mcp/{path:path}", _not_wired, methods=_methods)
-
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    # Mount MCP under /mcp — the resolver rewrites /mcp/<tenant>/<store>/...
+    # to /mcp/... before this subapp sees the request.
+    app.mount("/mcp", mcp_http_app)
+
+    # Normalize /mcp → /mcp/ to avoid 307 redirects (Cloudflare etc. drop
+    # request bodies on redirect).
+    class _MCPSlashMiddleware:
+        def __init__(self, app: ASGIApp) -> None:
+            self.app = app
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "http" and scope["path"] == "/mcp":
+                scope = dict(scope)
+                scope["path"] = "/mcp/"
+            await self.app(scope, receive, send)
 
     auth_providers = [
         SessionCookieAuthProvider(),
         ApiTokenAuthProvider(),
         OIDCAuthProvider(),
     ]
+
+    # Order matters: add_middleware adds outermost first, so execution
+    # is last-added-runs-first. We want auth → store resolver → app.
+    # Therefore add the slash normalizer first, then store resolver,
+    # then auth.
+    app.add_middleware(_MCPSlashMiddleware)
+    app.add_middleware(
+        StoreResolverMiddleware,
+        registry=registry,
+        public_prefixes=(
+            "/api/health",
+            "/auth",
+            "/admin",
+            "/ui",
+            "/static",
+            "/docs",
+            "/redoc",
+            "/openapi.json",
+        ),
+    )
     app.add_middleware(StashAuthMiddleware, providers=auth_providers)
     return app
 

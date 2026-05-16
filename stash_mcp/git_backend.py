@@ -329,6 +329,31 @@ class GitBackend:
             )
         logger.debug("Renamed remote '%s' to '%s'", old_name, new_name)
 
+    def hash_object(self, path: str) -> str:
+        """Return the git blob SHA for *path*.
+
+        Used as the ETag for git-tracked stores. Uses
+        ``git hash-object`` so the hash matches what the blob would have
+        if it were committed — independent of whether the working-tree
+        file is currently tracked.
+
+        Args:
+            path: File path relative to the content directory.
+
+        Raises:
+            FileNotFoundError: If the working-tree file doesn't exist.
+            RuntimeError: If ``git hash-object`` fails for any other reason.
+        """
+        full_path = self.content_dir / path
+        if not full_path.exists():
+            raise FileNotFoundError(f"File '{path}' not found")
+        result = self._run(["git", "hash-object", "--", path])
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"git hash-object failed for {path!r}: {result.stderr.strip()}"
+            )
+        return result.stdout.strip()
+
     def blame(
         self,
         path: str,
