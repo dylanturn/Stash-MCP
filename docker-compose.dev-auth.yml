@@ -1,0 +1,89 @@
+# Single-file local dev stack: Stash-MCP with auth enabled, backed by a
+# preseeded dex IdP. Brings everything up with one command:
+#
+#   docker compose -f docker-compose.dev-auth.yml up --build
+#
+# Then:
+#   * dex listens on http://localhost:5556/dex
+#   * Stash-MCP listens on http://localhost:8000
+#   * Sign in at http://localhost:8000/ui with alice@example.test / password
+#     (group: stash-admins).
+#
+# How the networking works
+# ------------------------
+# The OIDC issuer URL must resolve to the same place from both the user's
+# browser AND the stash-mcp container. We achieve that by having stash-mcp
+# share dex's network namespace (`network_mode: "service:dex"`), so
+# `localhost:5556` means the dex container in both directions. Both
+# published ports (5556, 8000) are declared on the `dex` service because
+# stash-mcp doesn't own its own network stack here.
+#
+# NEVER use this configuration in production: secrets are checked in,
+# cookies are flagged insecure for plain HTTP, and the dex user's password
+# is the literal string "password".
+
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    container_name: stash-mcp-dex
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    # Ports are declared here because stash-mcp shares this network namespace.
+    ports:
+      - "5556:5556"  # dex OIDC HTTP
+      - "8000:8000"  # stash-mcp HTTP (FastAPI + MCP + UI)
+    volumes:
+      - ./.dev/dex-config.yaml:/etc/dex/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:5556/dex/.well-known/openid-configuration"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  stash-mcp:
+    build: .
+    container_name: stash-mcp
+    # Share dex's network namespace so `localhost:5556` resolves to dex from
+    # inside this container, matching what the browser sees.
+    network_mode: "service:dex"
+    depends_on:
+      dex:
+        condition: service_healthy
+    volumes:
+      - ./content:/data/content
+      - stash-models:/data/models
+      - stash-index:/data/.stash-index
+      - stash-auth:/data/auth
+    environment:
+      - STASH_CONTENT_ROOT=/data/content
+      - STASH_HOST=0.0.0.0
+      - STASH_PORT=8000
+      - STASH_SEARCH_ENABLED=false
+
+      # Auth + persistence
+      - STASH_AUTH_ENABLED=true
+      - STASH_DATABASE_URL=sqlite+aiosqlite:////data/auth/stash-auth.db
+      - STASH_SESSION_SECRET=dev-session-secret-change-me-32-bytes-min
+      - STASH_AUTH_TOKEN_HMAC_KEYS=dev-hmac-key-do-not-use-in-prod
+      - STASH_INSECURE_COOKIES=true
+
+      # OIDC (matches .dev/dex-config.yaml)
+      - STASH_OIDC_DISCOVERY_URL=http://localhost:5556/dex/.well-known/openid-configuration
+      - STASH_OIDC_CLIENT_ID=stash-mcp
+      - STASH_OIDC_CLIENT_SECRET=dev-secret-do-not-use-in-prod
+      - STASH_OIDC_ADMIN_GROUP=stash-admins
+    # Run alembic migrations before booting the server so the auth tables
+    # exist on first start. `exec` keeps PID 1 as the server so signals
+    # forward correctly.
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        uv run stash-mcp-migrate upgrade head && \
+        exec uv run stash-mcp
+    restart: unless-stopped
+
+volumes:
+  stash-models:
+  stash-index:
+  stash-auth:
