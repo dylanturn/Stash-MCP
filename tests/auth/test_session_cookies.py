@@ -34,7 +34,8 @@ def test_tampered_cookie_returns_none():
 def test_expired_cookie_returns_none(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(Config, "SESSION_MAX_AGE_SECONDS", 1, raising=False)
     cookie = session_mod.issue_session("u-1", "oidc-sub-1")
-    time.sleep(1.2)
+    # itsdangerous compares integer seconds, so we need >max_age elapsed.
+    time.sleep(2.1)
     assert session_mod.verify_session(cookie) is None
 
 
