@@ -249,7 +249,12 @@ def _create_auth_enabled_app() -> FastAPI:
     Search is disabled in auth mode for v1 — a single shared index
     would leak content across tenants. See spec 04 open questions.
     """
+    from starlette.middleware.sessions import SessionMiddleware
+
+    from .admin import router as admin_router
     from .api import USE_CURRENT_STORE as API_USE_CURRENT_STORE
+    from .auth.routes import router as auth_router
+    from .errors import install_problem_handlers
     from .mcp_server import USE_CURRENT_STORE as MCP_USE_CURRENT_STORE
     from .routing import StoreResolverMiddleware
 
@@ -278,6 +283,14 @@ def _create_auth_enabled_app() -> FastAPI:
             get_metrics().close()
 
     app = create_api(API_USE_CURRENT_STORE, lifespan=_auth_lifespan)
+
+    install_problem_handlers(app)
+
+    # /auth and /admin are mounted on the same FastAPI app so they share
+    # the auth middleware (added below); the store-resolver middleware
+    # has explicit pass-through prefixes for both.
+    app.include_router(auth_router)
+    app.include_router(admin_router)
 
     # Search endpoint shim: explicit 503 when a client asks for search
     # under auth mode, so it surfaces clearly rather than 404-ing.
@@ -339,6 +352,17 @@ def _create_auth_enabled_app() -> FastAPI:
         ),
     )
     app.add_middleware(StashAuthMiddleware, providers=auth_providers)
+    # authlib's redirect/callback dance uses ``request.session`` to carry
+    # the ``next`` URL across the IdP round-trip. Use a separate cookie
+    # name so it can't be confused with the Stash session cookie.
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=Config.SESSION_SECRET or "stash-oauth-state-dev",
+        session_cookie="stash_oauth_state",
+        max_age=600,
+        same_site="lax",
+        https_only=False,
+    )
     return app
 
 

@@ -35,6 +35,7 @@ dependencies = [
 [project.scripts]
 stash-mcp = "stash_mcp.main:main"
 stash-mcp-stdio = "stash_mcp.server:run"
+stash-mcp-cli = "stash_mcp.cli:main"
 stash-mcp-migrate = "alembic.config:main"
 
 [project.optional-dependencies]
@@ -90,6 +91,9 @@ ignore = []
 
 [tool.ruff.lint.per-file-ignores]
 "stash_mcp/ui.py" = ["E501"]
+# Problem Details classes use semantic names (Forbidden, ETagMismatch, …)
+# that intentionally don't end in "Error".
+"stash_mcp/errors.py" = ["N818"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

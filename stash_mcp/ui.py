@@ -776,6 +776,23 @@ def _page(
         )
 
     toolbar_right_items = ""
+    # When AUTH_ENABLED, show the logged-in user's display name and a
+    # Sign out link. Reads the principal from the contextvar set by
+    # StashAuthMiddleware. In legacy mode the contextvar is unset and we
+    # render nothing.
+    try:
+        from .auth.context import current_principal as _current_principal
+
+        _p = _current_principal()
+    except Exception:  # pragma: no cover — defensive only
+        _p = None
+    if _p is not None:
+        toolbar_right_items += (
+            f'<span class="user-chip" title="{html.escape(_p.email or "")}">'
+            f"{html.escape(_p.display_name or _p.email or 'signed in')}"
+            "</span>"
+            '<a class="signout-link" href="/auth/logout">Sign out</a>'
+        )
     toolbar_right_items += (
         f'<button class="panel-toggle" onclick="toggleSidebar()" '
         f'title="Toggle sidebar">{_icon("panel-left")}</button>'

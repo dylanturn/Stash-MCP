@@ -187,6 +187,61 @@ bodies then resolve the FS / git_backend from
 :func:`stash_mcp.routing.context.current_store` at call time."""
 
 
+# Role → effective scope set. Members can read+write; admins additionally
+# get the admin scope (reserved for future admin tools — none today).
+_ROLE_SCOPES: dict[str, frozenset[str]] = {
+    "admin": frozenset({"read", "write", "admin"}),
+    "member": frozenset({"read", "write"}),
+}
+
+
+def _principal_scopes(principal, tenant_id) -> frozenset[str]:
+    """Resolve the effective scope set for a principal on a given tenant.
+
+    - ``api_token`` principals: explicit scope list from the token row
+      (passed through ``Principal.claims['scopes']`` which is a comma-
+      separated string).
+    - ``oidc`` / ``session`` principals: derived from membership role on
+      ``tenant_id``.
+    """
+    if principal.auth_method == "api_token":
+        raw = principal.claims.get("scopes", "")
+        if not isinstance(raw, str):
+            return frozenset()
+        return frozenset(s for s in raw.split(",") if s)
+    role = principal.tenant_roles.get(tenant_id)
+    if role is None:
+        return frozenset()
+    return _ROLE_SCOPES.get(role, frozenset())
+
+
+def _enforce_tool_scope(tool_name: str, required_scope: str) -> None:
+    """Raise if the in-flight principal lacks ``required_scope``.
+
+    Imported here rather than at module top to avoid circular imports
+    between ``mcp_server`` and the ``auth.context`` /
+    ``routing.context`` modules.
+    """
+    from .auth.context import current_principal
+    from .auth.provider import AuthError
+    from .routing.context import current_store
+
+    principal = current_principal()
+    if principal is None:
+        raise AuthError(f"tool {tool_name!r}: authentication required")
+    store = current_store()
+    if store is None:
+        raise AuthError(
+            f"tool {tool_name!r}: no store context (request reached "
+            "tool body without store resolver)"
+        )
+    scopes = _principal_scopes(principal, store.tenant_id)
+    if required_scope not in scopes:
+        raise AuthError(
+            f"tool {tool_name!r}: scope {required_scope!r} required"
+        )
+
+
 def create_mcp_server(
     filesystem_or_resolver,
     search_engine=None,
@@ -249,9 +304,19 @@ def create_mcp_server(
     # Wrap mcp.tool() so every registered tool is automatically timed and
     # its outcome recorded in the metrics collector.  Using functools.wraps
     # preserves the original signature so FastMCP generates the correct schema.
+    #
+    # The wrapper also enforces per-tool scope when ``AUTH_ENABLED=True``:
+    # read tools require the ``read`` scope, write/transaction tools require
+    # ``write``. Scopes derive from membership role for cookie/JWT principals
+    # and from the explicit list on the api_tokens row for API-token
+    # principals.
     _original_mcp_tool = mcp.tool
 
-    def _instrumented_tool(*deco_args, **deco_kwargs):
+    def _instrumented_tool(*deco_args, required_scope: str | None = None, **deco_kwargs):
+        if required_scope is None:
+            annotations = deco_kwargs.get("annotations")
+            read_hint = getattr(annotations, "readOnlyHint", False)
+            required_scope = "read" if read_hint else "write"
         orig_decorator = _original_mcp_tool(*deco_args, **deco_kwargs)
 
         def patching_decorator(fn):
@@ -259,6 +324,8 @@ def create_mcp_server(
 
             @functools.wraps(fn)
             async def _tracked(*args, **kwargs):
+                if Config.AUTH_ENABLED:
+                    _enforce_tool_scope(tool_name, required_scope)
                 t0 = time.perf_counter()
                 try:
                     result = await fn(*args, **kwargs)
