@@ -1,12 +1,13 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { getMyStores, StoreSummary } from '../api/auth';
+import { getMe, getMyStores, Me, StoreSummary } from '../api/auth';
 import { ApiClient, createApiClient } from '../api/client';
 import { HttpError } from '../api/fetch';
 
 interface StoreContextValue {
   stores: StoreSummary[];
   current: StoreSummary | null;
+  me: Me | null;
   loading: boolean;
   // Populated when /auth/stores returned a non-404 failure. Distinct from
   // `stores.length === 0` (which means "authed but no memberships") and
@@ -25,6 +26,7 @@ const StoreCtx = createContext<StoreContextValue | null>(null);
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [stores, setStores] = useState<StoreSummary[]>([]);
   const [current, setCurrentState] = useState<StoreSummary | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [authDisabled, setAuthDisabled] = useState(false);
@@ -33,9 +35,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    getMyStores()
-      .then((data) => {
+    // Load identity and store memberships in parallel. Both are gated
+    // behind the same auth router on the backend; a 404 on either means
+    // the deployment is running without auth.
+    Promise.all([getMe(), getMyStores()])
+      .then(([meData, data]) => {
         if (cancelled) return;
+        setMe(meData);
         setStores(data);
         const tenantFromUrl = params.tenant;
         const storeFromUrl = params.store;
@@ -102,7 +108,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <StoreCtx.Provider
-      value={{ stores, current, loading, error, authDisabled, setCurrent, client }}
+      value={{ stores, current, me, loading, error, authDisabled, setCurrent, client }}
     >
       {children}
     </StoreCtx.Provider>
