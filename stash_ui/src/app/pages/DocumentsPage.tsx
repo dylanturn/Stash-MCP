@@ -114,6 +114,10 @@ export function DocumentsPage() {
       latestSelectionRef.current += 1;
       setSelectedFile(file);
       setSelectedEtag(null);
+      // Owning the loading flag: bumping the ref invalidates any
+      // in-flight uncached load, whose `finally` will now no-op. Clear
+      // here so the spinner doesn't get stuck on top of the folder view.
+      setIsContentLoading(false);
       return;
     }
 
@@ -125,6 +129,9 @@ export function DocumentsPage() {
       latestSelectionRef.current += 1;
       setSelectedFile(file);
       setSelectedEtag(file.etag);
+      // Same reason as the folder branch — clear in case an earlier
+      // uncached load set the spinner and is now invalidated.
+      setIsContentLoading(false);
       return;
     }
 
