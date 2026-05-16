@@ -9,6 +9,10 @@ export interface FileNode {
   size?: number;
   lastModified?: string;
   mimeType?: string;
+  // Last-known ETag for the file's content. Stored alongside the cached
+  // content so re-selecting a file uses its own ETag, not whichever file
+  // was loaded most recently.
+  etag?: string;
 }
 
 export interface DocumentMetadata {

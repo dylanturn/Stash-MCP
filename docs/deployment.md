@@ -70,8 +70,17 @@ listing what's missing. See `Config.validate_auth_config()` in
 
 ### Postgres setup
 
-For production use Postgres. Stash uses `asyncpg`; install it as part of
-the deployment (it's pulled in by the main package).
+For production use Postgres. Stash talks to it via `asyncpg`, which is
+**not** a base dependency — pull it in via the `postgres` extra:
+
+```bash
+uv sync --extra postgres
+# or, with pip:
+pip install 'stash-mcp[postgres]'
+```
+
+Then create the database, point `STASH_DATABASE_URL` at it, and run the
+migrations:
 
 ```bash
 createdb stash
@@ -119,11 +128,11 @@ Once the server is running, use the admin CLI to provision your first
 tenant and store:
 
 ```bash
-uv run stash-mcp tenant create --slug acme --display-name "Acme Inc"
-uv run stash-mcp store create --tenant acme --slug docs --display-name "Docs"
+uv run stash-mcp-cli tenant create --slug acme --name "Acme Inc"
+uv run stash-mcp-cli store create --tenant acme --slug docs --display-name "Docs"
 # Or, clone an existing repo into a store:
-uv run stash-mcp store create --tenant acme --slug docs \
-  --git-remote https://github.com/acme/docs.git
+uv run stash-mcp-cli store create --tenant acme --slug docs \
+  --remote https://github.com/acme/docs.git
 ```
 
 Stores live at `STASH_CONTENT_ROOT/<tenant_id>/<store_slug>/`. The

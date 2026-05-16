@@ -25,9 +25,13 @@ def test_roundtrip_returns_same_payload():
 
 def test_tampered_cookie_returns_none():
     cookie = session_mod.issue_session("u-1", "oidc-sub-1")
-    # Flip a character in the signed portion. Length stays the same so the
-    # decoder runs but the signature check fails.
-    tampered = cookie[:-1] + ("A" if cookie[-1] != "A" else "B")
+    # Replace the signature with one that definitely doesn't match. Flipping
+    # the last char of the cookie is not safe: itsdangerous URL-safe-
+    # base64-encodes a 20-byte HMAC into 27 chars, leaving 2 slack bits in
+    # the last char, so swapping (say) A↔B can decode to the same signature
+    # bytes and make this test flake.
+    payload_and_timestamp, sig = cookie.rsplit(".", 1)
+    tampered = payload_and_timestamp + "." + "X" * len(sig)
     assert session_mod.verify_session(tampered) is None
 
 

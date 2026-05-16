@@ -310,6 +310,19 @@ def _create_auth_enabled_app() -> FastAPI:
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # Mount the React SPA at /ui. The auth middleware already redirects
+    # unauthenticated GETs under /ui to /auth/login, and the SPA bootstraps
+    # itself by calling /auth/me + /auth/stores once the session cookie is
+    # in place.
+    if FRONTEND_DIR.is_dir():
+        mount_frontend(app)
+    else:
+        logger.warning(
+            "AUTH_ENABLED=true but %s does not exist — /ui will 404. "
+            "Build the SPA (npm run build in stash_ui/) or use the Docker image.",
+            FRONTEND_DIR,
+        )
+
     # Mount MCP under /mcp — the resolver rewrites /mcp/<tenant>/<store>/...
     # to /mcp/... before this subapp sees the request.
     app.mount("/mcp", mcp_http_app)
@@ -482,22 +495,17 @@ def create_app():
     # Mount FastMCP server onto FastAPI for streamable HTTP transport
     app.mount("/mcp", mcp_http_app)
 
-    # Mount UI: when the React SPA dist exists, serve it at /ui and the legacy
-    # HTML UI at /ui/classic.  Without a dist, the legacy UI serves at /ui.
-    # The legacy router must be registered before the SPA mount so its specific
-    # routes take priority over the SPA catch-all.
-    has_frontend = FRONTEND_DIR.is_dir()
-    legacy_prefix = "/ui/classic" if has_frontend else "/ui"
+    # Legacy mode always serves the server-rendered HTML UI at /ui. The
+    # React SPA depends on /auth/* (which the legacy app doesn't mount), so
+    # serving it here would break the documented `/ui` flow — see
+    # docs/deployment.md.
     ui_router = create_ui_router(
         filesystem,
         search_engine=search_engine,
         read_only=Config.READ_ONLY,
-        prefix=legacy_prefix,
+        prefix="/ui",
     )
     app.include_router(ui_router)
-
-    if has_frontend:
-        mount_frontend(app)
 
     # Normalize /mcp → /mcp/ so the mounted sub-app handles requests to
     # both paths without a 307 redirect.  Redirects can break MCP clients
