@@ -135,6 +135,11 @@ class Config:
     # request and the rest of the auth env (OIDC + HMAC + session) must be set.
     AUTH_ENABLED: bool = os.getenv("STASH_AUTH_ENABLED", "false").lower() == "true"
 
+    # Slug used for the implicit single store when AUTH_ENABLED=False. The
+    # legacy single-CONTENT_DIR layout is exposed under this slug so that
+    # URLs and admin tooling can refer to it uniformly once auth is flipped on.
+    DEFAULT_STORE_SLUG: str = os.getenv("STASH_DEFAULT_STORE_SLUG", "default")
+
     # OIDC config. Discovery URL is the only required entry — everything else
     # (authorize/token/jwks/userinfo URLs) is read from the well-known doc.
     OIDC_DISCOVERY_URL: str | None = os.getenv("STASH_OIDC_DISCOVERY_URL")

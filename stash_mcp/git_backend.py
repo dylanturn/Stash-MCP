@@ -477,6 +477,70 @@ class GitBackend:
         logger.info("Pushed %s to %s/%s.", branch, remote, branch)
 
     @classmethod
+    def init(
+        cls,
+        target_dir: Path,
+        author_default: str = "stash-mcp <stash@local>",
+    ) -> "GitBackend":
+        """Initialise an empty git repository in *target_dir*.
+
+        Creates the directory if it does not exist, runs ``git init``,
+        sets a local committer identity, and records a root commit so
+        the repo has a HEAD that transactions can reset against.
+
+        Returns a :class:`GitBackend` pointed at the new repo.
+
+        Raises:
+            RuntimeError: If ``git init`` or the root commit fails.
+        """
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        init_result = subprocess.run(
+            ["git", "init", "--initial-branch=main", str(target_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if init_result.returncode != 0:
+            # Older git lacks --initial-branch; fall back to plain init.
+            init_result = subprocess.run(
+                ["git", "init", str(target_dir)],
+                capture_output=True,
+                text=True,
+            )
+        if init_result.returncode != 0:
+            raise RuntimeError(
+                f"git init failed for {target_dir}: {init_result.stderr.strip()}"
+            )
+
+        instance = cls(target_dir, author_default=author_default)
+        instance.validate()
+
+        # Empty root commit so HEAD exists — transactions reset against it.
+        # `-c commit.gpgsign=false` keeps the root commit usable in
+        # environments where the user has a (possibly misconfigured) global
+        # signing setup; per-store repos created by Stash don't need signed
+        # commits.
+        commit_result = instance._run(
+            [
+                "git",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ]
+        )
+        if commit_result.returncode != 0:
+            raise RuntimeError(
+                f"git initial commit failed for {target_dir}: "
+                f"{commit_result.stderr.strip()}"
+            )
+
+        logger.info("Initialised empty git repo at %s", target_dir)
+        return instance
+
+    @classmethod
     def clone(
         cls,
         url: str,

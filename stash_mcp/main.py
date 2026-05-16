@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -21,6 +23,8 @@ from .filesystem import FileSystem
 from .frontend import FRONTEND_DIR, mount_frontend
 from .mcp_server import create_mcp_server
 from .metrics import get_metrics, init_metrics
+from .stores.layout import validate_content_layout
+from .stores.registry import get_store_registry
 from .ui import create_ui_router
 
 # Configure logging
@@ -232,9 +236,62 @@ async def _git_sync_loop(
         await asyncio.sleep(interval)
 
 
+def _create_auth_enabled_app() -> FastAPI:
+    """Minimal app scaffold for AUTH_ENABLED=True.
+
+    Routing into per-store ``/api/<tenant>/<store>/*`` and
+    ``/mcp/<tenant>/<store>/`` lives in spec 04. Until that lands, ``/api``
+    and ``/mcp`` return 503 so misconfigured deployments fail loudly
+    instead of silently serving the wrong content. The auth middleware
+    still runs, so the UI redirect-to-login flow from spec 02 keeps
+    working.
+    """
+    # Touch the registry so it's instantiated and ready for 04 to consume.
+    get_store_registry()
+
+    app = FastAPI()
+
+    async def _not_wired() -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": "service_unavailable",
+                "detail": (
+                    "STASH_AUTH_ENABLED=true: per-store routing has not been "
+                    "wired in this build. See docs/auth/04-routing.md."
+                ),
+            },
+            status_code=503,
+        )
+
+    @app.get("/api/health")
+    async def _health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    _methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
+    app.add_api_route("/api/{path:path}", _not_wired, methods=_methods)
+    app.add_api_route("/mcp", _not_wired, methods=_methods)
+    app.add_api_route("/mcp/{path:path}", _not_wired, methods=_methods)
+
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    auth_providers = [
+        SessionCookieAuthProvider(),
+        ApiTokenAuthProvider(),
+        OIDCAuthProvider(),
+    ]
+    app.add_middleware(StashAuthMiddleware, providers=auth_providers)
+    return app
+
+
 def create_app():
     """Create and configure the FastAPI application."""
-    Config.validate_auth_config()
+    validate_content_layout()
+
+    if Config.AUTH_ENABLED:
+        Config.validate_auth_config()
+        return _create_auth_enabled_app()
+
     _maybe_clone_repo()
     Config.ensure_content_dir()
     filesystem = FileSystem(Config.CONTENT_DIR, include_patterns=Config.CONTENT_PATHS)
@@ -375,19 +432,7 @@ def create_app():
 
     app.add_middleware(_MCPSlashMiddleware)
 
-    # Auth middleware sits in front of both /api and /mcp. When
-    # AUTH_ENABLED=false it short-circuits and existing behavior is preserved.
-    # Provider order is intentional: cookies are cheapest to check, API tokens
-    # next, JWT validation (with JWKS + crypto) most expensive — the middleware
-    # short-circuits on the first success.
-    if Config.AUTH_ENABLED:
-        auth_providers = [
-            SessionCookieAuthProvider(),
-            ApiTokenAuthProvider(),
-            OIDCAuthProvider(),
-        ]
-        app.add_middleware(StashAuthMiddleware, providers=auth_providers)
-
+    # Auth middleware is only wired in the AUTH_ENABLED branch above.
     # Wire event bus: REST mutations emit MCP resource notifications
     def on_content_changed(event_type: str, path: str, **kwargs: str) -> None:
         logger.info(f"Content event: {event_type} {path} {kwargs}")
