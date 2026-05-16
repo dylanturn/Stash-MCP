@@ -310,6 +310,19 @@ def _create_auth_enabled_app() -> FastAPI:
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # Mount the React SPA at /ui. The auth middleware already redirects
+    # unauthenticated GETs under /ui to /auth/login, and the SPA bootstraps
+    # itself by calling /auth/me + /auth/stores once the session cookie is
+    # in place.
+    if FRONTEND_DIR.is_dir():
+        mount_frontend(app)
+    else:
+        logger.warning(
+            "AUTH_ENABLED=true but %s does not exist — /ui will 404. "
+            "Build the SPA (npm run build in stash_ui/) or use the Docker image.",
+            FRONTEND_DIR,
+        )
+
     # Mount MCP under /mcp — the resolver rewrites /mcp/<tenant>/<store>/...
     # to /mcp/... before this subapp sees the request.
     app.mount("/mcp", mcp_http_app)

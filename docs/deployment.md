@@ -119,11 +119,11 @@ Once the server is running, use the admin CLI to provision your first
 tenant and store:
 
 ```bash
-uv run stash-mcp tenant create --slug acme --display-name "Acme Inc"
-uv run stash-mcp store create --tenant acme --slug docs --display-name "Docs"
+uv run stash-mcp-cli tenant create --slug acme --name "Acme Inc"
+uv run stash-mcp-cli store create --tenant acme --slug docs --display-name "Docs"
 # Or, clone an existing repo into a store:
-uv run stash-mcp store create --tenant acme --slug docs \
-  --git-remote https://github.com/acme/docs.git
+uv run stash-mcp-cli store create --tenant acme --slug docs \
+  --remote https://github.com/acme/docs.git
 ```
 
 Stores live at `STASH_CONTENT_ROOT/<tenant_id>/<store_slug>/`. The
