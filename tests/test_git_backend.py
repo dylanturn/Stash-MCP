@@ -522,10 +522,23 @@ class TestGitBackendClone:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def _restore_git_tracking(monkeypatch):
+    """Ensure Config.GIT_TRACKING is restored after the test.
+
+    _maybe_clone_repo() sets Config.GIT_TRACKING = True as a side-effect,
+    which leaks to subsequent tests if not explicitly reset. Registering
+    the attribute with monkeypatch (using its current value) ensures any
+    later mutation is undone at teardown.
+    """
+    import stash_mcp.config as cfg
+    monkeypatch.setattr(cfg.Config, "GIT_TRACKING", cfg.Config.GIT_TRACKING)
+
+
 class TestMaybeCloneRepo:
     """Tests for the _maybe_clone_repo startup helper."""
 
-    def test_no_clone_url_is_noop(self, tmp_path, monkeypatch):
+    def test_no_clone_url_is_noop(self, tmp_path, monkeypatch, _restore_git_tracking):
         import stash_mcp.config as cfg
 
         monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", None)
@@ -533,7 +546,7 @@ class TestMaybeCloneRepo:
 
         _maybe_clone_repo()  # Should not raise
 
-    def test_clone_url_clones_repo(self, tmp_path, monkeypatch):
+    def test_clone_url_clones_repo(self, tmp_path, monkeypatch, _restore_git_tracking):
         import stash_mcp.config as cfg
         import stash_mcp.main as app_main
 
@@ -553,7 +566,7 @@ class TestMaybeCloneRepo:
         assert (target / ".git").exists()
         assert cfg.Config.GIT_TRACKING is True
 
-    def test_already_cloned_skips(self, tmp_path, monkeypatch):
+    def test_already_cloned_skips(self, tmp_path, monkeypatch, _restore_git_tracking):
         import stash_mcp.config as cfg
         import stash_mcp.main as app_main
 
@@ -578,7 +591,9 @@ class TestMaybeCloneRepo:
         # GIT_TRACKING stays False (wasn't re-enabled since we skipped)
         assert cfg.Config.GIT_TRACKING is False
 
-    def test_non_empty_non_git_dir_raises_system_exit(self, tmp_path, monkeypatch):
+    def test_non_empty_non_git_dir_raises_system_exit(
+        self, tmp_path, monkeypatch, _restore_git_tracking
+    ):
         import stash_mcp.config as cfg
         import stash_mcp.main as app_main
 
@@ -599,7 +614,7 @@ class TestMaybeCloneRepo:
 class TestMaybeCloneRepoSyncURL:
     """Tests for _maybe_clone_repo when STASH_GIT_SYNC_URL is used."""
 
-    def test_sync_url_clones_into_empty_dir(self, tmp_path, monkeypatch):
+    def test_sync_url_clones_into_empty_dir(self, tmp_path, monkeypatch, _restore_git_tracking):
         import stash_mcp.config as cfg
         import stash_mcp.main as app_main
 
@@ -621,7 +636,9 @@ class TestMaybeCloneRepoSyncURL:
         assert (target / ".git").exists()
         assert cfg.Config.GIT_TRACKING is True
 
-    def test_sync_url_no_clone_url_is_noop_when_both_none(self, tmp_path, monkeypatch):
+    def test_sync_url_no_clone_url_is_noop_when_both_none(
+        self, tmp_path, monkeypatch, _restore_git_tracking
+    ):
         import stash_mcp.config as cfg
 
         monkeypatch.setattr(cfg.Config, "GIT_CLONE_URL", None)
@@ -630,7 +647,9 @@ class TestMaybeCloneRepoSyncURL:
 
         _maybe_clone_repo()  # Should not raise
 
-    def test_sync_url_renames_remote_when_not_origin(self, tmp_path, monkeypatch):
+    def test_sync_url_renames_remote_when_not_origin(
+        self, tmp_path, monkeypatch, _restore_git_tracking
+    ):
         import stash_mcp.config as cfg
         import stash_mcp.main as app_main
 
@@ -660,7 +679,9 @@ class TestMaybeCloneRepoSyncURL:
         )
         assert result.returncode != 0
 
-    def test_sync_url_skips_clone_when_git_dir_exists(self, tmp_path, monkeypatch):
+    def test_sync_url_skips_clone_when_git_dir_exists(
+        self, tmp_path, monkeypatch, _restore_git_tracking
+    ):
         import stash_mcp.config as cfg
         import stash_mcp.main as app_main
 
@@ -685,7 +706,9 @@ class TestMaybeCloneRepoSyncURL:
         # Should have auto-enabled GIT_TRACKING even though clone was skipped
         assert cfg.Config.GIT_TRACKING is True
 
-    def test_sync_url_non_empty_non_git_dir_raises_system_exit(self, tmp_path, monkeypatch):
+    def test_sync_url_non_empty_non_git_dir_raises_system_exit(
+        self, tmp_path, monkeypatch, _restore_git_tracking
+    ):
         import stash_mcp.config as cfg
         import stash_mcp.main as app_main
 
@@ -704,7 +727,9 @@ class TestMaybeCloneRepoSyncURL:
         with pytest.raises(SystemExit):
             app_main._maybe_clone_repo()
 
-    def test_git_clone_url_takes_precedence_over_sync_url(self, tmp_path, monkeypatch):
+    def test_git_clone_url_takes_precedence_over_sync_url(
+        self, tmp_path, monkeypatch, _restore_git_tracking
+    ):
         """STASH_GIT_CLONE_URL takes priority when both are set."""
         import stash_mcp.config as cfg
         import stash_mcp.main as app_main

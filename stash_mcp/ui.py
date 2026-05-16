@@ -224,7 +224,9 @@ def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
     return dirs + readme + files
 
 
-def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "", prefix: str = "/ui") -> str:
+def _build_tree_html(
+    filesystem: FileSystem, rel: str = "", active: str = "", prefix: str = "/ui"
+) -> str:
     """Build recursive HTML for the sidebar tree."""
     try:
         entries = filesystem.list_files(rel)
@@ -626,7 +628,8 @@ function handleSearch(query){
           data.results.forEach(function(r){
             var snippet=r.content||'';
             if(snippet.length>120)snippet=snippet.substring(0,120)+'\u2026';
-            h+='<a class="search-result" href="'+_uiPrefix+'/browse/'+encodeURIComponent(r.file_path)+'">'
+            h+='<a class="search-result" href="'+_uiPrefix+'/browse/'
+              +encodeURIComponent(r.file_path)+'">'
               +'<span class="search-result-path">'+_escHtml(r.file_path)+'</span>'
               +'<span class="search-result-snippet">'+_escHtml(snippet)+'</span>'
               +'</a>';

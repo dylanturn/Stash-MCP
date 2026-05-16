@@ -198,7 +198,8 @@ class FileSystem:
                 for item in self.content_dir.glob(pattern):
                     if not item.is_file():
                         continue
-                    if any(part.startswith(".") for part in item.relative_to(self.content_dir).parts):
+                    rel_parts = item.relative_to(self.content_dir).parts
+                    if any(part.startswith(".") for part in rel_parts):
                         continue
                     rel = str(item.relative_to(self.content_dir))
                     # Filter by relative_path prefix

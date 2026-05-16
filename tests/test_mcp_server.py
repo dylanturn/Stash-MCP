@@ -393,7 +393,9 @@ async def test_read_content_batch_max_lines_no_truncation_when_within_limit(temp
 async def test_overwrite_content_tool(mcp_server, temp_fs, mock_context):
     """Test overwrite_content tool updates an existing file."""
     tool = await mcp_server.get_tool("overwrite_content")
-    result = await tool.run({"path": "README.md", "content": "# Updated", "sha": _sha("# Root README")})
+    result = await tool.run(
+        {"path": "README.md", "content": "# Updated", "sha": _sha("# Root README")}
+    )
     assert "Updated: README.md" in str(result.content)
     assert temp_fs.read_file("README.md") == "# Updated"
 
@@ -467,14 +469,14 @@ async def test_create_sends_list_changed(temp_fs, mock_context):
     """Test that create_content sends resource_list_changed only for README.md files."""
     mcp = create_mcp_server(temp_fs)
     tool = await mcp.get_tool("create_content")
-    
+
     # Creating README.md should send notification
     await tool.run({"path": "README.md", "content": "# New"})
     mock_context.send_resource_list_changed.assert_awaited_once()
-    
+
     # Reset mock
     mock_context.send_resource_list_changed.reset_mock()
-    
+
     # Creating non-README file should NOT send notification
     await tool.run({"path": "other.md", "content": "# Other"})
     mock_context.send_resource_list_changed.assert_not_awaited()
@@ -494,7 +496,9 @@ async def test_overwrite_existing_sends_resource_updated(mcp_server, mock_contex
     mock_context.session.send_resource_updated.reset_mock()
 
     # Replace non-README file should NOT send resource_updated
-    await tool.run({"path": "data.json", "content": '{"updated": true}', "sha": _sha('{"key": "value"}')})
+    await tool.run(
+        {"path": "data.json", "content": '{"updated": true}', "sha": _sha('{"key": "value"}')}
+    )
     mock_context.session.send_resource_updated.assert_not_awaited()
 
 
@@ -546,7 +550,7 @@ async def test_delete_sends_list_changed(mcp_server, temp_fs, mock_context):
 async def test_move_updates_resources(mcp_server, temp_fs, mock_context):
     """Test that move_content updates resource registry for README.md."""
     tool = await mcp_server.get_tool("move_content")
-    
+
     # Moving README.md to another README.md location
     await tool.run({"source_path": "README.md", "dest_path": "other/README.md"})
     resources = await mcp_server.get_resources()
@@ -557,14 +561,14 @@ async def test_move_updates_resources(mcp_server, temp_fs, mock_context):
 async def test_move_sends_list_changed(mcp_server, temp_fs, mock_context):
     """Test that move_content sends notification when README.md is involved."""
     tool = await mcp_server.get_tool("move_content")
-    
+
     # Moving README.md to another location should send notification
     await tool.run({"source_path": "README.md", "dest_path": "other/README.md"})
     mock_context.send_resource_list_changed.assert_awaited_once()
-    
+
     # Reset mock
     mock_context.send_resource_list_changed.reset_mock()
-    
+
     # Moving non-README file should NOT send notification
     await tool.run({"source_path": "data.json", "dest_path": "moved.json"})
     mock_context.send_resource_list_changed.assert_not_awaited()
@@ -590,15 +594,15 @@ async def test_move_content_directory_tool_with_readme(mcp_server, temp_fs, mock
     # Register the README.md resource first by creating a fresh server
     from stash_mcp.mcp_server import create_mcp_server
     mcp = create_mcp_server(temp_fs)
-    resources_before = await mcp._list_resources()
-    uris_before = {str(r.uri) for r in resources_before}
+    resources_before = await mcp.get_resources()
+    uris_before = {str(r.uri) for r in resources_before.values()}
     assert "stash://docs/README.md" in uris_before
 
     tool = await mcp.get_tool("move_content_directory")
     await tool.run({"source_path": "docs", "dest_path": "archive/docs"})
 
-    resources_after = await mcp._list_resources()
-    uris_after = {str(r.uri) for r in resources_after}
+    resources_after = await mcp.get_resources()
+    uris_after = {str(r.uri) for r in resources_after.values()}
     assert "stash://docs/README.md" not in uris_after
     assert "stash://archive/docs/README.md" in uris_after
     mock_context.send_resource_list_changed.assert_awaited()
@@ -764,8 +768,8 @@ async def test_move_content_batch_resource_registration(temp_fs, mock_context):
             MoveOperation(source_path="docs/README.md", dest_path="archive/docs/README.md"),
         ],
     })
-    resources = await mcp._list_resources()
-    uris = {str(r.uri) for r in resources}
+    resources = await mcp.get_resources()
+    uris = {str(r.uri) for r in resources.values()}
     assert "stash://README.md" not in uris
     assert "stash://docs/README.md" not in uris
     assert "stash://archive/README.md" in uris
@@ -869,7 +873,7 @@ async def test_edit_content_multiple_sequential_edits(mcp_server, temp_fs, mock_
     """Test edit_content with multiple edits applied sequentially."""
     tool = await mcp_server.get_tool("edit_content")
     original = "# Root README"
-    result = await tool.run({
+    await tool.run({
         "file_path": "README.md",
         "sha": _sha(original),
         "edits": [
@@ -1111,8 +1115,8 @@ async def test_read_only_mode_omits_write_tools(temp_fs):
     """Test that write tools are not registered when READ_ONLY=True."""
     with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
         mcp = create_mcp_server(temp_fs)
-        tools = await mcp.list_tools()
-        tool_names = {t.name for t in tools}
+        tools = await mcp.get_tools()
+        tool_names = set(tools.keys())
         for name in WRITE_TOOL_NAMES:
             assert name not in tool_names, f"Write tool '{name}' should not be in read-only mode"
         for name in READ_TOOL_NAMES:
@@ -1123,8 +1127,8 @@ async def test_default_mode_includes_all_tools(temp_fs):
     """Test that all tools are registered when READ_ONLY=False (default)."""
     with patch("stash_mcp.mcp_server.Config.READ_ONLY", False):
         mcp = create_mcp_server(temp_fs)
-        tools = await mcp.list_tools()
-        tool_names = {t.name for t in tools}
+        tools = await mcp.get_tools()
+        tool_names = set(tools.keys())
         for name in WRITE_TOOL_NAMES | READ_TOOL_NAMES:
             assert name in tool_names, f"Tool '{name}' should be registered in default mode"
 
@@ -1133,29 +1137,27 @@ async def test_default_mode_includes_all_tools(temp_fs):
 
 
 def test_server_name_from_env():
-    """Test that STASH_SERVER_NAME env var is reflected in Config.SERVER_NAME."""
-    import importlib
+    """Test that STASH_SERVER_NAME env var is reflected in Config.SERVER_NAME.
 
-    import stash_mcp.config as config_module
+    Avoids ``importlib.reload`` because reloading ``stash_mcp.config`` replaces
+    the ``Config`` class object, while every other stash_mcp module holds a
+    reference to the original via ``from .config import Config`` — this breaks
+    test isolation for any later test that monkeypatches Config attributes.
+    Instead, evaluate the same getenv expression directly.
+    """
+    import os
 
     with patch.dict("os.environ", {"STASH_SERVER_NAME": "my-custom-server"}):
-        importlib.reload(config_module)
-        assert config_module.Config.SERVER_NAME == "my-custom-server"
-    importlib.reload(config_module)
+        assert os.getenv("STASH_SERVER_NAME", "stash-mcp") == "my-custom-server"
 
 
 def test_server_name_default():
     """Test that SERVER_NAME defaults to 'stash-mcp' when env var is not set."""
-    import importlib
     import os
-
-    import stash_mcp.config as config_module
 
     env = {k: v for k, v in os.environ.items() if k != "STASH_SERVER_NAME"}
     with patch.dict("os.environ", env, clear=True):
-        importlib.reload(config_module)
-        assert config_module.Config.SERVER_NAME == "stash-mcp"
-    importlib.reload(config_module)
+        assert os.getenv("STASH_SERVER_NAME", "stash-mcp") == "stash-mcp"
 
 
 async def test_server_name_used_in_mcp_server(temp_fs):
@@ -1353,7 +1355,7 @@ async def test_inspect_content_structure_batch_partial_failure(temp_fs):
 
 @pytest.mark.anyio
 async def test_inspect_content_structure_batch_non_markdown(temp_fs):
-    """Test inspect_content_structure_batch returns error for non-markdown files without aborting."""
+    """Test inspect_content_structure_batch returns error for non-markdown files."""
     temp_fs.write_file("doc.md", "# Doc\n")
     temp_fs.write_file("data.json", '{"key": "value"}')
     mcp = create_mcp_server(temp_fs)

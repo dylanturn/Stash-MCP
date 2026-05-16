@@ -559,7 +559,7 @@ class SearchEngine:
         self._indexing = True
         total_chunks = 0
         files_since_save = 0
-        _SAVE_BATCH_SIZE = 10
+        save_batch_size = 10
 
         try:
             for rel_path in file_paths:
@@ -591,7 +591,7 @@ class SearchEngine:
                 files_since_save += 1
 
                 # Batch persistence
-                if files_since_save >= _SAVE_BATCH_SIZE:
+                if files_since_save >= save_batch_size:
                     await self.store.save_async()
                     await self.meta.save_async(self.index_dir / "index_meta.json")
                     files_since_save = 0
