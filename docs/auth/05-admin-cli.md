@@ -53,7 +53,7 @@ pyproject.toml                       # add stash-mcp-cli entry point
 ### Error responses: RFC 7807 Problem Details
 
 All 4xx/5xx responses from the **new** endpoints — `/auth/*`, `/admin/*`,
-and the per-store `/api/<store>/*` paths added in 04 — use RFC 7807
+and the per-store `/api/<tenant>/<store>/*` paths added in 04 — use RFC 7807
 Problem Details. Legacy `/api/*` paths (used only in auth-disabled
 mode) keep their current `{"detail": "..."}` shape so existing
 deployments don't break.
@@ -287,9 +287,12 @@ async def revoke_token(token_id: UUID): ...
 ```
 
 `require_session` is a FastAPI dependency that asserts
-`current_principal()` is set and `auth_method == 'oidc'` (so API tokens
-can't be used to mint *more* API tokens — the OIDC session is the only
-authority that can create tokens).
+`current_principal()` is set and `auth_method == 'session'` — i.e. the
+caller proved identity via the cookie set by `/auth/callback`. Bearer JWT
+callers (`auth_method='oidc'`) and API token callers (`auth_method='api_token'`)
+both get 403 on token-mint endpoints. This is why spec 02 splits the
+auth method enum into three values rather than two: the discrimination is
+load-bearing here.
 
 Returned token format on POST:
 ```json
@@ -458,7 +461,7 @@ change.
   6. Mint an API token via the UI's tokens page (or via a curl POST to
      `/auth/tokens` with the session cookie).
   7. Configure an MCP client with `Authorization: Bearer stash_pat_...` and
-     `https://host/mcp/docs/` — tools work.
+     `https://host/mcp/<tenant>/<store>/` (e.g. `/mcp/default/docs/`) — tools work.
 - `uv run pytest` clean.
 - `ruff check stash_mcp` clean.
 

@@ -39,8 +39,9 @@ the specs below. Cite this file if anything tries to deviate.
   for prod — swap via `DATABASE_URL`. Auth state in SQL; content stays
   file/git.
 - **Token hashing:** HMAC-SHA256 (no password hashing needed — no passwords).
-- **Routing:** Path-based. `/mcp/<store>/` and `/api/<store>/*`. Tenant
-  inferred from the principal.
+- **Routing:** Path-based. `/mcp/<tenant>/<store>/` and `/api/<tenant>/<store>/*`.
+  Both slugs are on the wire — tenant is *not* inferred from the principal,
+  because a user may be a member of multiple tenants.
 - **Migration posture: none.** Pre-auth deployments stay
   `STASH_AUTH_ENABLED=false` forever. Once auth is on, `CONTENT_DIR` *must*
   already be `<tenant>/<store>/`-shaped or the server refuses to start.
@@ -52,7 +53,7 @@ the specs below. Cite this file if anything tries to deviate.
 | 01 | [Persistence + auth types](01-persistence.md) | `stash_mcp/db/`, `stash_mcp/auth/` (types only), Alembic baseline | — |
 | 02 | [Providers + middleware + dev IdP](02-providers-middleware.md) | `OIDCAuthProvider`, `ApiTokenAuthProvider`, `SessionCookieAuthProvider`, ASGI middleware, `current_principal()` contextvar, `STASH_AUTH_ENABLED`, `docker-compose.dev-idp.yml` (dex) | 01 |
 | 03 | [StoreRegistry + per-store content layer](03-store-registry.md) | `StoreRegistry`, per-store `FileSystem`/`GitBackend`/`TransactionManager`, `CONTENT_DIR` shape invariant | 01 |
-| 04 | [Per-store HTTP routing](04-routing.md) | `/mcp/<store>/`, `/api/<store>/*`, store-resolver middleware, `current_store()` contextvar | 02, 03 |
+| 04 | [Per-store HTTP routing](04-routing.md) | `/mcp/<tenant>/<store>/`, `/api/<tenant>/<store>/*`, store-resolver middleware, `current_store()` contextvar | 02, 03 |
 | 05 | [Admin endpoints, CLI, OIDC callback, UI bridge](05-admin-cli.md) | `/auth/login`, `/auth/callback`, `/auth/tokens`, `/admin/*`, `stash-mcp tenant/store` CLI, minimal `stash_mcp/ui.py` redirect | 02, 03, 04 |
 | 06 | [SPA + UI client wiring](06-ui-clients.md) | `stash_ui` fetch wrapper, store-scoped `API_BASE`, `StoreContext`, `/account/tokens` page; docs updates | 04, 05 |
 

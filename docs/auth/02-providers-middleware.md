@@ -91,15 +91,22 @@ loaded.
 ### `stash_mcp/auth/context.py`
 
 ```python
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from .principal import Principal
 
 _current_principal: ContextVar[Principal | None] = ContextVar(
     "stash_principal", default=None
 )
 
-def set_current_principal(p: Principal | None) -> None:
-    _current_principal.set(p)
+def set_current_principal(p: Principal | None) -> Token:
+    """Set the contextvar and return a Token. Caller MUST pass that Token to
+    reset_current_principal() in a finally block — using .reset() (not .set(None))
+    properly restores the prior value, which matters for nested contexts and
+    asyncio task groups."""
+    return _current_principal.set(p)
+
+def reset_current_principal(token: Token) -> None:
+    _current_principal.reset(token)
 
 def current_principal() -> Principal | None:
     """Return the principal for the in-flight request, or None if
@@ -195,11 +202,11 @@ class StashAuthMiddleware:
             await resp(scope, receive, send)
             return
 
-        token = set_current_principal(principal)  # contextvar Token
+        token = set_current_principal(principal)
         try:
             await self.app(scope, receive, send)
         finally:
-            set_current_principal(None)
+            reset_current_principal(token)
 ```
 
 Provider order matters: `[SessionCookieAuthProvider, ApiTokenAuthProvider,
@@ -315,10 +322,10 @@ class SessionCookieAuthProvider:
         payload = verify_session(cookie)
         if payload is None:
             return None  # expired/tampered — middleware will continue to next provider
-        # Load user by uid, build Principal with auth_method='oidc' (the cookie
-        # represents a prior OIDC login; api_method semantics are 'how did you
-        # prove identity *this request*', so we can argue 'session' is a third
-        # value or reuse 'oidc'). Reuse 'oidc' for now to keep the enum small.
+        # Load user by uid, build Principal with auth_method='session'. The
+        # split between 'session' (cookie path) and 'oidc' (bearer JWT) matters
+        # for /auth/tokens — only cookie-session callers can mint API tokens.
+        # Bearer-JWT callers shouldn't, even though both prove OIDC identity.
         ...
 ```
 
@@ -419,9 +426,11 @@ on `users` or as a separate `service_accounts` table. Not in v1.
 - Don't refactor the existing `_metrics_middleware`. Auth middleware sits in
   front of it; metrics still record every request whether authenticated or
   not.
-- `SessionCookieAuthProvider` uses `auth_method='oidc'` (not a new
-  `'session'` value). Reason: the cookie represents a prior OIDC login;
-  splitting the enum buys nothing.
+- `SessionCookieAuthProvider` sets `auth_method='session'`,
+  `OIDCAuthProvider` (bearer JWT) sets `auth_method='oidc'`,
+  `ApiTokenAuthProvider` sets `auth_method='api_token'`. The discrimination
+  matters in spec 05's `require_session` — only cookie-authed callers can
+  mint new API tokens.
 - The default tenant is created lazily on the first OIDC login that grants
   admin. Don't add a migration that pre-seeds it — it's auto-provisioned in
   the OIDC provider code.

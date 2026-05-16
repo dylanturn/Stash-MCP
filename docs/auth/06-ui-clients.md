@@ -75,9 +75,14 @@ async def me():
 
 @router.get("/auth/stores")
 async def my_stores():
-    """Stores the current principal can access, across all their tenant memberships."""
+    """Stores the current principal can access, across all their tenant
+    memberships. Response includes tenant_slug so the SPA can build
+    /ui/<tenant>/<store>/ URLs without a second lookup."""
     p = require_principal()
-    # Query stores where tenant_id in p.tenant_roles.keys()
+    # SELECT stores.*, tenants.slug AS tenant_slug
+    # FROM stores JOIN tenants ON tenants.id = stores.tenant_id
+    # WHERE stores.tenant_id IN (p.tenant_roles.keys())
+    # Order by tenant_slug, store_slug for stable listing.
     ...
 ```
 
@@ -130,12 +135,12 @@ The per-store content endpoints from spec 04 return `ETag` on reads and
 respect `If-Match` on writes. The SPA's editor needs to thread the ETag
 through.
 
-**Read path.** When `getContent(store, path)` fetches a file, the wrapper
-captures the response ETag and returns it alongside the body:
+**Read path.** When `getContent(tenant, store, path)` fetches a file,
+the wrapper captures the response ETag and returns it alongside the body:
 
 ```typescript
-export async function getContent(store: string, path: string) {
-  const res = await stashFetch(`${apiBase(store)}/content/${path}`);
+export async function getContent(tenant: string, store: string, path: string) {
+  const res = await stashFetch(`${apiBase(tenant, store)}/content/${path}`);
   if (!res.ok) throw new Error(`Failed to get content: ${res.statusText}`);
   return { content: await res.json(), etag: res.headers.get('ETag') };
 }
@@ -147,10 +152,13 @@ content.
 **Write path.** When `putContent` saves, it sends `If-Match`:
 
 ```typescript
-export async function putContent(store: string, path: string, content: string, etag: string | null) {
+export async function putContent(
+  tenant: string, store: string, path: string,
+  content: string, etag: string | null,
+) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (etag) headers['If-Match'] = etag;
-  const res = await stashFetch(`${apiBase(store)}/content/${path}`, {
+  const res = await stashFetch(`${apiBase(tenant, store)}/content/${path}`, {
     method: 'PUT', headers, body: JSON.stringify({ content }),
   });
   if (res.status === 412) {
@@ -214,33 +222,34 @@ failures. `ConcurrentEditError` above is a thin subclass of
 ```typescript
 import { stashFetch } from './fetch';
 
-function apiBase(store: string): string {
-  return `/api/${store}`;
+function apiBase(tenant: string, store: string): string {
+  return `/api/${tenant}/${store}`;
 }
 
-export async function getTree(store: string) {
-  const res = await stashFetch(`${apiBase(store)}/tree`);
+export async function getTree(tenant: string, store: string) {
+  const res = await stashFetch(`${apiBase(tenant, store)}/tree`);
   if (!res.ok) throw new Error(`Failed to get tree: ${res.statusText}`);
   return res.json();
 }
 
-// ... same pattern for all other calls. Every signature takes `store` as
-// the first arg.
+// ... same pattern for all other calls. Every signature takes
+// (tenant, store) as the first two args.
 ```
 
-A wrapper that closes over `store` is cleaner for callers:
+A wrapper that closes over `(tenant, store)` is cleaner for callers:
 
 ```typescript
-export function createApiClient(store: string) {
+export function createApiClient(tenant: string, store: string) {
   return {
-    getTree: () => getTree(store),
-    listContent: (path = '') => listContent(store, path),
+    getTree: () => getTree(tenant, store),
+    listContent: (path = '') => listContent(tenant, store, path),
     // ...
   };
 }
 ```
 
-`StoreContext` provides this client to the rest of the app.
+`StoreContext` provides this client to the rest of the app, scoped to the
+currently-selected tenant + store.
 
 ### `StoreContext.tsx`
 
@@ -248,12 +257,18 @@ export function createApiClient(store: string) {
 import { createContext, useContext, useEffect, useState } from 'react';
 import { stashFetch } from '../api/fetch';
 
-interface Store { id: string; slug: string; display_name: string; tenant_slug: string; }
+interface Store {
+  id: string;
+  slug: string;
+  display_name: string;
+  tenant_id: string;
+  tenant_slug: string;     // URL component
+}
 
 interface StoreContextValue {
   stores: Store[];
   current: Store | null;
-  setCurrent: (slug: string) => void;
+  setCurrent: (tenantSlug: string, storeSlug: string) => void;
   loading: boolean;
 }
 
@@ -269,20 +284,26 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       .then(r => r.json())
       .then((data: Store[]) => {
         setStores(data);
-        // Pick from URL path first, else first store
-        const fromUrl = window.location.pathname.split('/')[2]; // /ui/<store>/...
-        const picked = data.find(s => s.slug === fromUrl) ?? data[0] ?? null;
+        // URL is /ui/<tenant>/<store>/...
+        const parts = window.location.pathname.split('/');
+        const [, , tenantFromUrl, storeFromUrl] = parts;
+        const picked =
+          data.find(s => s.tenant_slug === tenantFromUrl && s.slug === storeFromUrl)
+          ?? data[0]
+          ?? null;
         setCurrentState(picked);
         setLoading(false);
       });
   }, []);
 
-  function setCurrent(slug: string) {
-    const s = stores.find(x => x.slug === slug);
+  function setCurrent(tenantSlug: string, storeSlug: string) {
+    const s = stores.find(x => x.tenant_slug === tenantSlug && x.slug === storeSlug);
     if (s) {
       setCurrentState(s);
-      // Update URL without full reload
-      const newPath = window.location.pathname.replace(/^\/ui\/[^/]+/, `/ui/${slug}`);
+      const newPath = window.location.pathname.replace(
+        /^\/ui\/[^/]+\/[^/]+/,
+        `/ui/${tenantSlug}/${storeSlug}`
+      );
       window.history.replaceState(null, '', newPath);
     }
   }
@@ -301,6 +322,9 @@ export function useStore() {
 }
 ```
 
+`/auth/stores` returns stores grouped flat across all the principal's
+tenant memberships. The picker UI can group visually by `tenant_slug`.
+
 ### `routes.tsx`
 
 ```typescript
@@ -314,7 +338,7 @@ export const router = createBrowserRouter(
     { path: '/', element: <RootRedirect /> },
     { path: '/account/tokens', Component: TokensPage },
     { path: '/no-stores', Component: NoStoresPage },
-    { path: '/:store/*', Component: DocumentsPage },
+    { path: '/:tenant/:store/*', Component: DocumentsPage },
   ],
   { basename: '/ui' }
 );
@@ -323,7 +347,8 @@ function RootRedirect() {
   const { stores, loading } = useStore();
   if (loading) return null;
   if (stores.length === 0) return <Navigate to="/no-stores" replace />;
-  return <Navigate to={`/${stores[0].slug}`} replace />;
+  const first = stores[0];
+  return <Navigate to={`/${first.tenant_slug}/${first.slug}`} replace />;
 }
 ```
 
@@ -420,7 +445,7 @@ Backend bit:
   with that store's files.
 - Switch store via the picker → URL updates, files refresh.
 - Mint a token at `/ui/account/tokens` → use it from an MCP client
-  configured with `https://host/mcp/<store>/` → reads and writes work.
+  configured with `https://host/mcp/<tenant>/<store>/` → reads and writes work.
 - Sign out → cookie cleared, next `/ui` visit redirects to `/auth/login`.
 - All existing SPA functionality (DocumentsPage tree, edit, save) still
   works.

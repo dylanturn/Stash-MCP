@@ -230,7 +230,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
-AuthMethod = Literal["oidc", "api_token"]
+AuthMethod = Literal["session", "oidc", "api_token"]
 Role = Literal["admin", "member"]
 
 @dataclass(frozen=True, slots=True)

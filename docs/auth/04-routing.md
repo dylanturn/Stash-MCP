@@ -2,10 +2,12 @@
 
 ## Goal
 
-Move `/api/*` to `/api/<store>/*` and `/mcp` to `/mcp/<store>/` when
-`AUTH_ENABLED=True`. The tenant is inferred from the `Principal`; the
-store slug is on the wire. A `current_store()` contextvar exposes the
-resolved `LoadedStore` to tools and route handlers, mirroring the
+Move `/api/*` to `/api/<tenant>/<store>/*` and `/mcp` to
+`/mcp/<tenant>/<store>/` when `AUTH_ENABLED=True`. **Both tenant and store
+slugs are on the wire** — inferring tenant from the principal breaks the
+moment a user has memberships on more than one tenant (which 05's manual
+membership API explicitly allows). A `current_store()` contextvar exposes
+the resolved `LoadedStore` to tools and route handlers, mirroring the
 `current_principal()` pattern from 02.
 
 After this lands, an authenticated client can call MCP tools and REST
@@ -38,7 +40,7 @@ tests/routing/test_per_store_mcp.py
 ## Files modified
 
 ```
-stash_mcp/main.py            # mount /api/<store> and /mcp/<store>, register resolver
+stash_mcp/main.py            # mount /api/<tenant>/<store> and /mcp/<tenant>/<store>, register resolver
 stash_mcp/api.py             # signature changes: factory takes registry, not filesystem;
                              # handlers read FS from current_store(); add ETag + 304/412 paths
 stash_mcp/mcp_server.py      # FS access inside tool bodies switches to current_store().fs_for_mcp
@@ -48,7 +50,7 @@ stash_mcp/ui.py              # path prefix stays /ui (no per-store URLs in this 
                              # ui picks the principal's first store implicitly)
 ```
 
-All error responses on `/api/<store>/*` paths use RFC 7807 Problem Details
+All error responses on `/api/<tenant>/<store>/*` paths use RFC 7807 Problem Details
 shape from spec 05. The handler functions don't change their return
 types — they raise from a small set of exception types (`ContentNotFound`,
 `ETagMismatch`, `Unauthorized`, etc.) that an exception handler in 05
@@ -60,28 +62,41 @@ converts to the right Problem Details body.
 
 | Surface | AUTH_ENABLED=False | AUTH_ENABLED=True |
 |---|---|---|
-| REST | `/api/*` | `/api/{store}/*` |
-| MCP | `/mcp` | `/mcp/{store}/` |
-| UI | `/ui/*` | `/ui/*` (unchanged in this chunk) |
-| Health | `/api/health` | `/api/health` (no store, no auth) |
-| Auth | n/a | `/auth/*` (no store, public — 05) |
-| Admin | n/a | `/admin/*` (no store — 05) |
+| REST | `/api/*` | `/api/{tenant}/{store}/*` |
+| MCP | `/mcp` | `/mcp/{tenant}/{store}/` |
+| UI | `/ui/*` | `/ui/{tenant}/{store}/*` |
+| Health | `/api/health` | `/api/health` (no tenant, no auth) |
+| Auth | n/a | `/auth/*` (no tenant, public — 05) |
+| Admin | n/a | `/admin/*` (no tenant — 05) |
 
-The store slug is alphanumeric + hyphen, matching the schema constraint
-in 01. The resolver rejects malformed slugs with 404 before any DB lookup.
+Both slugs are alphanumeric + hyphen, matching the schema constraint in
+01. The resolver rejects malformed slugs with 404 before any DB lookup.
+
+**Why tenant in the URL.** Inferring tenant from the principal works for
+the v1 single-tenant-per-user case, but breaks the moment a user joins a
+second tenant (via the manual-membership API in 05). The
+`principal.tenant_roles` dict has no stable "primary" — `next(iter(...))`
+gives insertion-order, which depends on the order the OIDC provider
+emitted groups and isn't guaranteed across logins. Putting the tenant on
+the wire eliminates the ambiguity at the cost of two extra URL segments.
 
 ### `stash_mcp/routing/context.py`
 
 ```python
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from ..stores.registry import LoadedStore
 
 _current_store: ContextVar[LoadedStore | None] = ContextVar(
     "stash_current_store", default=None
 )
 
-def set_current_store(s: LoadedStore | None) -> None:
-    _current_store.set(s)
+def set_current_store(s: LoadedStore | None) -> Token:
+    """Same Token-reset pattern as set_current_principal — caller MUST pass
+    the returned Token to reset_current_store() in a finally block."""
+    return _current_store.set(s)
+
+def reset_current_store(token: Token) -> None:
+    _current_store.reset(token)
 
 def current_store() -> LoadedStore | None:
     return _current_store.get()
@@ -101,23 +116,23 @@ time a handler runs, the resolver should already have set this.
 Sits *after* `StashAuthMiddleware` in the stack so it can read
 `current_principal()`. Responsibilities:
 
-1. Match path against `/api/{store}/` or `/mcp/{store}/`. Skip if not one
-   of those.
-2. Extract `<store>`. Validate the slug shape (regex
+1. Match path against `/api/{tenant}/{store}/` or `/mcp/{tenant}/{store}/`.
+   Skip if not one of those.
+2. Extract `<tenant>` and `<store>`. Validate both slug shapes (regex
    `^[a-z0-9][a-z0-9-]{0,62}$`) — 404 on malformed.
-3. Look up the principal's tenant: every principal has at least one tenant
-   role in `tenant_roles`. In v1, a principal has exactly one tenant —
-   the default tenant — so we just take it. (Multi-tenant-per-user is a
-   future concern; the schema supports it but the URL doesn't expose it
-   yet. **Confirm this is acceptable for v1.**)
-4. Call `StoreRegistry.get(tenant_id, slug)`. On `KeyError` →  404.
-   On `StoreNotProvisionedError` → 500 with a clear message.
-5. Check the principal has *any* role on the store's tenant → 403 if not.
-6. Set `current_store(LoadedStore)`.
-7. Rewrite the path: strip `/{store}` from the scope path so the mounted
-   `/api` or `/mcp` subapp sees the same routes it always has. This keeps
-   `api.py` route definitions untouched — they're still `@app.get("/content")`
-   not `@app.get("/{store}/content")`.
+3. Call `StoreRegistry.get(tenant_slug, store_slug)`. The registry
+   resolves the tenant slug → tenant_id internally. On `KeyError` (either
+   tenant or store not found) → 404. On `StoreNotProvisionedError` →
+   500.
+4. Check `principal.has_role_on(loaded.tenant_id, "member")` → 403 if
+   the principal isn't a member of the URL's tenant. This is the
+   authorization gate — having a row in `memberships` for *some* tenant
+   doesn't grant access to *another* tenant.
+5. Set `current_store(LoadedStore)`.
+6. Rewrite the path: strip `/{tenant}/{store}` from the scope path so the
+   mounted `/api` or `/mcp` subapp sees the same routes it always has.
+   This keeps `api.py` route definitions untouched — they're still
+   `@app.get("/content")` not `@app.get("/{tenant}/{store}/content")`.
 
 The path-rewrite is the same trick `_MCPSlashMiddleware` already uses for
 `/mcp` → `/mcp/`. Implementation:
@@ -126,14 +141,15 @@ The path-rewrite is the same trick `_MCPSlashMiddleware` already uses for
 from starlette.types import ASGIApp, Receive, Scope, Send
 import re
 
-_API_RE = re.compile(r"^/api/(?P<store>[a-z0-9][a-z0-9-]{0,62})(?P<rest>/.*)?$")
-_MCP_RE = re.compile(r"^/mcp/(?P<store>[a-z0-9][a-z0-9-]{0,62})(?P<rest>/.*)?$")
+_SLUG = r"[a-z0-9][a-z0-9-]{0,62}"
+_API_RE = re.compile(rf"^/api/(?P<tenant>{_SLUG})/(?P<store>{_SLUG})(?P<rest>/.*)?$")
+_MCP_RE = re.compile(rf"^/mcp/(?P<tenant>{_SLUG})/(?P<store>{_SLUG})(?P<rest>/.*)?$")
 
 class StoreResolverMiddleware:
     def __init__(self, app: ASGIApp, registry, public_prefixes: tuple[str, ...]):
         self.app = app
         self.registry = registry
-        self.public_prefixes = public_prefixes  # ("/api/health", "/auth", "/admin", "/ui", "/static", "/mcp$without_store")
+        self.public_prefixes = public_prefixes
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -141,14 +157,14 @@ class StoreResolverMiddleware:
             return
         path = scope["path"]
 
-        # Pass-through for paths that don't carry a store
+        # Pass-through for paths that don't carry a tenant+store
         if any(path.startswith(p) for p in self.public_prefixes):
             await self.app(scope, receive, send)
             return
 
         m = _API_RE.match(path) or _MCP_RE.match(path)
         if m is None:
-            # No store in path — 404 for /api/* and /mcp/* without a store
+            # /api or /mcp without proper tenant+store → 404
             if path.startswith("/api/") or path == "/api" or path.startswith("/mcp/") or path == "/mcp":
                 # ...send 404...
                 return
@@ -157,21 +173,20 @@ class StoreResolverMiddleware:
 
         principal = current_principal()
         if principal is None:
-            # Should never happen — auth middleware would have rejected
-            # Defensive 401
+            # Defensive 401 — auth middleware should have rejected first
             return
-        if not principal.tenant_roles:
-            # 403, no tenant membership
-            return
-        tenant_id = next(iter(principal.tenant_roles.keys()))
+
+        tenant_slug = m.group("tenant")
         store_slug = m.group("store")
         try:
-            loaded = await self.registry.get(tenant_id, store_slug)
+            loaded = await self.registry.get(tenant_slug, store_slug)
         except KeyError:
-            # 404
+            # 404 — tenant or store not found
             return
         if not principal.has_role_on(loaded.tenant_id, "member"):
-            # 403
+            # 403 — principal not a member of the URL's tenant.
+            # Don't leak whether the store exists; 403 is the right code
+            # because the URL is well-formed and resolved to a real store.
             return
 
         # Rewrite the path so the subapp sees /api/<rest> or /mcp/<rest>
@@ -185,7 +200,7 @@ class StoreResolverMiddleware:
         try:
             await self.app(new_scope, receive, send)
         finally:
-            set_current_store(None)
+            reset_current_store(token)
 ```
 
 (Sketched — Claude Code session fills in the 404/401/403 response
@@ -322,7 +337,7 @@ prefix.
 Tree, list, search, health endpoints — no ETag. The aggregated
 representations make ETag-ing them more trouble than the savings.
 
-### Read flow: `GET /api/<store>/content/<path>`
+### Read flow: `GET /api/<tenant>/<store>/content/<path>`
 
 1. Resolve the file via current_store().
 2. Compute the ETag.
@@ -331,7 +346,7 @@ representations make ETag-ing them more trouble than the savings.
 4. Otherwise return `200 OK` with the file bytes/JSON and the `ETag`
    header.
 
-### Write flow: `PUT /api/<store>/content/<path>`
+### Write flow: `PUT /api/<tenant>/<store>/content/<path>`
 
 If the request carries `If-Match`:
 
@@ -370,12 +385,20 @@ Add to `tests/routing/test_per_store_api.py`:
 ## Test plan
 
 - `tests/routing/test_store_resolver.py`
-  - Valid `/api/<slug>/content` → resolver sets contextvar, rewrites path to
-    `/api/content`, subapp returns 200.
-  - Malformed slug → 404 before DB lookup.
-  - Slug not in DB → 404.
-  - Principal has no membership on the store's tenant → 403.
-  - `/api/health` skipped by resolver (no store needed).
+  - Valid `/api/<tenant>/<store>/content` → resolver sets contextvar,
+    rewrites path to `/api/content`, subapp returns 200.
+  - Malformed tenant slug → 404 before DB lookup.
+  - Malformed store slug → 404 before DB lookup.
+  - `/api/<known-tenant>/<unknown-store>` → 404.
+  - `/api/<unknown-tenant>/<any-store>` → 404.
+  - `/api/<tenant>/<store>` where principal isn't a member of `<tenant>`
+    → 403. **This is B2's regression test** — exercise with a principal
+    that has membership on tenant A trying to access a store on tenant B.
+  - Multi-tenant principal: requests to either tenant succeed when the
+    URL slug matches a membership. The order of `tenant_roles` does not
+    affect outcomes (cover this by shuffling insertion order in the test
+    fixture).
+  - `/api/health` skipped by resolver (no tenant/store needed).
   - `/auth/...`, `/admin/...`, `/ui/...`, `/static/...` skipped.
   - Concurrent requests to different stores don't leak contextvars.
 - `tests/routing/test_per_store_api.py`
@@ -390,23 +413,31 @@ Add to `tests/routing/test_per_store_api.py`:
 
 ## Acceptance
 
-- Auth-enabled: requests to `/api/<known-store>/content` and
-  `/mcp/<known-store>/...` succeed for principals with membership; 404
-  for unknown stores; 403 for stores on tenants the principal doesn't
-  belong to.
+- Auth-enabled: requests to `/api/<tenant>/<store>/content` and
+  `/mcp/<tenant>/<store>/...` succeed for principals with membership on
+  `<tenant>`; 404 for unknown tenant or store; 403 for principals
+  without membership on the URL's tenant.
+- Multi-tenant principal works correctly: same user accessing tenant A
+  and tenant B in successive requests gets the right store each time.
 - Auth-disabled: nothing about request paths changes.
 - `uv run pytest tests/routing` passes, existing tests still pass.
-- A request to `/api/health` works without auth and without a store.
+- A request to `/api/health` works without auth and without a tenant/store.
+
+## Registry API impact
+
+`StoreRegistry.get()` now takes a tenant slug, not a tenant_id:
+
+```python
+async def get(self, tenant_slug: str, store_slug: str) -> LoadedStore:
+    ...
+```
+
+Internally it resolves the slug → tenant_id via a SQL query, then loads
+the store as before. The cache key becomes `(tenant_slug, store_slug)`.
+`invalidate()` and `provision()` follow the same shape. The change is
+local to spec 03's `registry.py`; update spec 03's signatures to match.
 
 ## Open questions
-
-**Multi-tenant-per-user URL shape.** v1 assumes one tenant per principal
-and infers it. If a user is ever a member of multiple tenants, we'd
-either: (a) add the tenant slug to the URL too — `/api/{tenant}/{store}/...`,
-(b) require a `X-Stash-Tenant` header, or (c) make the user pick one
-tenant per session in the UI. The schema supports (a) without change.
-The current URL plan is the simplest. **Worth confirming v1 doesn't need
-multi-tenant-per-user.**
 
 **Search in auth mode.** v1 disables search when `AUTH_ENABLED=True`
 because a single shared index would leak content across tenants. The
@@ -418,9 +449,11 @@ nothing. Confirm this is acceptable for v1.
 - Don't rewrite the existing handlers in `api.py` to take a `request:
   Request` arg if they don't already — just add the `_fs(...)` call inside
   the handler body using the closed-over `filesystem_or_resolver`.
-- `set_current_store` and `set_current_principal` return contextvar Tokens.
-  Reset in `finally` (or rely on `ContextVar` going out of scope when the
-  ASGI call returns — but explicit reset is safer with async generators).
+- `set_current_store` and `set_current_principal` return `contextvars.Token`
+  objects. Pass them to `reset_current_store` / `reset_current_principal` in
+  a `finally` block. **Don't `set(None)`** — that clobbers the prior value
+  instead of restoring it. The difference only matters in nested contexts
+  and asyncio task groups, but it bites silently when it does.
 - The store resolver runs *after* the auth middleware. Both pass through
   when `AUTH_ENABLED=False`. The legacy `/api/*` and `/mcp` routes work
   exactly as today in that mode.

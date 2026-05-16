@@ -9,8 +9,9 @@ store_slug)` and hydrated from the `stores` table. Add the startup
 invariant that refuses to start if `CONTENT_DIR` shape disagrees with
 `STASH_AUTH_ENABLED`.
 
-This chunk is purely the content layer. Routing changes (`/mcp/<store>/`,
-`/api/<store>/*`) are in 04. Tools and route handlers still see a single
+This chunk is purely the content layer. Routing changes
+(`/mcp/<tenant>/<store>/`, `/api/<tenant>/<store>/*`) are in 04. Tools
+and route handlers still see a single
 `FileSystem` instance — but it's now resolved per-request from the
 registry.
 
@@ -77,10 +78,13 @@ def validate_content_layout() -> None:
     root.mkdir(parents=True, exist_ok=True)
 
     children = [p for p in root.iterdir() if not p.name.startswith(".")]
+    if not children:
+        return  # empty CONTENT_DIR is valid in both modes
+
     has_tenant_shape = _looks_tenant_shaped(children)
 
     if Config.AUTH_ENABLED:
-        if children and not has_tenant_shape:
+        if not has_tenant_shape:
             raise ContentLayoutError(
                 f"STASH_AUTH_ENABLED=true but {root} contains content that is "
                 f"not in <tenant>/<store>/ layout. Stash refuses to mix layouts; "
@@ -95,17 +99,25 @@ def validate_content_layout() -> None:
             )
 
 def _looks_tenant_shaped(children: list[Path]) -> bool:
-    """Heuristic: every visible top-level entry is a directory that itself
-    contains only directories (the store dirs).  A `.git` directory at any
-    level is fine."""
+    """Heuristic: every visible top-level entry is a directory, and its
+    contents (if any) are themselves directories — those are the stores.
+
+    An empty tenant directory IS valid: `tenant create` provisions a row
+    but doesn't touch disk, so a freshly-restarted server may also see no
+    tenant dirs at all. The on-disk dir is created lazily by the first
+    `store provision` for that tenant.
+
+    A `.git` directory or other dotfile at any level is ignored.
+    """
     if not children:
-        return False
+        # Empty CONTENT_DIR is valid in both auth-on and auth-off modes;
+        # callers distinguish based on AUTH_ENABLED.
+        return True
     for tenant_dir in children:
         if not tenant_dir.is_dir():
             return False
         stores = [s for s in tenant_dir.iterdir() if not s.name.startswith(".")]
-        if not stores:
-            return False
+        # Empty tenant_dir is valid — tenant exists in DB, no stores yet.
         for store_dir in stores:
             if not store_dir.is_dir():
                 return False
@@ -166,19 +178,19 @@ class StoreRegistry:
         self._stores: dict[tuple[UUID, str], LoadedStore] = {}
         self._lock = asyncio.Lock()
 
-    async def _load(self, tenant_id: UUID, store_slug: str) -> LoadedStore:
+    async def _load(self, tenant_slug: str, store_slug: str) -> LoadedStore:
         async with get_sessionmaker()() as session:
             stmt = (
                 select(Store, Tenant)
                 .join(Tenant, Tenant.id == Store.tenant_id)
-                .where(Store.tenant_id == tenant_id, Store.slug == store_slug)
+                .where(Tenant.slug == tenant_slug, Store.slug == store_slug)
             )
             row = (await session.execute(stmt)).one_or_none()
             if row is None:
-                raise KeyError(f"store {tenant_id}/{store_slug} not found")
+                raise KeyError(f"store {tenant_slug}/{store_slug} not found")
             store, tenant = row
 
-        root = store_root(str(tenant_id), store_slug)
+        root = store_root(str(tenant.id), store_slug)
         if not root.exists():
             raise StoreNotProvisionedError(
                 f"store {tenant.slug}/{store_slug} has a row but no on-disk repo at {root}"
@@ -203,24 +215,30 @@ class StoreRegistry:
             transaction_manager=txn,
         )
 
-    async def get(self, tenant_id: UUID, store_slug: str) -> LoadedStore:
-        key = (tenant_id, store_slug)
+    async def get(self, tenant_slug: str, store_slug: str) -> LoadedStore:
+        """Resolve by tenant slug (URL-stable) + store slug. The slug → UUID
+        translation happens inside _load(). Caching is keyed by slug pair
+        because slug rename invalidates the URL anyway."""
+        key = (tenant_slug, store_slug)
         if key not in self._stores:
             async with self._lock:
                 if key not in self._stores:
-                    self._stores[key] = await self._load(tenant_id, store_slug)
+                    self._stores[key] = await self._load(tenant_slug, store_slug)
         return self._stores[key]
 
     async def provision(
         self,
         *,
         tenant_id: UUID,
+        tenant_slug: str,
         store_slug: str,
         git_remote_url: str | None,
         git_branch: str = "main",
     ) -> LoadedStore:
         """Called from the admin API in 05. Creates the on-disk repo,
-        clones from remote if given, then loads the store."""
+        clones from remote if given, then loads the store. Caller passes
+        both tenant_id (for path) and tenant_slug (for cache key) since
+        admin endpoints already have both."""
         root = store_root(str(tenant_id), store_slug)
         if root.exists() and any(root.iterdir()):
             raise StoreAlreadyProvisionedError(str(root))
@@ -238,12 +256,13 @@ class StoreRegistry:
             # init an empty repo so transactions work
             GitBackend.init(root)
 
-        return await self.get(tenant_id, store_slug)
+        return await self.get(tenant_slug, store_slug)
 
-    def invalidate(self, tenant_id: UUID, store_slug: str) -> None:
+    def invalidate(self, tenant_slug: str, store_slug: str) -> None:
         """Drop a cached LoadedStore (e.g. after store deletion or remote-URL
-        change). Safe to call even if not loaded."""
-        self._stores.pop((tenant_id, store_slug), None)
+        change). Also called after a tenant slug rename — caller invalidates
+        every cached store under the old slug."""
+        self._stores.pop((tenant_slug, store_slug), None)
 
 
 class StoreNotProvisionedError(RuntimeError): ...
@@ -310,6 +329,9 @@ middleware layer.
   - AUTH=True + empty → ok.
   - AUTH=True + flat content → raises.
   - AUTH=True + tenant-shaped → ok.
+  - AUTH=True + tenant dir present but EMPTY (post-`tenant create`,
+    pre-store-provision) → ok. **This is B1's regression test.**
+  - AUTH=True + mix of empty tenant dirs and tenant dirs with stores → ok.
   - `.git` and other dotfiles at root don't trigger false positives.
 - `tests/stores/test_registry.py`
   - `get()` loads a store with a real on-disk repo (use `tmp_path`).
@@ -348,6 +370,12 @@ chunk after the v1 ships. Worth confirming this is acceptable.
 - Tenant directories on disk are named by **UUID**, not slug. Slugs are for
   URLs and UI; directories use UUIDs so renaming a tenant slug doesn't
   require moving files.
+- `tenant create` does NOT create the on-disk tenant directory. The
+  directory is created lazily by the first `store provision` for that
+  tenant — `mkdir(parents=True)` in `provision()` will create the
+  `<tenant_uuid>/` along the way. An empty tenant therefore has zero
+  on-disk footprint. (The layout validator accepts empty tenant dirs
+  too, for cases where stores were provisioned and later removed.)
 - `StoreRegistry` is process-wide. In a multi-pod deployment (stateless HTTP
   mode), each pod has its own registry instance — that's fine, since the
   DB is the source of truth and each pod lazy-loads what it needs.
