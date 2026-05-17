@@ -654,6 +654,9 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
           minScale={0.1}
           maxScale={5}
           centerOnInit
+          limitToBounds={false}
+          centerZoomedOut={false}
+          alignmentAnimation={{ disabled: true, sizeX: 0, sizeY: 0 }}
           wheel={{ step: 0.05 }}
           doubleClick={{ disabled: false, mode: 'zoomIn', step: 0.7 }}
           panning={{ velocityDisabled: true }}
