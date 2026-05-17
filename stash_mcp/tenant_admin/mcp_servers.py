@@ -175,7 +175,7 @@ def _validate_no_prefix_overlap(prefixes: list[str]) -> None:
             longer = sorted_prefixes[j]
             if longer == short:
                 continue
-            if longer == short or longer.startswith(short + "/"):
+            if longer.startswith(short + "/"):
                 raise MountConflict(
                     f"virtual_prefix {short!r} is a path-prefix of {longer!r}"
                 )

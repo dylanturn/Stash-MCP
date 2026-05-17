@@ -175,10 +175,9 @@ class CompositeFileSystem:
                     else:
                         out.append(rel)
             return sorted(set(out))
-        fs, fs_rel, _m = self._resolve(relative_path)
+        fs, fs_rel, mount = self._resolve(relative_path)
         sub_files = fs.list_all_files(fs_rel)
         # Re-prefix with the virtual prefix the agent asked for.
-        _, _, mount = self._resolve(relative_path)
         strip_prefix = mount.subpath + "/" if mount.subpath else ""
         out = []
         for f in sub_files:
@@ -208,10 +207,15 @@ class CompositeFileSystem:
     def move_file(self, source_path: str, dest_path: str) -> None:
         src_fs, src_rel, src_mount = self._resolve(source_path)
         dst_fs, dst_rel, dst_mount = self._resolve(dest_path)
-        if src_fs is not dst_fs:
+        # Compare mounts, not filesystems: two virtual prefixes can
+        # legitimately mount the same underlying FS at different
+        # subpaths, and a move between those would silently bypass the
+        # cross-mount boundary if we only checked FS identity.
+        if src_mount is not dst_mount:
             # Cross-mount moves are not supported in v1 — they'd need a
-            # copy+delete on different underlying FS objects and we
-            # don't have a clean atomicity story across stores.
+            # copy+delete (atomicity story is fuzzy across stores) and
+            # they cross a boundary the agent's mental model treats as
+            # distinct.
             raise InvalidPathError(
                 "cross-mount moves are not supported on composite "
                 "filesystems; use create+delete instead"
@@ -223,7 +227,7 @@ class CompositeFileSystem:
     ) -> list[tuple[str, str]]:
         src_fs, src_rel, src_mount = self._resolve(source_path)
         dst_fs, dst_rel, dst_mount = self._resolve(dest_path)
-        if src_fs is not dst_fs:
+        if src_mount is not dst_mount:
             raise InvalidPathError(
                 "cross-mount directory moves are not supported on "
                 "composite filesystems"

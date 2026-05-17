@@ -84,7 +84,9 @@ async def _build_composite(
     ``LoadedStore`` so git and transaction tools Just Work.
     """
     # Collect distinct underlying store IDs and resolve them via the
-    # registry (which caches LoadedStores per process).
+    # registry (which caches LoadedStores per process). Also pick up
+    # the config's own tenant_slug in the same session so the composite
+    # can be constructed fully-initialised.
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         store_rows = (
@@ -106,6 +108,7 @@ async def _build_composite(
             )
             .all()
         )
+        config_tenant = await session.get(Tenant, config.tenant_id)
     by_id = {s.id: (s, t) for s, t in store_rows}
     loaded_stores = {}
     for store_id, (store, tenant) in by_id.items():
@@ -150,7 +153,7 @@ async def _build_composite(
     underlying = frozenset(loaded_stores.keys())
     return CompositeLoadedStore(
         tenant_id=config.tenant_id,
-        tenant_slug="",  # filled below
+        tenant_slug=config_tenant.slug if config_tenant else "",
         store_id=config.id,
         store_slug=config.slug,
         filesystem=composite_fs,
@@ -228,11 +231,6 @@ class McpServerResolverMiddleware:
             response = problem_response(request=None, err=exc)
             await response(scope, receive, send)
             return
-        # Fill the tenant_slug now that we have a session-bound config.
-        async with get_sessionmaker()() as session:
-            tenant = await session.get(Tenant, config.tenant_id)
-            if tenant is not None:
-                composite.tenant_slug = tenant.slug
 
         cfg_token = set_current_mcp_server(config)
         store_token = set_current_store(composite)
