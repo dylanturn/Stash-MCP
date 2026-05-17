@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import mermaid from 'mermaid';
 import { Code, ZoomIn, ZoomOut, RotateCcw, Download } from 'lucide-react';
-import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch';
+import {
+  TransformWrapper,
+  TransformComponent,
+  useControls,
+  type ReactZoomPanPinchRef,
+} from 'react-zoom-pan-pinch';
 import { THEME_CHANGE_EVENT } from './AppearanceSettings';
 
 interface MermaidDiagramProps {
@@ -373,6 +378,8 @@ function DiagramControls({ onDownload }: { onDownload: () => void }) {
 
 export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const transformApiRef = useRef<ReactZoomPanPinchRef | null>(null);
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [showSource, setShowSource] = useState(false);
@@ -386,6 +393,43 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
     window.addEventListener(THEME_CHANGE_EVENT, handler);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, handler);
   }, []);
+
+  // Fit-on-load: measure the rendered SVG against the viewport and
+  // pick an initial zoom so small diagrams stay at 1:1 (don't blow up
+  // to fill 500px of vertical space) while large diagrams scale down
+  // to fit. Runs after every re-render of the SVG markup, including
+  // theme swaps and ``showSource`` toggles. The user's manual
+  // zoom/pan resets when the SVG itself changes — re-fitting is the
+  // intended behaviour, otherwise stale transforms would point at
+  // empty space.
+  useEffect(() => {
+    if (!svg) return;
+    const raf = requestAnimationFrame(() => {
+      const api = transformApiRef.current;
+      const viewport = viewportRef.current;
+      const svgEl = containerRef.current?.querySelector('svg');
+      if (!api || !viewport || !svgEl) return;
+      const vb = svgEl.viewBox?.baseVal;
+      const naturalW = vb && vb.width
+        ? vb.width
+        : svgEl.getBoundingClientRect().width;
+      const naturalH = vb && vb.height
+        ? vb.height
+        : svgEl.getBoundingClientRect().height;
+      if (!naturalW || !naturalH) return;
+      // 0.95 leaves a little breathing room around the diagram so it
+      // doesn't kiss the viewport edges. Capped at 1.0 so a 2-node
+      // flowchart doesn't render with 80px text.
+      const fit = Math.min(
+        viewport.offsetWidth / naturalW,
+        viewport.offsetHeight / naturalH,
+        1,
+      );
+      const scale = Math.max(fit * 0.95, 0.1);
+      api.centerView(scale, 0);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [svg]);
 
   const handleDownload = () => {
     const svgData = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
@@ -583,8 +627,9 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
       )}
 
       {/* Rendered diagram with zoom controls */}
-      <div className="relative" style={{ minHeight: '500px' }}>
+      <div ref={viewportRef} className="relative" style={{ minHeight: '500px' }}>
         <TransformWrapper
+          ref={transformApiRef}
           initialScale={1}
           minScale={0.1}
           maxScale={5}
