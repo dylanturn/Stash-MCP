@@ -20,16 +20,94 @@ function readCssVar(name: string, fallback: string): string {
   return value || fallback;
 }
 
-/** Relative luminance for a ``#rrggbb`` color. Used to decide whether
- * the active theme reads as light or dark so mermaid's contrast
- * heuristics line up with our palette. */
+/** Relative luminance for any CSS color string mermaid embeds in the
+ * rendered SVG (``#rgb``, ``#rrggbb``, or ``rgb()``/``rgba()``).
+ * Returns ``null`` for ``none`` / ``transparent`` / unparseable so
+ * callers can leave text alone in that case. */
+function parseLuminance(color: string): number | null {
+  const c = color.trim().toLowerCase();
+  if (!c || c === 'none' || c === 'transparent') return null;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  const longHex = c.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/);
+  const shortHex = c.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/);
+  const rgb = c.match(/^rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/);
+  if (longHex) {
+    r = parseInt(longHex[1], 16);
+    g = parseInt(longHex[2], 16);
+    b = parseInt(longHex[3], 16);
+  } else if (shortHex) {
+    r = parseInt(shortHex[1] + shortHex[1], 16);
+    g = parseInt(shortHex[2] + shortHex[2], 16);
+    b = parseInt(shortHex[3] + shortHex[3], 16);
+  } else if (rgb) {
+    r = parseFloat(rgb[1]);
+    g = parseFloat(rgb[2]);
+    b = parseFloat(rgb[3]);
+  } else {
+    return null;
+  }
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+
 function isDarkBg(hex: string): boolean {
-  const m = hex.replace(/^#/, '').match(/^[0-9a-f]{6}$/i);
-  if (!m) return true;
-  const r = parseInt(m[0].slice(0, 2), 16);
-  const g = parseInt(m[0].slice(2, 4), 16);
-  const b = parseInt(m[0].slice(4, 6), 16);
-  return 0.299 * r + 0.587 * g + 0.114 * b < 128;
+  const lum = parseLuminance(hex);
+  return lum === null ? true : lum < 0.5;
+}
+
+/** Mermaid bakes a single ``textColor`` into the SVG for all node
+ * text, but a diagram author can override individual node fills with
+ * ``classDef``. When that fill happens to clash with the theme's text
+ * color (e.g. a pale ``classDef`` fill on a dark theme), the labels
+ * become unreadable.
+ *
+ * This walks the rendered SVG, reads each node's actual ``fill``
+ * (attribute or inline style), and forces the text inside to a
+ * guaranteed-contrasting near-black or near-white. Always-fixed
+ * contrast colors (not theme vars) so light/cream fills work on dark
+ * themes too. */
+function applyNodeTextContrast(svgMarkup: string): string {
+  if (typeof DOMParser === 'undefined') return svgMarkup;
+  const doc = new DOMParser().parseFromString(svgMarkup, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) return svgMarkup;
+
+  const ON_LIGHT = '#11151c';
+  const ON_DARK = '#e0e4f0';
+
+  const nodes = doc.querySelectorAll(
+    'g.node, g.actor, g.cluster, g.statediagram-cluster, g.classGroup',
+  );
+  nodes.forEach((node) => {
+    const shape = node.querySelector(
+      ':scope > rect, :scope > circle, :scope > polygon, :scope > path, :scope > ellipse, :scope > .basic, :scope > .label-container',
+    ) as SVGElement | null;
+    if (!shape) return;
+    const inline = shape.getAttribute('style') || '';
+    const fillFromStyle = inline.match(/(?:^|[;\s])fill\s*:\s*([^;]+)/i)?.[1];
+    const fill = (fillFromStyle || shape.getAttribute('fill') || '').trim();
+    const lum = parseLuminance(fill);
+    if (lum === null) return;
+    const textColor = lum > 0.55 ? ON_LIGHT : ON_DARK;
+
+    node.querySelectorAll('text, tspan').forEach((el) => {
+      (el as SVGElement).setAttribute('fill', textColor);
+      // Some mermaid versions emit ``style="fill: …"`` too — keep
+      // the attribute and inline style aligned.
+      const existing = (el as SVGElement).getAttribute('style') || '';
+      (el as SVGElement).setAttribute(
+        'style',
+        `${existing.replace(/(?:^|[;\s])fill\s*:[^;]+;?/i, '')};fill:${textColor}`,
+      );
+    });
+    node
+      .querySelectorAll('foreignObject div, foreignObject span, foreignObject p')
+      .forEach((el) => {
+        (el as HTMLElement).style.color = textColor;
+      });
+  });
+
+  return new XMLSerializer().serializeToString(doc);
 }
 
 /** Map the active Stash theme vars to mermaid's ``themeVariables``.
@@ -337,8 +415,11 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
 
         // Layer a small theme-aware stylesheet on top of mermaid's
         // output. ``themeVariables`` covers most of the palette, but
-        // a few diagram types (timeline, gantt, flowchart HTML
-        // labels) inline classes that need an explicit fill.
+        // a few diagram types (timeline, gantt) inline classes that
+        // need an explicit fill against their accent-tinted bars.
+        // Node label text is handled per-node by ``applyNodeTextContrast``
+        // (further down) so authored ``classDef`` fills get a
+        // contrast-matched text color regardless of the active theme.
         const bgBase = readCssVar('--stash-bg-base', '#1e1e2e');
         const textPrimary = readCssVar('--stash-text-primary', '#cdd6f4');
         const textBright = readCssVar('--stash-text-bright', '#e0e4f0');
@@ -379,22 +460,15 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
               fill: ${textPrimary} !important;
             }
 
-            /* Flowchart HTML labels (htmlLabels: true) live inside
-             * foreignObjects and inherit page color, not SVG fill. */
-            .node .nodeLabel,
-            .node text,
+            /* Edge labels sit on the page background, not on a node fill. */
             .edgeLabel,
-            .edgeLabel text,
-            foreignObject div {
-              color: ${textPrimary} !important;
-              fill: ${textPrimary} !important;
-            }
-
-            .cluster-label text {
-              fill: ${textPrimary} !important;
+            .edgeLabel text {
+              color: ${textPrimary};
+              fill: ${textPrimary};
             }
           `;
-        const fixedSvg = renderedSvg.replace(/<style>/, `<style>${overrides}`);
+        const styledSvg = renderedSvg.replace(/<style>/, `<style>${overrides}`);
+        const fixedSvg = applyNodeTextContrast(styledSvg);
 
         setSvg(fixedSvg);
       } catch (err) {
