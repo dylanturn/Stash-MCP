@@ -173,8 +173,8 @@ def _validate_no_prefix_overlap(prefixes: list[str]) -> None:
             continue  # root mount only overlaps via equality (handled above)
         for j in range(i + 1, len(sorted_prefixes)):
             longer = sorted_prefixes[j]
-            if longer == short:
-                continue
+            # Equality already rejected by the dedup loop above, so this
+            # is strictly the path-prefix-overlap case.
             if longer.startswith(short + "/"):
                 raise MountConflict(
                     f"virtual_prefix {short!r} is a path-prefix of {longer!r}"

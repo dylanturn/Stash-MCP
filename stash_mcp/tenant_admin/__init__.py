@@ -7,16 +7,11 @@ of :func:`require_admin` (admin role on the default tenant).
 
 from fastapi import APIRouter
 
+from .mcp_servers import router as mcp_servers_router
 from .routes import router as stores_router
 
 router = APIRouter()
 router.include_router(stores_router)
-
-try:
-    from .mcp_servers import router as mcp_servers_router
-
-    router.include_router(mcp_servers_router)
-except ImportError:
-    pass
+router.include_router(mcp_servers_router)
 
 __all__ = ["router"]
