@@ -382,7 +382,7 @@ export function DocumentViewer({
         <div className="flex-1 overflow-hidden">
           <BinaryFileViewer
             kind={binaryKind}
-            rawUrl={rawUrl ? rawUrl(file.path) : ''}
+            rawUrl={rawUrl ? rawUrl(file.path) : undefined}
             htmlContent={file.content || ''}
             fileName={file.name}
           />

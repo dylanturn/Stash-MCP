@@ -319,24 +319,36 @@ def create_api(
         """Read content file. Returns 304 when ``If-None-Match`` matches.
 
         Binary file types (images, PDFs) return 415 — clients should
-        fetch them from :http:get:`/api/raw/{path}` instead.
+        fetch them from the raw endpoint instead.
         """
         fs = _fs()
+        # The 415 hint preserves whatever prefix the caller used so
+        # tenant/store-scoped deployments
+        # (``/api/<tenant>/<store>/content/…``) get a matching
+        # ``/api/<tenant>/<store>/raw/…`` URL instead of a hard-coded
+        # internal route that would 404 in their context.
+        raw_hint = request.url.path.replace("/content/", "/raw/", 1)
         try:
-            # Existence/path validation runs before the binary-type guard
-            # so a missing ``.png`` still 404s instead of 415-ing as if
-            # it were present.
-            if not fs.file_exists(path):
-                # ``file_exists`` swallows ``InvalidPathError`` — re-resolve
-                # to surface a 400 for traversal etc.
-                fs._resolve_path(path)
+            # Disambiguate "doesn't exist" (404) from "is a directory"
+            # (400) before the binary-type guard so a missing ``.png``
+            # still 404s and ``GET /api/content/<dir>`` still 400s.
+            try:
+                full_path = fs._resolve_path(path)
+            except InvalidPathError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            if not full_path.exists():
                 raise HTTPException(status_code=404, detail="File not found")
+            if not full_path.is_file():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Path '{path}' is not a file",
+                )
             if _is_binary_path(path):
                 raise HTTPException(
                     status_code=415,
                     detail=(
                         f"File '{path}' is binary; fetch raw bytes from "
-                        f"/api/raw/{path}"
+                        f"{raw_hint}"
                     ),
                 )
             content = fs.read_file(path)
@@ -364,7 +376,7 @@ def create_api(
                 status_code=415,
                 detail=(
                     f"File '{path}' is not UTF-8 text; fetch raw bytes "
-                    f"from /api/raw/{path}"
+                    f"from {raw_hint}"
                 ),
             )
         except Exception as e:
@@ -375,10 +387,27 @@ def create_api(
     async def read_raw(path: str, request: Request):
         """Stream raw file bytes with the correct ``Content-Type``.
 
-        Used by the UI to render images, PDFs, and HTML artifacts that
-        the JSON content endpoint cannot represent. Honours
-        ``If-None-Match`` so the browser can cache aggressively.
+        Used by the UI to render images and PDFs that the JSON content
+        endpoint cannot represent. Honours ``If-None-Match`` so the
+        browser can cache aggressively.
+
+        Every response carries ``Content-Security-Policy: sandbox`` so
+        that if a user opens the raw URL directly (or it's linked from
+        outside the UI), executable content like ``.html`` or
+        ``.svg`` runs in an opaque origin without access to the
+        Stash session cookies, ``localStorage``, or the API. Inert
+        contexts (``<img>``, PDF ``<iframe>``) are unaffected — CSP
+        sandbox only kicks in when the response becomes a top-level
+        document.
         """
+        # Bare ``sandbox`` (no allowances) blocks scripts, forms,
+        # popups, top-level navigation, and forces an opaque origin.
+        # ``nosniff`` keeps browsers from MIME-promoting a stored
+        # ``.txt`` into ``text/html``.
+        raw_security_headers = {
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+        }
         fs = _fs()
         try:
             full_path = fs._resolve_path(path)
@@ -389,11 +418,14 @@ def create_api(
             etag = _etag(path)
             quoted = _quoted(etag)
             if _if_none_match_matches(request.headers.get("if-none-match"), etag):
-                return Response(status_code=304, headers={"ETag": quoted})
+                return Response(
+                    status_code=304,
+                    headers={"ETag": quoted, **raw_security_headers},
+                )
             return FileResponse(
                 full_path,
                 media_type=_get_mime_type(path),
-                headers={"ETag": quoted},
+                headers={"ETag": quoted, **raw_security_headers},
             )
         except HTTPException:
             raise

@@ -241,6 +241,12 @@ class FileSystem:
 
         try:
             return full_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Surface decode failures so the API layer can return a
+            # targeted 415 with a raw-bytes hint, rather than masking
+            # them as a generic 500. Other read errors stay wrapped
+            # in ``FileSystemError`` for the existing handlers.
+            raise
         except Exception as e:
             logger.error(f"Error reading file '{relative_path}': {e}")
             raise FileSystemError(f"Failed to read file: {e}")

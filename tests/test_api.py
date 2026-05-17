@@ -439,3 +439,81 @@ def test_raw_endpoint_304_on_if_none_match():
         etag = first.headers["etag"]
         cached = client.get("/api/raw/logo.png", headers={"If-None-Match": etag})
         assert cached.status_code == 304
+
+
+def test_raw_endpoint_sets_sandbox_csp():
+    """Every raw response must carry ``Content-Security-Policy: sandbox``
+    so scriptable artifacts (.html/.svg) opened directly run in an
+    opaque origin without access to the Stash session/API. Also locks
+    in ``X-Content-Type-Options: nosniff``."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/raw/logo.png")
+        assert response.status_code == 200
+        assert response.headers.get("content-security-policy") == "sandbox"
+        assert response.headers.get("x-content-type-options") == "nosniff"
+
+        # The 304 path applies the same policy so cached responses
+        # don't drop the sandbox.
+        cached = client.get(
+            "/api/raw/logo.png",
+            headers={"If-None-Match": response.headers["etag"]},
+        )
+        assert cached.status_code == 304
+        assert cached.headers.get("content-security-policy") == "sandbox"
+
+
+def test_content_endpoint_400_for_directory():
+    """``GET /api/content/<dir>`` must surface a 400 — falling through
+    to 404 would hide the real problem (path resolves to a directory)
+    from the client."""
+    with TemporaryDirectory() as tmpdir:
+        (Path(tmpdir) / "docs").mkdir()
+        fs = FileSystem(Path(tmpdir))
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/content/docs")
+        assert response.status_code == 400
+        assert "not a file" in response.json()["detail"].lower()
+
+
+def test_content_endpoint_415_for_non_utf8_text_file():
+    """A file without a known binary extension that contains non-UTF-8
+    bytes must 415 (with a raw-bytes hint), not 500. Locks in the
+    ``UnicodeDecodeError`` re-raise in ``FileSystem.read_file``."""
+    with TemporaryDirectory() as tmpdir:
+        # Latin-1 bytes that are invalid UTF-8.
+        (Path(tmpdir) / "notes.dat").write_bytes(b"caf\xe9 noir")
+        fs = FileSystem(Path(tmpdir))
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/content/notes.dat")
+        assert response.status_code == 415
+        assert "raw" in response.json()["detail"].lower()
+
+
+def test_content_endpoint_415_hint_preserves_request_prefix():
+    """The 415 ``detail`` must build the raw URL from the caller's
+    request path so tenant/store-scoped deployments get a usable hint
+    instead of a hard-coded ``/api/raw/...`` that would 404 in their
+    routing."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        app = create_api(fs)
+
+        # Mount the API under a scoped prefix to simulate the
+        # tenant/store layout (`/api/<tenant>/<store>/content/...`).
+        from fastapi import FastAPI
+
+        outer = FastAPI()
+        outer.mount("/api/acme/main", app)
+        client = TestClient(outer)
+
+        response = client.get("/api/acme/main/api/content/logo.png")
+        assert response.status_code == 415
+        detail = response.json()["detail"]
+        assert "/api/acme/main/api/raw/logo.png" in detail
