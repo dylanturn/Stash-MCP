@@ -446,10 +446,11 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
     api.centerView(scale, 0);
   }, []);
 
-  // Fit on every re-render of the SVG markup (initial mount, theme
-  // swap, source toggle). The user's manual zoom/pan resets here on
-  // purpose — stale transforms would point at empty space after a
-  // re-render.
+  // Fit on every re-render of the SVG markup (initial mount and
+  // theme swaps — toggling ``showSource`` doesn't touch ``svg`` so
+  // it doesn't re-trigger this effect). The user's manual zoom/pan
+  // resets here on purpose: stale transforms would point at empty
+  // space after a re-render.
   useEffect(() => {
     if (!svg) return;
     const raf = requestAnimationFrame(fitToViewport);
