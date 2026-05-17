@@ -125,33 +125,69 @@ export function TokensManager() {
                   color: 'var(--stash-text-secondary)',
                 }}
               >
-                <th className="px-3 py-2 text-left font-normal">Name</th>
-                <th className="px-3 py-2 text-left font-normal">Scopes</th>
-                <th className="px-3 py-2 text-left font-normal">Created</th>
-                <th className="px-3 py-2 text-left font-normal">Last used</th>
-                <th className="px-3 py-2 text-left font-normal">Expires</th>
+                <th className="px-3 py-2 text-left font-normal text-xs uppercase tracking-wide">
+                  Name
+                </th>
+                <th className="px-3 py-2 text-left font-normal text-xs uppercase tracking-wide">
+                  Scopes
+                </th>
+                <th className="px-3 py-2 text-left font-normal text-xs uppercase tracking-wide whitespace-nowrap">
+                  Created
+                </th>
+                <th className="px-3 py-2 text-left font-normal text-xs uppercase tracking-wide whitespace-nowrap">
+                  Last used
+                </th>
+                <th className="px-3 py-2 text-left font-normal text-xs uppercase tracking-wide whitespace-nowrap">
+                  Expires
+                </th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
-              {tokens.map((t) => (
+              {tokens.map((t, idx) => (
                 <tr
                   key={t.id}
-                  className="border-t"
-                  style={{ borderColor: 'var(--stash-border)' }}
+                  style={{
+                    color: 'var(--stash-text-primary)',
+                    borderTop:
+                      idx === 0
+                        ? 'none'
+                        : '1px solid var(--stash-border)',
+                  }}
                 >
-                  <td className="px-3 py-2">{t.name}</td>
-                  <td className="px-3 py-2">{t.scopes.join(', ')}</td>
-                  <td className="px-3 py-2">{formatDate(t.created_at)}</td>
-                  <td className="px-3 py-2">{formatDate(t.last_used_at)}</td>
-                  <td className="px-3 py-2">{formatDate(t.expires_at)}</td>
-                  <td className="px-3 py-2 text-right">
+                  <td
+                    className="px-3 py-2 align-middle"
+                    style={{ color: 'var(--stash-text-bright)' }}
+                  >
+                    {t.name}
+                  </td>
+                  <td className="px-3 py-2 align-middle">
+                    {t.scopes.join(', ')}
+                  </td>
+                  <td className="px-3 py-2 align-middle whitespace-nowrap">
+                    {formatDate(t.created_at)}
+                  </td>
+                  <td className="px-3 py-2 align-middle whitespace-nowrap">
+                    {formatDate(t.last_used_at)}
+                  </td>
+                  <td className="px-3 py-2 align-middle whitespace-nowrap">
+                    {formatDate(t.expires_at)}
+                  </td>
+                  <td className="px-3 py-2 align-middle text-right">
                     <button
                       onClick={() => handleRevoke(t)}
-                      className="px-2 py-1 rounded border text-xs"
+                      className="px-2 py-1 rounded-md text-xs transition-all duration-150"
                       style={{
-                        borderColor: 'var(--stash-border)',
-                        color: 'var(--stash-text-secondary)',
+                        backgroundColor: 'transparent',
+                        color: 'var(--stash-text-primary)',
+                        border: '1px solid var(--stash-border)',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor =
+                          'var(--stash-bg-hover)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = 'transparent';
                       }}
                     >
                       Revoke
@@ -170,7 +206,10 @@ export function TokensManager() {
 function formatDate(s: string | null): string {
   if (!s) return '—';
   try {
-    return new Date(s).toLocaleString();
+    return new Date(s).toLocaleString(undefined, {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    });
   } catch {
     return s;
   }
