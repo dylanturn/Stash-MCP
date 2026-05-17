@@ -29,10 +29,12 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
 from ..config import Config
-from ..db.models import ApiToken, AuditEvent, Store, Tenant
+from ..db.models import ApiToken, AuditEvent, McpServer, Store, Tenant
 from ..db.session import get_session
 from ..errors import (
     Forbidden,
+    McpServerForbidden,
+    McpServerNotFound,
     TokenNotFound,
     Unauthenticated,
     ValidationError,
@@ -87,6 +89,25 @@ class TokenCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     scopes: list[str] = Field(default_factory=lambda: ["read", "write"])
     expires_in_days: int | None = Field(default=90, ge=1, le=3650)
+    # Optional binding to a specific MCP-server config from spec 02. If
+    # set, the token's authorisation surface is determined by the
+    # config's tool allowlist + content roots at runtime (spec 04). If
+    # NULL, the token behaves as it always has — legacy URL-based store
+    # routing.
+    mcp_server_id: UUID | None = None
+
+
+class McpServerBinding(BaseModel):
+    """The MCP-server config a token is bound to.
+
+    Returned alongside :class:`TokenInfo` on list/create so the UI can
+    render the badge without a second roundtrip.
+    """
+
+    id: UUID
+    tenant_slug: str
+    slug: str
+    name: str
 
 
 class TokenIssued(BaseModel):
@@ -96,6 +117,7 @@ class TokenIssued(BaseModel):
     token: str  # plaintext — returned ONCE
     created_at: datetime
     expires_at: datetime | None
+    mcp_server: McpServerBinding | None = None
 
 
 class TokenInfo(BaseModel):
@@ -106,13 +128,35 @@ class TokenInfo(BaseModel):
     last_used_at: datetime | None
     expires_at: datetime | None
     revoked_at: datetime | None
+    mcp_server: McpServerBinding | None = None
+
+
+class VisibleMcpServer(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    tenant_slug: str
+    slug: str
+    name: str
 
 
 def _parse_scopes(raw: str) -> list[str]:
     return [s for s in raw.split(",") if s]
 
 
-def _serialize_token(row: ApiToken) -> TokenInfo:
+def _binding_from(server: McpServer | None, tenant_slug: str | None) -> McpServerBinding | None:
+    if server is None or tenant_slug is None:
+        return None
+    return McpServerBinding(
+        id=server.id,
+        tenant_slug=tenant_slug,
+        slug=server.slug,
+        name=server.name,
+    )
+
+
+def _serialize_token(
+    row: ApiToken, binding: McpServerBinding | None = None
+) -> TokenInfo:
     return TokenInfo(
         id=row.id,
         name=row.name,
@@ -121,6 +165,7 @@ def _serialize_token(row: ApiToken) -> TokenInfo:
         last_used_at=row.last_used_at,
         expires_at=row.expires_at,
         revoked_at=row.revoked_at,
+        mcp_server=binding,
     )
 
 
@@ -292,6 +337,31 @@ async def my_stores(
     ]
 
 
+async def _bindings_for_tokens(
+    session: AsyncSession, rows: list[ApiToken]
+) -> dict[UUID, McpServerBinding]:
+    """Resolve the McpServerBinding for each token in one query."""
+    server_ids = {r.mcp_server_id for r in rows if r.mcp_server_id is not None}
+    if not server_ids:
+        return {}
+    res = (
+        await session.execute(
+            select(McpServer, Tenant.slug)
+            .join(Tenant, Tenant.id == McpServer.tenant_id)
+            .where(McpServer.id.in_(server_ids))
+        )
+    ).all()
+    return {
+        server.id: McpServerBinding(
+            id=server.id,
+            tenant_slug=tenant_slug,
+            slug=server.slug,
+            name=server.name,
+        )
+        for server, tenant_slug in res
+    }
+
+
 @router.get("/tokens", response_model=list[TokenInfo])
 async def list_tokens(
     principal: Principal = Depends(require_session),
@@ -302,7 +372,14 @@ async def list_tokens(
     if not include_revoked:
         stmt = stmt.where(ApiToken.revoked_at.is_(None))
     rows = (await session.execute(stmt.order_by(ApiToken.created_at.desc()))).scalars().all()
-    return [_serialize_token(r) for r in rows]
+    bindings = await _bindings_for_tokens(session, rows)
+    return [
+        _serialize_token(
+            r,
+            bindings.get(r.mcp_server_id) if r.mcp_server_id else None,
+        )
+        for r in rows
+    ]
 
 
 @router.post("/tokens", response_model=TokenIssued, status_code=201)
@@ -320,6 +397,21 @@ async def create_token(
             f"unknown scopes: {bad}; valid scopes are {sorted(valid_scopes)}"
         )
 
+    binding: McpServerBinding | None = None
+    if body.mcp_server_id is not None:
+        server = await session.get(McpServer, body.mcp_server_id)
+        if server is None:
+            raise McpServerNotFound(
+                f"mcp-server {body.mcp_server_id} not found"
+            )
+        # Any membership role on the config's tenant is sufficient.
+        if not principal.has_role_on(server.tenant_id, "member"):
+            raise McpServerForbidden(
+                "you are not a member of the tenant this MCP server belongs to"
+            )
+        tenant = await session.get(Tenant, server.tenant_id)
+        binding = _binding_from(server, tenant.slug if tenant else None)
+
     keys = Config.AUTH_TOKEN_HMAC_KEYS
     plaintext = generate_token()
     token_hash, key_version = hash_with_active_key(plaintext, keys=keys)
@@ -335,10 +427,18 @@ async def create_token(
         name=body.name,
         scopes=",".join(sorted(set(body.scopes))),
         expires_at=expires_at,
+        mcp_server_id=body.mcp_server_id,
     )
     session.add(row)
     await session.flush()
 
+    audit_detail: dict[str, Any] = {
+        "name": row.name,
+        "scopes": _parse_scopes(row.scopes),
+        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+    }
+    if row.mcp_server_id is not None:
+        audit_detail["mcp_server_id"] = str(row.mcp_server_id)
     session.add(
         AuditEvent(
             actor_user_id=principal.user_id,
@@ -346,15 +446,7 @@ async def create_token(
             action="token.issued",
             target_kind="token",
             target_id=str(row.id),
-            detail=json.dumps(
-                {
-                    "name": row.name,
-                    "scopes": _parse_scopes(row.scopes),
-                    "expires_at": row.expires_at.isoformat()
-                    if row.expires_at
-                    else None,
-                }
-            ),
+            detail=json.dumps(audit_detail),
         )
     )
     await session.commit()
@@ -367,7 +459,46 @@ async def create_token(
         token=plaintext,
         created_at=row.created_at,
         expires_at=row.expires_at,
+        mcp_server=binding,
     )
+
+
+@router.get(
+    "/visible-mcp-servers", response_model=list[VisibleMcpServer]
+)
+async def list_visible_mcp_servers(
+    principal: Principal = Depends(require_session),
+    session: AsyncSession = Depends(get_session),
+) -> list[VisibleMcpServer]:
+    """List MCP-server configs visible to the principal.
+
+    Returns one row per enabled config in any tenant the principal is
+    a member of. Used by the token-mint UI to populate the server
+    picker. Not admin-gated — a member can see config names in their
+    tenant.
+    """
+    tenant_ids = list(principal.tenant_roles.keys())
+    if not tenant_ids:
+        return []
+    rows = (
+        await session.execute(
+            select(McpServer, Tenant.slug, Tenant.id)
+            .join(Tenant, Tenant.id == McpServer.tenant_id)
+            .where(McpServer.tenant_id.in_(tenant_ids))
+            .where(McpServer.enabled.is_(True))
+            .order_by(Tenant.slug, McpServer.slug)
+        )
+    ).all()
+    return [
+        VisibleMcpServer(
+            id=server.id,
+            tenant_id=tenant_id,
+            tenant_slug=tenant_slug,
+            slug=server.slug,
+            name=server.name,
+        )
+        for server, tenant_slug, tenant_id in rows
+    ]
 
 
 @router.delete("/tokens/{token_id}", status_code=204)
@@ -409,6 +540,8 @@ __all__ = [
     "TokenCreate",
     "TokenIssued",
     "TokenInfo",
+    "McpServerBinding",
     "MeResponse",
     "StoreSummary",
+    "VisibleMcpServer",
 ]
