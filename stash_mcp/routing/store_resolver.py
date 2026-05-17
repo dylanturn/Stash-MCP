@@ -68,6 +68,15 @@ class StoreResolverMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # If McpServerResolverMiddleware (spec 04) already bound a
+        # composite store for this request from a scoped token, don't
+        # override the binding — let the request flow through as-is.
+        from .context import current_store as _current_store
+
+        if _current_store() is not None:
+            await self.app(scope, receive, send)
+            return
+
         path: str = scope["path"]
 
         # Pass-through for paths that don't carry a tenant+store.

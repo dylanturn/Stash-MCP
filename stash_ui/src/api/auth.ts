@@ -19,6 +19,13 @@ export interface StoreSummary {
   role: 'admin' | 'member';
 }
 
+export interface McpServerBinding {
+  id: string;
+  tenant_slug: string;
+  slug: string;
+  name: string;
+}
+
 export interface ApiToken {
   id: string;
   name: string;
@@ -27,6 +34,7 @@ export interface ApiToken {
   last_used_at: string | null;
   expires_at: string | null;
   revoked_at: string | null;
+  mcp_server: McpServerBinding | null;
 }
 
 export interface IssuedToken extends Omit<ApiToken, 'last_used_at' | 'revoked_at'> {
@@ -57,7 +65,8 @@ export async function listTokens(
 export async function createToken(
   name: string,
   scopes: string[],
-  expiresInDays: number | null
+  expiresInDays: number | null,
+  mcpServerId: string | null = null,
 ): Promise<IssuedToken> {
   const res = await stashFetch('/auth/tokens', {
     method: 'POST',
@@ -66,6 +75,7 @@ export async function createToken(
       name,
       scopes,
       expires_in_days: expiresInDays,
+      mcp_server_id: mcpServerId,
     }),
   });
   if (!res.ok) throw new Error(`Failed to create token: ${res.statusText}`);

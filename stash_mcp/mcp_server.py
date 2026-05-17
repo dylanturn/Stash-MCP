@@ -187,6 +187,59 @@ bodies then resolve the FS / git_backend from
 :func:`stash_mcp.routing.context.current_store` at call time."""
 
 
+# The universe of MCP tool names that can be registered by the server.
+# Hand-maintained alongside the ``@mcp.tool(...)`` decorators in
+# create_mcp_server below. Used by spec 02's MCP-server-config validator
+# (tools field) and by spec 04's runtime allowlist check.
+#
+# This is the *universe of names*, not the universe of currently-
+# registered tools — conditional registrations (READ_ONLY, git tracking,
+# search) mean reflection on the FastMCP server object would lie.
+REGISTERED_TOOL_NAMES: frozenset[str] = frozenset({
+    # Read tools (always registered).
+    "read_content",
+    "read_content_batch",
+    "list_content",
+    "inspect_content_structure",
+    "inspect_content_structure_batch",
+    # Write tools (suppressed in READ_ONLY mode).
+    "create_content",
+    "overwrite_content",
+    "edit_content",
+    "edit_content_batch",
+    "delete_content",
+    "move_content",
+    "move_content_directory",
+    "move_content_batch",
+    # Search tool (conditional on SEARCH_ENABLED).
+    "search_content",
+    # Git tools (conditional on GIT_TRACKING).
+    "log_content",
+    "diff_content",
+    "blame_content",
+    # Transaction tools (conditional on GIT_TRACKING + write mode).
+    "start_content_transaction",
+    "commit_content_transaction",
+    "abort_content_transaction",
+    "list_content_transactions",
+})
+
+
+# Subset of REGISTERED_TOOL_NAMES that cannot operate on a multi-store
+# composite — they assume a single git repo / single transaction
+# context. Spec 04's runtime check refuses to call these on a config
+# that spans >1 underlying store.
+_MULTI_STORE_DISALLOWED_TOOLS: frozenset[str] = frozenset({
+    "log_content",
+    "diff_content",
+    "blame_content",
+    "start_content_transaction",
+    "commit_content_transaction",
+    "abort_content_transaction",
+    "list_content_transactions",
+})
+
+
 # Role → effective scope set. Members can read+write; admins additionally
 # get the admin scope (reserved for future admin tools — none today).
 _ROLE_SCOPES: dict[str, frozenset[str]] = {
@@ -213,6 +266,47 @@ def _principal_scopes(principal, tenant_id) -> frozenset[str]:
     if role is None:
         return frozenset()
     return _ROLE_SCOPES.get(role, frozenset())
+
+
+def _enforce_mcp_server_allowlist(tool_name: str) -> None:
+    """Per-config tool allowlist + multi-store git/tx safety net.
+
+    No-op when the request is unscoped (the legacy URL-based flow has
+    no MCP-server config). When a config is in scope, this check:
+
+    - Rejects tools not in ``config.tools`` with
+      :class:`McpServerToolNotAllowed`.
+    - Rejects git/transaction tools on multi-store composites with
+      :class:`McpServerMultiStoreGitForbidden`.
+
+    Both are imported lazily to avoid a circular import between
+    ``mcp_server`` and ``routing.mcp_server_resolver``.
+    """
+    from .errors import (
+        McpServerMultiStoreGitForbidden,
+        McpServerToolNotAllowed,
+    )
+    from .routing.context import current_store
+    from .routing.mcp_server_resolver import current_mcp_server
+
+    config = current_mcp_server()
+    if config is None:
+        return  # unscoped request — no per-config gating
+
+    allowed = {t.tool_name for t in config.tools}
+    if tool_name not in allowed:
+        raise McpServerToolNotAllowed(
+            f"tool {tool_name!r} is not enabled on MCP server config "
+            f"{config.slug!r}"
+        )
+    if tool_name in _MULTI_STORE_DISALLOWED_TOOLS:
+        store = current_store()
+        if store is not None and getattr(store, "is_single_store", True) is False:
+            raise McpServerMultiStoreGitForbidden(
+                f"tool {tool_name!r} requires a single-store config; "
+                f"{config.slug!r} spans "
+                f"{len(getattr(store, 'underlying_store_ids', set()))} stores"
+            )
 
 
 def _enforce_tool_scope(tool_name: str, required_scope: str) -> None:
@@ -325,6 +419,7 @@ def create_mcp_server(
             @functools.wraps(fn)
             async def _tracked(*args, **kwargs):
                 if Config.AUTH_ENABLED:
+                    _enforce_mcp_server_allowlist(tool_name)
                     _enforce_tool_scope(tool_name, required_scope)
                 t0 = time.perf_counter()
                 try:

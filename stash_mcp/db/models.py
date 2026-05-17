@@ -11,9 +11,11 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    PrimaryKeyConstraint,
     SmallInteger,
     String,
     Text,
@@ -45,6 +47,11 @@ class Tenant(Base):
     )
     stores: Mapped[list[Store]] = relationship(
         back_populates="tenant", cascade="all, delete-orphan", passive_deletes=True
+    )
+    mcp_servers: Mapped[list[McpServer]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -165,8 +172,19 @@ class ApiToken(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Nullable FK to the MCP-server config this token is scoped to.
+    # NULL = legacy / unscoped (today's behaviour). Not NULL = scoped to
+    # the named config. ON DELETE SET NULL so deleting a config does NOT
+    # cascade-revoke tokens — they just become unscoped, which is
+    # noticeable but not destructive.
+    mcp_server_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("mcp_servers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     user: Mapped[User] = relationship(back_populates="api_tokens")
+    mcp_server: Mapped[McpServer | None] = relationship()
 
 
 class AuditEvent(Base):
@@ -199,3 +217,152 @@ class AuditEvent(Base):
         nullable=True,
     )
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class McpServer(Base):
+    """A named MCP-server configuration scoped to a single tenant.
+
+    Defines a slice of the tenant's content (composed from one or more
+    stores) and an allowlist of MCP tools that callers see. Tokens are
+    bound to a config via :attr:`ApiToken.mcp_server_id` (spec 03).
+    """
+
+    __tablename__ = "mcp_servers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slug", name="uq_mcp_servers_tenant_slug"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    slug: Mapped[str] = mapped_column(String(63), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timeout_seconds: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default="60"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="mcp_servers")
+    tools: Mapped[list[McpServerTool]] = relationship(
+        back_populates="mcp_server",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    content_roots: Mapped[list[McpServerContentRoot]] = relationship(
+        back_populates="mcp_server",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="McpServerContentRoot.sort_order",
+    )
+
+
+class McpServerTool(Base):
+    """One row per (mcp_server, tool_name) pair — the per-config allowlist."""
+
+    __tablename__ = "mcp_server_tools"
+    __table_args__ = (
+        PrimaryKeyConstraint("mcp_server_id", "tool_name"),
+        CheckConstraint(
+            "tool_name GLOB '[a-z_]*'",
+            name="ck_mcp_server_tools_name",
+        ),
+    )
+
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("mcp_servers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tool_name: Mapped[str] = mapped_column(String(63), nullable=False)
+
+    mcp_server: Mapped[McpServer] = relationship(back_populates="tools")
+
+
+class McpServerContentRoot(Base):
+    """A named slice of content composed from one or more mounts."""
+
+    __tablename__ = "mcp_server_content_roots"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('simple','virtual')", name="ck_content_roots_kind"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("mcp_servers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    sort_order: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default="0"
+    )
+
+    mcp_server: Mapped[McpServer] = relationship(back_populates="content_roots")
+    mounts: Mapped[list[McpServerMount]] = relationship(
+        back_populates="content_root",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="McpServerMount.sort_order",
+    )
+
+
+class McpServerMount(Base):
+    """One physical store-subpath mounted at a virtual prefix.
+
+    A simple content root has exactly one mount with empty
+    virtual_prefix; a virtual content root has 1+ mounts with distinct
+    non-overlapping prefixes.
+
+    ``store_id`` uses RESTRICT so a tenant admin can't delete a store
+    that some config still mounts — they see a clear error and can fix
+    the config first.
+    """
+
+    __tablename__ = "mcp_server_mounts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    content_root_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("mcp_server_content_roots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    store_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("stores.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    subpath: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    virtual_prefix: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=""
+    )
+    sort_order: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default="0"
+    )
+
+    content_root: Mapped[McpServerContentRoot] = relationship(back_populates="mounts")
+    store: Mapped[Store] = relationship()

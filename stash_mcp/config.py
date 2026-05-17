@@ -135,6 +135,16 @@ class Config:
     # request and the rest of the auth env (OIDC + HMAC + session) must be set.
     AUTH_ENABLED: bool = os.getenv("STASH_AUTH_ENABLED", "false").lower() == "true"
 
+    # When True, scoped tokens (with ``mcp_server_id``) resolve to an
+    # MCP-server config and the request sees the composite filesystem +
+    # tool allowlist from spec 04. When False, the resolver short-
+    # circuits and the request falls back to the legacy URL-based store
+    # routing (current behaviour). Default off until soak in dogfood is
+    # complete.
+    MCP_CONFIGS_ENABLED: bool = (
+        os.getenv("STASH_MCP_CONFIGS_ENABLED", "false").lower() == "true"
+    )
+
     # Slug used for the implicit single store when AUTH_ENABLED=False. The
     # legacy single-CONTENT_DIR layout is exposed under this slug so that
     # URLs and admin tooling can refer to it uniformly once auth is flipped on.
