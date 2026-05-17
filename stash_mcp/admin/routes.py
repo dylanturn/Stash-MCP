@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -30,12 +29,10 @@ from ..db.models import (
     User,
 )
 from ..db.session import get_session
-from ..db.session import get_sessionmaker as get_session_factory
 from ..errors import (
     ConfirmationRequired,
     MembershipExists,
     MembershipNotFound,
-    StoreAlreadyExists,
     StoreNotFound,
     TenantAlreadyExists,
     TenantHasStores,
@@ -43,11 +40,9 @@ from ..errors import (
     UserNotFound,
     ValidationError,
 )
-from ..stores.layout import store_root
-from ..stores.registry import (
-    StoreAlreadyProvisionedError,
-    get_store_registry,
-)
+from ..stores import admin_ops
+from ..stores.admin_ops import StoreCreate as StoreCreateBody
+from ..stores.admin_ops import StoreUpdate as StoreUpdateBody
 from .dependencies import require_admin
 
 logger = logging.getLogger(__name__)
@@ -70,13 +65,6 @@ class TenantInfo(BaseModel):
     slug: str
     display_name: str
     created_at: datetime
-
-
-class StoreCreate(BaseModel):
-    slug: str = Field(..., pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
-    display_name: str = Field(..., min_length=1, max_length=255)
-    git_remote_url: str | None = Field(default=None)
-    git_branch: str = Field(default="main")
 
 
 class StoreInfo(BaseModel):
@@ -320,80 +308,14 @@ async def delete_tenant(
 )
 async def create_store(
     tenant_id: UUID,
-    body: StoreCreate,
+    body: StoreCreateBody,
     actor: Principal = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> StoreInfo:
     tenant = await _get_tenant_or_404(session, tenant_id)
-    existing = (
-        await session.execute(
-            select(Store).where(
-                Store.tenant_id == tenant_id, Store.slug == body.slug
-            )
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        raise StoreAlreadyExists(
-            f"store {tenant.slug}/{body.slug} already exists"
-        )
-
-    store = Store(
-        tenant_id=tenant.id,
-        slug=body.slug,
-        display_name=body.display_name,
-        git_remote_url=body.git_remote_url,
-        git_branch=body.git_branch,
+    store = await admin_ops.provision_store(
+        session, actor=actor, tenant=tenant, body=body
     )
-    session.add(store)
-    _audit(
-        session,
-        actor=actor,
-        action="store.provisioned",
-        target_kind="store",
-        target_id=str(store.id),
-        tenant_id=tenant.id,
-        detail={
-            "tenant_slug": tenant.slug,
-            "slug": store.slug,
-            "git_remote_url": body.git_remote_url,
-            "git_branch": body.git_branch,
-        },
-    )
-    # Commit the row first so :meth:`StoreRegistry.provision` (which opens
-    # its own session to look the row up) can see it. If on-disk
-    # provisioning then fails we delete the row in a follow-up transaction
-    # rather than leaving it orphaned.
-    await session.commit()
-    await session.refresh(store)
-    store_id = store.id
-    tenant_slug = tenant.slug
-    store_slug = store.slug
-
-    registry = get_store_registry()
-    try:
-        await registry.provision(
-            tenant_id=tenant.id,
-            tenant_slug=tenant_slug,
-            store_slug=store_slug,
-            git_remote_url=body.git_remote_url,
-            git_branch=body.git_branch,
-        )
-    except StoreAlreadyProvisionedError as exc:
-        # The disk path already had content even though the DB had no row.
-        # Keep the row (admin can inspect it) but surface the conflict.
-        raise StoreAlreadyExists(
-            f"store {tenant_slug}/{store_slug} already provisioned on disk: {exc}"
-        ) from exc
-    except Exception:
-        # Provisioning failed: drop the just-created row so admin can
-        # retry without a duplicate-slug collision.
-        async with get_session_factory()() as cleanup:
-            row = await cleanup.get(Store, store_id)
-            if row is not None:
-                await cleanup.delete(row)
-                await cleanup.commit()
-        raise
-
     return _store_to_info(store)
 
 
@@ -435,38 +357,9 @@ async def delete_store(
             "store deletion removes the on-disk repo recursively — "
             "retry with ?confirm=true to proceed"
         )
-    store = (
-        await session.execute(
-            select(Store).where(
-                Store.tenant_id == tenant_id, Store.slug == slug
-            )
-        )
-    ).scalar_one_or_none()
-    if store is None:
-        raise StoreNotFound(f"store {tenant.slug}/{slug} not found")
-
-    registry = get_store_registry()
-    registry.invalidate(tenant.slug, store.slug)
-
-    on_disk = store_root(str(tenant.id), store.slug)
-    if on_disk.exists():
-        try:
-            shutil.rmtree(on_disk)
-        except OSError as exc:
-            logger.error("Failed to remove on-disk store %s: %s", on_disk, exc)
-            raise
-
-    _audit(
-        session,
-        actor=actor,
-        action="store.deleted",
-        target_kind="store",
-        target_id=str(store.id),
-        tenant_id=tenant.id,
-        detail={"tenant_slug": tenant.slug, "slug": store.slug},
+    await admin_ops.deprovision_store(
+        session, actor=actor, tenant=tenant, slug=slug
     )
-    await session.delete(store)
-    await session.commit()
 
 
 # Users ---------------------------------------------------------------------

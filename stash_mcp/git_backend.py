@@ -312,6 +312,19 @@ class GitBackend:
         result = self._run(["git", "remote", "get-url", remote])
         return result.returncode == 0
 
+    def set_remote_url(self, remote: str, url: str) -> None:
+        """Set the URL for an existing remote (or add it if absent)."""
+        result = self._run(["git", "remote", "set-url", remote, url])
+        if result.returncode != 0:
+            # Remote doesn't exist — add it.
+            add = self._run(["git", "remote", "add", remote, url])
+            if add.returncode != 0:
+                raise RuntimeError(
+                    f"git remote set-url {remote!r} failed: {result.stderr.strip()}; "
+                    f"add fallback failed: {add.stderr.strip()}"
+                )
+        logger.debug("Set remote %r url to %s", remote, url)
+
     def rename_remote(self, old_name: str, new_name: str) -> None:
         """Rename a git remote from *old_name* to *new_name*.
 

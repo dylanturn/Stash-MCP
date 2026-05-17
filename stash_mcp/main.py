@@ -257,6 +257,7 @@ def _create_auth_enabled_app() -> FastAPI:
     from .errors import install_problem_handlers
     from .mcp_server import USE_CURRENT_STORE as MCP_USE_CURRENT_STORE
     from .routing import StoreResolverMiddleware
+    from .tenant_admin import router as tenant_admin_router
 
     registry = get_store_registry()
 
@@ -291,6 +292,7 @@ def _create_auth_enabled_app() -> FastAPI:
     # has explicit pass-through prefixes for both.
     app.include_router(auth_router)
     app.include_router(admin_router)
+    app.include_router(tenant_admin_router)
 
     # Search endpoint shim: explicit 503 when a client asks for search
     # under auth mode, so it surfaces clearly rather than 404-ing.
@@ -357,6 +359,7 @@ def _create_auth_enabled_app() -> FastAPI:
             "/api/health",
             "/auth",
             "/admin",
+            "/tenants",
             "/ui",
             "/static",
             "/docs",

@@ -1,11 +1,17 @@
-"""FastAPI dependency: ``require_admin``.
+"""FastAPI dependencies for admin surfaces.
 
-In v1 admin is global — granted on the default tenant only — so the
-check is "principal has admin role on whatever tenant has slug
-``default``". Cross-tenant admins land in a follow-up spec.
+Two dependencies live here:
+
+- :func:`require_admin` gates the global-admin surface (``/admin/*``).
+  Checks for ``admin`` role on the default tenant.
+- :func:`require_tenant_admin` gates the per-tenant admin surface
+  (``/tenants/{tenant_id}/*``). Checks for ``admin`` role on the
+  specific tenant named in the URL.
 """
 
 from __future__ import annotations
+
+from uuid import UUID
 
 from fastapi import Depends
 from sqlalchemy import select
@@ -19,6 +25,27 @@ from ..db.session import get_session
 from ..errors import Forbidden, TenantNotFound, Unauthenticated
 
 _DEFAULT_TENANT_SLUG = "default"
+
+
+async def require_tenant_admin(
+    tenant_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> Principal:
+    """Reject the request unless the caller is admin on *this* tenant.
+
+    FastAPI binds ``tenant_id`` from the path the same way the existing
+    tenant-store handlers do; we look up the tenant and check the
+    principal's role on it.
+    """
+    principal = current_principal()
+    if principal is None:
+        raise Unauthenticated("tenant-admin endpoints require authentication")
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise TenantNotFound(f"tenant {tenant_id} not found")
+    if not principal.has_role_on(tenant.id, "admin"):
+        raise Forbidden("admin role required on this tenant")
+    return principal
 
 
 async def require_admin(
@@ -36,9 +63,6 @@ async def require_admin(
         )
     ).scalar_one_or_none()
     if tenant is None:
-        # Without a default tenant we can't authorise anyone as admin —
-        # surface that as a 404 on the tenant so operators see the
-        # underlying cause rather than a misleading 403.
         raise TenantNotFound(
             f"default tenant ({_DEFAULT_TENANT_SLUG!r}) is missing"
         )
@@ -48,4 +72,4 @@ async def require_admin(
     return principal
 
 
-__all__ = ["require_admin"]
+__all__ = ["require_admin", "require_tenant_admin"]
