@@ -295,6 +295,39 @@ def test_cross_mount_move_directory_copies_and_deletes(two_stores):
     assert ops_fs.read_file("runbooks/team-a/spec.md") == "team-a spec"
 
 
+def test_move_directory_returns_agent_facing_paths_same_mount(two_stores):
+    """move_directory must surface paths in the namespace the agent
+    used on the way in, not the underlying FS namespace. mcp_server's
+    move_content_directory iterates these paths to emit events and
+    fire resource notifications, so agent-facing is the right answer."""
+    docs_fs, _ = two_stores
+    composite = CompositeFileSystem(
+        [
+            CompositeMount(
+                fs=docs_fs, subpath="engineering", virtual_prefix="docs"
+            ),
+        ]
+    )
+    moves = composite.move_directory("docs/team-a", "docs/team-b")
+    assert moves == [("docs/team-a/spec.md", "docs/team-b/spec.md")]
+
+
+def test_move_directory_returns_agent_facing_paths_cross_mount(two_stores):
+    docs_fs, ops_fs = two_stores
+    composite = CompositeFileSystem(
+        [
+            CompositeMount(
+                fs=docs_fs, subpath="engineering", virtual_prefix="docs"
+            ),
+            CompositeMount(
+                fs=ops_fs, subpath="runbooks", virtual_prefix="ops"
+            ),
+        ]
+    )
+    moves = composite.move_directory("docs/team-a", "ops/team-a")
+    assert moves == [("docs/team-a/spec.md", "ops/team-a/spec.md")]
+
+
 def test_cross_mount_move_directory_raises_on_missing_source(two_stores):
     """A typo'd source path used to silently no-op (list_all_files
     returns [] for missing paths). Now it raises so the agent learns."""

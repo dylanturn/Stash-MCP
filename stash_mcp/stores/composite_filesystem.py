@@ -248,7 +248,19 @@ class CompositeFileSystem:
         src_fs, src_rel, src_mount = self._resolve(source_path)
         dst_fs, dst_rel, dst_mount = self._resolve(dest_path)
         if src_mount is dst_mount:
-            return src_fs.move_directory(src_rel, dst_rel)
+            # Convert the underlying FS's FS-relative paths back into
+            # the agent-facing namespace before returning, so callers
+            # (mcp_server.move_content_directory in particular) can
+            # emit events and trigger resource notifications against
+            # the URIs they expect.
+            fs_moves = src_fs.move_directory(src_rel, dst_rel)
+            return [
+                (
+                    self._to_agent_path(src_mount, s),
+                    self._to_agent_path(src_mount, d),
+                )
+                for s, d in fs_moves
+            ]
         # Cross-mount directory move: enumerate, copy each file across,
         # then delete the originals. ``list_all_files`` returns []
         # both for empty directories and for missing paths, so check
@@ -272,7 +284,10 @@ class CompositeFileSystem:
         src_strip = src_rel + "/" if src_rel else ""
         # Phase 1: copy every file. If any write fails, roll back
         # destination writes (source untouched) and re-raise.
+        # ``moves`` is the agent-facing return value; ``fs_pairs``
+        # holds FS-relative paths needed for phase-2 deletion.
         moves: list[tuple[str, str]] = []
+        fs_pairs: list[tuple[str, str]] = []
         written: list[str] = []
         try:
             for src_file in src_files:
@@ -282,14 +297,17 @@ class CompositeFileSystem:
                     else src_file
                 )
                 dst_file = posixpath.join(dst_rel, tail) if dst_rel else tail
+                agent_src = self._to_agent_path(src_mount, src_file)
+                agent_dst = self._to_agent_path(dst_mount, dst_file)
                 if dst_fs.file_exists(dst_file):
                     raise FileSystemError(
-                        f"Destination '{dst_file}' already exists"
+                        f"Destination '{agent_dst}' already exists"
                     )
                 content = src_fs.read_file(src_file)
                 dst_fs.write_file(dst_file, content)
                 written.append(dst_file)
-                moves.append((src_file, dst_file))
+                moves.append((agent_src, agent_dst))
+                fs_pairs.append((src_file, dst_file))
         except Exception:
             for dst_file in written:
                 try:
@@ -303,13 +321,38 @@ class CompositeFileSystem:
         # still around. This intentionally avoids the rollback-on-
         # delete strategy: rolling back would delete destination
         # copies of files whose sources were already removed.
-        for src_file, _ in moves:
+        for src_file, _ in fs_pairs:
             src_fs.delete_file(src_file)
         return moves
 
     def create_directory(self, relative_path: str) -> None:
         fs, fs_rel, _m = self._resolve(relative_path)
         fs.create_directory(fs_rel)
+
+    # --- namespace conversion ---------------------------------------
+
+    def _to_agent_path(self, mount: CompositeMount, fs_rel: str) -> str:
+        """Inverse of :meth:`_resolve`: take an FS-relative path under
+        ``mount`` and re-prefix it into the agent-facing namespace.
+
+        Mirrors the path-rewriting branch in :meth:`list_all_files` so
+        return values from ``move_directory`` (and any future caller
+        that needs to surface paths to MCP clients) speak the same
+        language the agent used on the way in.
+        """
+        strip = mount.subpath + "/" if mount.subpath else ""
+        rel = (
+            fs_rel[len(strip):]
+            if strip and fs_rel.startswith(strip)
+            else fs_rel
+        )
+        if mount.virtual_prefix:
+            return (
+                posixpath.join(mount.virtual_prefix, rel)
+                if rel
+                else mount.virtual_prefix
+            )
+        return rel
 
     # --- containment-check exposure ---------------------------------
 
