@@ -1,213 +1,337 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import mermaid from 'mermaid';
 import { Code, ZoomIn, ZoomOut, RotateCcw, Download } from 'lucide-react';
-import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch';
+import {
+  TransformWrapper,
+  TransformComponent,
+  useControls,
+  type ReactZoomPanPinchRef,
+} from 'react-zoom-pan-pinch';
+import { THEME_CHANGE_EVENT } from './AppearanceSettings';
 
 interface MermaidDiagramProps {
   chart: string;
   className?: string;
 }
 
-// Initialize mermaid with Stash-MCP dark theme
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'base',
-  themeVariables: {
-    // Core colors
-    darkMode: true,
-    background: '#1e1e2e',
-    primaryColor: '#94e2d5',
-    primaryTextColor: '#1e1e2e',
-    primaryBorderColor: '#94e2d5',
-    lineColor: '#94e2d5',
-    secondaryColor: '#89dceb',
-    secondaryTextColor: '#1e1e2e',
-    secondaryBorderColor: '#89dceb',
-    tertiaryColor: '#cba6f7',
-    tertiaryTextColor: '#1e1e2e',
-    tertiaryBorderColor: '#cba6f7',
-    
-    // Text colors
-    textColor: '#cdd6f4',
+/** Resolve a CSS custom property off the document root. Always returns
+ * a usable color string — mermaid bakes these into the rendered SVG,
+ * so empty values would produce broken diagrams. */
+function readCssVar(name: string, fallback: string): string {
+  if (typeof window === 'undefined') return fallback;
+  const value = getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  return value || fallback;
+}
+
+/** Relative luminance for any CSS color string mermaid embeds in the
+ * rendered SVG (``#rgb``, ``#rrggbb``, or ``rgb()``/``rgba()``).
+ * Returns ``null`` for ``none`` / ``transparent`` / unparseable so
+ * callers can leave text alone in that case. */
+function parseLuminance(color: string): number | null {
+  const c = color.trim().toLowerCase();
+  if (!c || c === 'none' || c === 'transparent') return null;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  const longHex = c.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/);
+  const shortHex = c.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/);
+  // Optional 4th group captures alpha in either ``rgba(r, g, b, a)``
+  // or CSS Color Level 4 ``rgb(r g b / a)`` form.
+  const rgb = c.match(
+    /^rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?/,
+  );
+  if (longHex) {
+    r = parseInt(longHex[1], 16);
+    g = parseInt(longHex[2], 16);
+    b = parseInt(longHex[3], 16);
+  } else if (shortHex) {
+    r = parseInt(shortHex[1] + shortHex[1], 16);
+    g = parseInt(shortHex[2] + shortHex[2], 16);
+    b = parseInt(shortHex[3] + shortHex[3], 16);
+  } else if (rgb) {
+    // Treat noticeably translucent fills as unparseable. The final
+    // rendered color depends on whatever sits behind the node (the
+    // diagram background, another shape, the page) which we can't
+    // see from here — picking a contrast color from the rgb channels
+    // alone would be wrong (e.g. ``rgba(255,255,255,0.05)`` on a
+    // dark theme would force dark text onto an effectively dark
+    // pixel). Caller leaves the existing text alone.
+    if (rgb[4] !== undefined) {
+      const raw = rgb[4];
+      const alpha = raw.endsWith('%') ? parseFloat(raw) / 100 : parseFloat(raw);
+      if (!Number.isFinite(alpha) || alpha < 0.85) return null;
+    }
+    r = parseFloat(rgb[1]);
+    g = parseFloat(rgb[2]);
+    b = parseFloat(rgb[3]);
+  } else {
+    return null;
+  }
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+
+function isDarkBg(hex: string): boolean {
+  const lum = parseLuminance(hex);
+  return lum === null ? true : lum < 0.5;
+}
+
+/** Mermaid bakes a single ``textColor`` into the SVG for all node
+ * text, but a diagram author can override individual node fills with
+ * ``classDef``. When that fill happens to clash with the theme's text
+ * color (e.g. a pale ``classDef`` fill on a dark theme), the labels
+ * become unreadable.
+ *
+ * This walks the rendered SVG, reads each node's actual ``fill``
+ * (attribute or inline style), and forces the text inside to a
+ * guaranteed-contrasting near-black or near-white. Always-fixed
+ * contrast colors (not theme vars) so light/cream fills work on dark
+ * themes too. */
+function applyNodeTextContrast(svgMarkup: string): string {
+  if (typeof DOMParser === 'undefined') return svgMarkup;
+  const doc = new DOMParser().parseFromString(svgMarkup, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) return svgMarkup;
+
+  // Mermaid emits ``<svg width="100%" style="max-width: Npx">`` —
+  // inside ``react-zoom-pan-pinch``'s transformed content area, which
+  // has no defined width, ``width="100%"`` resolves to 0px and the
+  // SVG collapses to nothing. Rewrite to explicit viewBox dimensions
+  // so the content component has a real natural size to measure
+  // against when we call ``centerView()`` below.
+  const svgRoot = doc.querySelector('svg');
+  const vb = svgRoot?.viewBox?.baseVal;
+  if (svgRoot && vb && vb.width > 0 && vb.height > 0) {
+    svgRoot.setAttribute('width', String(vb.width));
+    svgRoot.setAttribute('height', String(vb.height));
+    const style = svgRoot.getAttribute('style') || '';
+    const cleaned = style
+      .replace(/(?:^|;)\s*max-width\s*:[^;]+/gi, '')
+      .replace(/^\s*;\s*/, '')
+      .trim();
+    if (cleaned) svgRoot.setAttribute('style', cleaned);
+    else svgRoot.removeAttribute('style');
+  }
+
+  const ON_LIGHT = '#11151c';
+  const ON_DARK = '#e0e4f0';
+
+  const nodes = doc.querySelectorAll(
+    'g.node, g.actor, g.cluster, g.statediagram-cluster, g.classGroup',
+  );
+  nodes.forEach((node) => {
+    const shape = node.querySelector(
+      ':scope > rect, :scope > circle, :scope > polygon, :scope > path, :scope > ellipse, :scope > .basic, :scope > .label-container',
+    ) as SVGElement | null;
+    if (!shape) return;
+    const inline = shape.getAttribute('style') || '';
+    const fillFromStyle = inline.match(/(?:^|[;\s])fill\s*:\s*([^;]+)/i)?.[1];
+    const fill = (fillFromStyle || shape.getAttribute('fill') || '').trim();
+    const lum = parseLuminance(fill);
+    if (lum === null) return;
+    const textColor = lum > 0.55 ? ON_LIGHT : ON_DARK;
+
+    node.querySelectorAll('text, tspan').forEach((el) => {
+      (el as SVGElement).setAttribute('fill', textColor);
+      // Some mermaid versions emit ``style="fill: …"`` too — keep
+      // the attribute and inline style aligned.
+      const existing = (el as SVGElement).getAttribute('style') || '';
+      (el as SVGElement).setAttribute(
+        'style',
+        `${existing.replace(/(?:^|[;\s])fill\s*:[^;]+;?/i, '')};fill:${textColor}`,
+      );
+    });
+    node
+      .querySelectorAll('foreignObject div, foreignObject span, foreignObject p')
+      .forEach((el) => {
+        (el as HTMLElement).style.color = textColor;
+      });
+  });
+
+  return new XMLSerializer().serializeToString(doc);
+}
+
+/** Map the active Stash theme vars to mermaid's ``themeVariables``.
+ * Called on every render so theme swaps via ``applyTheme()`` flow
+ * straight through.
+ *
+ * Node fills use surface/elevated backgrounds (not the accent), so
+ * the same accent color works as a border across the whole palette
+ * without sacrificing text contrast — the previous hardcoded mapping
+ * filled nodes with ``--stash-accent`` and then tried to read text
+ * against it, which only worked on the original teal-on-#1e1e2e
+ * palette. */
+function getMermaidThemeVariables() {
+  const bgBase = readCssVar('--stash-bg-base', '#1e1e2e');
+  const bgSurface = readCssVar('--stash-bg-surface', '#272738');
+  const bgElevated = readCssVar('--stash-bg-elevated', '#2e2e42');
+  const bgCode = readCssVar('--stash-bg-code', '#181825');
+  const textPrimary = readCssVar('--stash-text-primary', '#cdd6f4');
+  const textSecondary = readCssVar('--stash-text-secondary', '#7f849c');
+  const textBright = readCssVar('--stash-text-bright', '#e0e4f0');
+  const accent = readCssVar('--stash-accent', '#94e2d5');
+  const destructive = readCssVar('--stash-destructive', '#f38ba8');
+  const border = readCssVar('--stash-border', '#313244');
+  const dark = isDarkBg(bgBase);
+
+  return {
+    darkMode: dark,
+    background: bgBase,
+
+    primaryColor: bgElevated,
+    primaryTextColor: textPrimary,
+    primaryBorderColor: accent,
+    lineColor: textSecondary,
+    secondaryColor: bgSurface,
+    secondaryTextColor: textPrimary,
+    secondaryBorderColor: border,
+    tertiaryColor: bgCode,
+    tertiaryTextColor: textPrimary,
+    tertiaryBorderColor: border,
+
+    textColor: textPrimary,
     fontSize: '16px',
     fontFamily: 'ui-sans-serif, system-ui, sans-serif',
-    
-    // Background colors
-    mainBkg: '#2e2e42',
-    secondBkg: '#272738',
-    tertiaryBkg: '#353550',
-    
-    // Border colors
-    border1: '#94e2d5',
-    border2: '#89dceb',
-    
-    // Node/box styling
-    nodeBorder: '#94e2d5',
-    nodeTextColor: '#cdd6f4',
-    clusterBkg: '#272738',
-    clusterBorder: '#94e2d5',
-    defaultLinkColor: '#94e2d5',
-    titleColor: '#cdd6f4',
-    edgeLabelBackground: '#1e1e2e',
-    
-    // Specific diagram colors - Sequence Diagrams
-    actorBorder: '#94e2d5',
-    actorBkg: '#2e2e42',
-    actorTextColor: '#cdd6f4',
-    actorLineColor: '#94e2d5',
-    signalColor: '#cdd6f4',
-    signalTextColor: '#cdd6f4',
-    labelBoxBkgColor: '#2e2e42',
-    labelBoxBorderColor: '#94e2d5',
-    labelTextColor: '#cdd6f4',
-    loopTextColor: '#cdd6f4',
-    noteBorderColor: '#f9e2af',
-    noteBkgColor: '#2e2e42',
-    noteTextColor: '#f9e2af',
-    activationBorderColor: '#94e2d5',
-    activationBkgColor: '#94e2d5',
-    sequenceNumberColor: '#1e1e2e',
-    
-    // State diagram
-    labelColor: '#1e1e2e',
-    
-    // Git graph
-    git0: '#94e2d5',
-    git1: '#89dceb',
-    git2: '#f38ba8',
-    git3: '#f9e2af',
-    git4: '#cba6f7',
-    git5: '#a6e3a1',
-    git6: '#fab387',
-    git7: '#f5c2e7',
-    gitBranchLabel0: '#1e1e2e',
-    gitBranchLabel1: '#1e1e2e',
-    gitBranchLabel2: '#1e1e2e',
-    gitBranchLabel3: '#1e1e2e',
-    gitBranchLabel4: '#1e1e2e',
-    gitBranchLabel5: '#1e1e2e',
-    gitBranchLabel6: '#1e1e2e',
-    gitBranchLabel7: '#1e1e2e',
-    gitInv0: '#1e1e2e',
-    gitInv1: '#1e1e2e',
-    gitInv2: '#1e1e2e',
-    gitInv3: '#1e1e2e',
-    gitInv4: '#1e1e2e',
-    gitInv5: '#1e1e2e',
-    gitInv6: '#1e1e2e',
-    gitInv7: '#1e1e2e',
-    commitLabelColor: '#cdd6f4',
-    commitLabelBackground: '#2e2e42',
-    
-    // Pie chart
-    pie1: '#94e2d5',
-    pie2: '#89dceb',
-    pie3: '#f38ba8',
-    pie4: '#f9e2af',
-    pie5: '#cba6f7',
-    pie6: '#a6e3a1',
-    pie7: '#fab387',
-    pie8: '#f5c2e7',
-    pie9: '#b4befe',
-    pie10: '#f2cdcd',
-    pie11: '#eba0ac',
-    pie12: '#74c7ec',
+
+    mainBkg: bgElevated,
+    secondBkg: bgSurface,
+    tertiaryBkg: bgCode,
+
+    border1: border,
+    border2: accent,
+
+    nodeBorder: accent,
+    nodeTextColor: textPrimary,
+    clusterBkg: bgSurface,
+    clusterBorder: border,
+    defaultLinkColor: textSecondary,
+    titleColor: textBright,
+    edgeLabelBackground: bgBase,
+
+    // Sequence diagrams
+    actorBorder: accent,
+    actorBkg: bgElevated,
+    actorTextColor: textPrimary,
+    actorLineColor: textSecondary,
+    signalColor: textPrimary,
+    signalTextColor: textPrimary,
+    labelBoxBkgColor: bgElevated,
+    labelBoxBorderColor: accent,
+    labelTextColor: textPrimary,
+    loopTextColor: textPrimary,
+    noteBorderColor: accent,
+    noteBkgColor: bgSurface,
+    noteTextColor: textPrimary,
+    activationBorderColor: accent,
+    activationBkgColor: accent,
+    sequenceNumberColor: bgBase,
+
+    // State / class diagrams
+    labelColor: textPrimary,
+    classText: textPrimary,
+
+    // Git graph — branch lanes rotate through the accent + a few
+    // theme-neutral hues so multi-branch graphs stay legible. Branch
+    // labels render against ``--stash-bg-base`` so they read the same
+    // in light and dark themes.
+    git0: accent,
+    git1: textSecondary,
+    git2: destructive,
+    git3: textBright,
+    git4: border,
+    git5: accent,
+    git6: textSecondary,
+    git7: destructive,
+    gitBranchLabel0: bgBase,
+    gitBranchLabel1: bgBase,
+    gitBranchLabel2: bgBase,
+    gitBranchLabel3: bgBase,
+    gitBranchLabel4: bgBase,
+    gitBranchLabel5: bgBase,
+    gitBranchLabel6: bgBase,
+    gitBranchLabel7: bgBase,
+    commitLabelColor: textPrimary,
+    commitLabelBackground: bgElevated,
+
+    // Pie charts
+    pie1: accent,
+    pie2: textSecondary,
+    pie3: destructive,
+    pie4: textBright,
+    pie5: border,
+    pie6: accent,
+    pie7: textSecondary,
+    pie8: destructive,
     pieTitleTextSize: '24px',
-    pieTitleTextColor: '#cdd6f4',
+    pieTitleTextColor: textBright,
     pieSectionTextSize: '16px',
-    pieSectionTextColor: '#1e1e2e',
+    pieSectionTextColor: textPrimary,
     pieLegendTextSize: '14px',
-    pieLegendTextColor: '#cdd6f4',
-    pieStrokeColor: '#1e1e2e',
+    pieLegendTextColor: textPrimary,
+    pieStrokeColor: bgBase,
     pieStrokeWidth: '2px',
     pieOpacity: '0.95',
-    
-    // Flowchart
-    fillType0: '#94e2d5',
-    fillType1: '#89dceb',
-    fillType2: '#cba6f7',
-    fillType3: '#f9e2af',
-    fillType4: '#a6e3a1',
-    fillType5: '#fab387',
-    fillType6: '#f38ba8',
-    fillType7: '#f5c2e7',
-    
-    // Class diagram
-    classText: '#1e1e2e',
-    
-    // ER diagram
-    attributeBackgroundColorOdd: '#2e2e42',
-    attributeBackgroundColorEven: '#272738',
-    entityBackgroundColor: '#2e2e42',
-    entityBorderColor: '#94e2d5',
-    entityTextColor: '#cdd6f4',
-    relationLabelColor: '#cdd6f4',
-    relationLabelBackground: '#1e1e2e',
-    relationColor: '#94e2d5',
-    attributeTextColor: '#cdd6f4',
-    labelBackground: '#1e1e2e',
-    
-    // Timeline
-    cScale0: '#94e2d5',
-    cScale1: '#2e2e42',
-    cScale2: '#89dceb',
-    cScale3: '#2e2e42',
-    cScale4: '#f38ba8',
-    cScale5: '#2e2e42',
-    cScale6: '#f9e2af',
-    cScale7: '#2e2e42',
-    cScale8: '#cba6f7',
-    cScale9: '#2e2e42',
-    cScale10: '#a6e3a1',
-    cScale11: '#2e2e42',
-    cScaleLabel0: '#1e1e2e',
-    cScaleLabel1: '#cdd6f4',
-    cScaleLabel2: '#1e1e2e',
-    cScaleLabel3: '#cdd6f4',
-    cScaleLabel4: '#1e1e2e',
-    cScaleLabel5: '#cdd6f4',
-    cScaleLabel6: '#1e1e2e',
-    cScaleLabel7: '#cdd6f4',
-    cScaleLabel8: '#1e1e2e',
-    cScaleLabel9: '#cdd6f4',
-    cScaleLabel10: '#1e1e2e',
-    cScaleLabel11: '#cdd6f4',
-  },
-  fontFamily: 'ui-sans-serif, system-ui, sans-serif',
-  fontSize: 16,
-  flowchart: {
-    htmlLabels: true,
-    curve: 'basis',
-  },
-  sequence: {
-    diagramMarginX: 50,
-    diagramMarginY: 10,
-    actorMargin: 50,
-    width: 150,
-    height: 65,
-    boxMargin: 10,
-    boxTextMargin: 5,
-    noteMargin: 10,
-    messageMargin: 35,
-    mirrorActors: true,
-    useMaxWidth: true,
-  },
-  gantt: {
-    titleTopMargin: 25,
-    barHeight: 20,
-    barGap: 4,
-    topPadding: 50,
-    leftPadding: 75,
-    gridLineStartPadding: 35,
-    fontSize: 11,
-    numberSectionStyles: 4,
-    axisFormat: '%Y-%m-%d',
-  },
-});
+
+    // ER diagrams
+    attributeBackgroundColorOdd: bgElevated,
+    attributeBackgroundColorEven: bgSurface,
+    entityBackgroundColor: bgElevated,
+    entityBorderColor: accent,
+    entityTextColor: textPrimary,
+    relationLabelColor: textPrimary,
+    relationLabelBackground: bgBase,
+    relationColor: textSecondary,
+    attributeTextColor: textPrimary,
+    labelBackground: bgBase,
+  };
+}
+
+function initializeMermaid() {
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    themeVariables: getMermaidThemeVariables(),
+    fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+    fontSize: 16,
+    flowchart: { htmlLabels: true, curve: 'basis' },
+    sequence: {
+      diagramMarginX: 50,
+      diagramMarginY: 10,
+      actorMargin: 50,
+      width: 150,
+      height: 65,
+      boxMargin: 10,
+      boxTextMargin: 5,
+      noteMargin: 10,
+      messageMargin: 35,
+      mirrorActors: true,
+      useMaxWidth: true,
+    },
+    gantt: {
+      titleTopMargin: 25,
+      barHeight: 20,
+      barGap: 4,
+      topPadding: 50,
+      leftPadding: 75,
+      gridLineStartPadding: 35,
+      fontSize: 11,
+      numberSectionStyles: 4,
+      axisFormat: '%Y-%m-%d',
+    },
+  });
+}
+
+initializeMermaid();
 
 // Controls component that uses the useControls hook
-function DiagramControls({ onDownload }: { onDownload: () => void }) {
-  const { zoomIn, zoomOut, resetTransform } = useControls();
+function DiagramControls({
+  onDownload,
+  onReset,
+}: {
+  onDownload: () => void;
+  onReset: () => void;
+}) {
+  const { zoomIn, zoomOut } = useControls();
 
   return (
     <div
@@ -251,7 +375,7 @@ function DiagramControls({ onDownload }: { onDownload: () => void }) {
         <ZoomOut className="w-4 h-4" />
       </button>
       <button
-        onClick={() => resetTransform()}
+        onClick={onReset}
         className="p-1.5 rounded transition-colors duration-150"
         style={{ color: 'var(--stash-text-secondary)' }}
         onMouseEnter={(e) => {
@@ -296,9 +420,58 @@ function DiagramControls({ onDownload }: { onDownload: () => void }) {
 
 export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const transformApiRef = useRef<ReactZoomPanPinchRef | null>(null);
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [showSource, setShowSource] = useState(false);
+  // Bumped on theme swaps to force a re-init + re-render of the SVG.
+  // Mermaid bakes colors into the SVG at render time, so swapping
+  // CSS vars alone won't re-color an already-rendered diagram.
+  const [themeNonce, setThemeNonce] = useState(0);
+
+  useEffect(() => {
+    const handler = () => setThemeNonce((n) => n + 1);
+    window.addEventListener(THEME_CHANGE_EVENT, handler);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, handler);
+  }, []);
+
+  // Measure the rendered SVG against the viewport and pick a zoom
+  // that fits with a little breathing room. Capped at 1.0 so a small
+  // 2-node flowchart doesn't blow up to fill 500px of vertical space
+  // with 80px text.
+  const fitToViewport = useCallback(() => {
+    const api = transformApiRef.current;
+    const viewport = viewportRef.current;
+    const svgEl = containerRef.current?.querySelector('svg');
+    if (!api || !viewport || !svgEl) return;
+    const vb = svgEl.viewBox?.baseVal;
+    const naturalW = vb && vb.width
+      ? vb.width
+      : svgEl.getBoundingClientRect().width;
+    const naturalH = vb && vb.height
+      ? vb.height
+      : svgEl.getBoundingClientRect().height;
+    if (!naturalW || !naturalH) return;
+    const fit = Math.min(
+      viewport.offsetWidth / naturalW,
+      viewport.offsetHeight / naturalH,
+      1,
+    );
+    const scale = Math.max(fit * 0.95, 0.1);
+    api.centerView(scale, 0);
+  }, []);
+
+  // Fit on every re-render of the SVG markup (initial mount and
+  // theme swaps — toggling ``showSource`` doesn't touch ``svg`` so
+  // it doesn't re-trigger this effect). The user's manual zoom/pan
+  // resets here on purpose: stale transforms would point at empty
+  // space after a re-render.
+  useEffect(() => {
+    if (!svg) return;
+    const raf = requestAnimationFrame(fitToViewport);
+    return () => cancelAnimationFrame(raf);
+  }, [svg, fitToViewport]);
 
   const handleDownload = () => {
     const svgData = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
@@ -318,41 +491,45 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
 
       try {
         setError('');
+        // Re-init with the current theme vars so a swap takes effect
+        // here even when the module-level call ran with an earlier
+        // palette.
+        initializeMermaid();
         const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
-        
+
         const { svg: renderedSvg } = await mermaid.render(id, chart);
-        
-        // Apply comprehensive CSS fixes for text visibility across all diagram types
-        let fixedSvg = renderedSvg;
-        
-        // Force text color to be visible across ALL diagram types
-        fixedSvg = fixedSvg.replace(
-          /<style>/,
-          `<style>
-            /* Universal text visibility fixes */
-            text {
-              fill: #cdd6f4 !important;
-            }
-            
-            /* Timeline - ensure text visibility in boxes */
+
+        // Layer a small theme-aware stylesheet on top of mermaid's
+        // output. ``themeVariables`` covers most of the palette, but
+        // a few diagram types (timeline, gantt) inline classes that
+        // need an explicit fill against their accent-tinted bars.
+        // Node label text is handled per-node by ``applyNodeTextContrast``
+        // (further down) so authored ``classDef`` fills get a
+        // contrast-matched text color regardless of the active theme.
+        const bgBase = readCssVar('--stash-bg-base', '#1e1e2e');
+        const textPrimary = readCssVar('--stash-text-primary', '#cdd6f4');
+        const textBright = readCssVar('--stash-text-bright', '#e0e4f0');
+        const overrides = `
+            /* Timeline event labels render on accent-colored fills —
+             * force a dark on-color so they stay legible on light themes
+             * too. Section titles read against the page background. */
             .timeline .event rect + text,
             .timeline text {
-              fill: #1e1e2e !important;
+              fill: ${bgBase} !important;
               font-weight: 600 !important;
             }
-            
-            /* Timeline section titles */
             .timeline .section0 text,
             .timeline .section1 text,
             .timeline .section2 text,
             .timeline .section3 text,
             .timeline .section {
-              fill: #cdd6f4 !important;
+              fill: ${textBright} !important;
               font-weight: 700 !important;
               font-size: 18px !important;
             }
-            
-            /* Gantt Charts - specific fixes for task labels */
+
+            /* Gantt task labels sit on filled bars (always tinted by
+             * the active accent), axis labels sit on the page. */
             .taskText,
             .taskTextOutsideRight,
             .taskTextOutsideLeft,
@@ -362,59 +539,23 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
             .taskText3,
             .sectionTitle,
             .titleText {
-              fill: #1e1e2e !important;
+              fill: ${bgBase} !important;
               font-weight: 500 !important;
             }
-            
-            /* Gantt axis labels */
             .tick text {
-              fill: #cdd6f4 !important;
+              fill: ${textPrimary} !important;
             }
-            
-            /* ER Diagrams */
-            .er.attributeBoxOdd text, 
-            .er.attributeBoxEven text,
-            .er .entityLabel text,
-            .er text {
-              fill: #cdd6f4 !important;
-            }
-            
-            /* State Diagrams */
-            .statediagram-state rect.basic + text,
-            .statediagram-state text,
-            g.stateGroup text,
-            .state-note text {
-              fill: #cdd6f4 !important;
-            }
-            
-            /* Flowcharts */
-            .node text,
-            .nodeLabel,
-            .edgeLabel text,
-            foreignObject div {
-              color: #cdd6f4 !important;
-              fill: #cdd6f4 !important;
-            }
-            
-            /* Class Diagrams */
-            .classLabel text,
-            .classTitle text {
-              fill: #cdd6f4 !important;
-            }
-            
-            /* Edge labels and transitions */
+
+            /* Edge labels sit on the page background, not on a node fill. */
             .edgeLabel,
-            .transition text {
-              fill: #cdd6f4 !important;
+            .edgeLabel text {
+              color: ${textPrimary};
+              fill: ${textPrimary};
             }
-            
-            /* Cluster/Subgraph labels */
-            .cluster-label text {
-              fill: #cdd6f4 !important;
-            }
-          `
-        );
-        
+          `;
+        const styledSvg = renderedSvg.replace(/<style>/, `<style>${overrides}`);
+        const fixedSvg = applyNodeTextContrast(styledSvg);
+
         setSvg(fixedSvg);
       } catch (err) {
         console.error('Mermaid rendering error:', err);
@@ -423,7 +564,7 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
     };
 
     renderDiagram();
-  }, [chart]);
+  }, [chart, themeNonce]);
 
   if (error) {
     return (
@@ -528,19 +669,23 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
       )}
 
       {/* Rendered diagram with zoom controls */}
-      <div className="relative" style={{ minHeight: '500px' }}>
+      <div ref={viewportRef} className="relative" style={{ minHeight: '500px' }}>
         <TransformWrapper
+          ref={transformApiRef}
           initialScale={1}
           minScale={0.1}
           maxScale={5}
           centerOnInit
+          limitToBounds={false}
+          centerZoomedOut={false}
+          alignmentAnimation={{ disabled: true, sizeX: 0, sizeY: 0 }}
           wheel={{ step: 0.05 }}
           doubleClick={{ disabled: false, mode: 'zoomIn', step: 0.7 }}
           panning={{ velocityDisabled: true }}
         >
           {() => (
             <>
-              <DiagramControls onDownload={handleDownload} />
+              <DiagramControls onDownload={handleDownload} onReset={fitToViewport} />
               <TransformComponent
                 wrapperStyle={{
                   width: '100%',

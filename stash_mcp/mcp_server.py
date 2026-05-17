@@ -71,7 +71,24 @@ MIME_TYPES: dict[str, str] = {
     ".cfg": "text/plain",
     ".rst": "text/x-rst",
     ".log": "text/plain",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".bmp": "image/bmp",
+    ".pdf": "application/pdf",
 }
+
+# Extensions whose content cannot be safely returned as UTF-8 text by the
+# JSON ``/api/content`` endpoint. Callers should fetch these via
+# ``/api/raw/{path}`` instead.
+BINARY_EXTENSIONS: frozenset[str] = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp", ".pdf",
+})
 
 # Only files matching this name are exposed as MCP resources.
 # All other files remain accessible via tools and the resource template.

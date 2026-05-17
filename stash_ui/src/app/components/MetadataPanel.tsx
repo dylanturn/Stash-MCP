@@ -91,6 +91,13 @@ export function MetadataPanel({
   };
 
   const getMimeType = () => {
+    // Prefer an explicit ``mimeType`` from the API / selection layer
+    // when available — binary files (image/PDF) populate it from the
+    // file extension because the JSON content fetch is skipped for
+    // them, and the server returns it for text files via the content
+    // endpoint. Fall back to a tiny ext→mime map for the legacy
+    // text cases.
+    if (file.mimeType) return file.mimeType;
     const ext = file.extension;
     if (ext === 'md') return 'text/markdown';
     if (ext === 'json') return 'application/json';
@@ -316,7 +323,7 @@ export function MetadataPanel({
                 File Size
               </div>
               <div className="text-sm" style={{ color: 'var(--stash-text-primary)' }}>
-                {formatFileSize(file.size || 0)}
+                {file.size !== undefined ? formatFileSize(file.size) : '—'}
               </div>
             </div>
 
@@ -334,7 +341,7 @@ export function MetadataPanel({
                 Last Modified
               </div>
               <div className="text-sm" style={{ color: 'var(--stash-text-primary)' }}>
-                {file.lastModified ? formatDate(file.lastModified) : 'Unknown'}
+                {file.lastModified ? formatDate(file.lastModified) : '—'}
               </div>
             </div>
 

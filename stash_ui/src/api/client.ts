@@ -16,6 +16,22 @@ export async function getTree(tenant: string, store: string) {
   return res.json();
 }
 
+/** Same-origin URL (path-only, e.g. ``/api/<tenant>/<store>/raw/...``)
+ * for the raw bytes of a content file. Used by the UI to render
+ * images and PDFs directly via ``<img>`` / ``<iframe>`` — the JSON
+ * content endpoint can't represent non-UTF-8 bytes. HTML artifacts
+ * do not load through this URL: they're fetched as text and run from
+ * a same-document blob URL with a strict ``sandbox`` so the artifact
+ * can't reach the parent origin. Callers that need a fully qualified
+ * URL should resolve this against ``window.location.origin``. */
+export function rawUrl(tenant: string, store: string, path: string): string {
+  const cleaned = path.replace(/^\/+/, '');
+  return `${apiBase(tenant, store)}/raw/${cleaned
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')}`;
+}
+
 export async function listContent(
   tenant: string,
   store: string,
@@ -154,6 +170,7 @@ export interface ApiClient {
   deleteContent: (path: string) => Promise<any>;
   moveContent: (path: string, destination: string) => Promise<any>;
   getGitOverview: () => Promise<any | null>;
+  rawUrl: (path: string) => string;
 }
 
 export function createApiClient(tenant: string, store: string): ApiClient {
@@ -170,5 +187,6 @@ export function createApiClient(tenant: string, store: string): ApiClient {
     moveContent: (path, destination) =>
       moveContent(tenant, store, path, destination),
     getGitOverview: () => getGitOverview(tenant, store),
+    rawUrl: (path) => rawUrl(tenant, store, path),
   };
 }

@@ -5,6 +5,7 @@ import { ConcurrentEditError } from '../../api/fetch';
 import { useStore } from '../StoreContext';
 import { FileTree } from '../components/FileTree';
 import { DocumentViewer } from '../components/DocumentViewer';
+import { classifyBinary, mimeTypeForBinary } from '../components/BinaryFileViewer';
 import { DirectoryListing } from '../components/DirectoryListing';
 import { MetadataPanel } from '../components/MetadataPanel';
 import { OverviewContent } from '../components/OverviewContent';
@@ -134,6 +135,27 @@ export function DocumentsPage() {
       setSelectedEtag(file.etag);
       // Same reason as the folder branch — clear in case an earlier
       // uncached load set the spinner and is now invalidated.
+      setIsContentLoading(false);
+      return;
+    }
+
+    // Images and PDFs are streamed by the raw-bytes endpoint and don't
+    // need text content — skip the JSON fetch so we don't 415. HTML
+    // still goes through getContent so it can be previewed and edited.
+    // Populate mimeType from the extension so the metadata panel
+    // shows e.g. ``image/png`` instead of falling back to
+    // ``text/plain``. ``size`` and ``lastModified`` stay undefined —
+    // the panel renders ``—`` for those rather than misleading
+    // zeros (we don't fetch metadata to avoid an extra round-trip).
+    const binaryKind = classifyBinary(file.extension);
+    if (binaryKind === 'image' || binaryKind === 'pdf') {
+      latestSelectionRef.current += 1;
+      setSelectedFile({
+        ...file,
+        content: '',
+        mimeType: mimeTypeForBinary(file.extension),
+      });
+      setSelectedEtag(null);
       setIsContentLoading(false);
       return;
     }
@@ -599,6 +621,7 @@ export function DocumentsPage() {
               onSectionsChange={setSections}
               onActiveSectionChange={setActiveSectionId}
               onSectionsTitleChange={setSectionsTitle}
+              rawUrl={client ? (path) => client.rawUrl(path) : undefined}
             />
           )}
         </Panel>

@@ -370,3 +370,256 @@ def test_event_emitted_on_patch_move(test_client, event_listener):
     assert args[0] == "content_moved"
     assert args[1] == "moved.md"
     assert kwargs.get("source_path") == "test.md"
+
+
+# --- Raw bytes endpoint tests ---
+
+
+# 1x1 transparent PNG.
+_PNG_BYTES = bytes.fromhex(
+    "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C489"
+    "0000000D49444154789C636000000000050001E221BC330000000049454E44AE426082"
+)
+
+
+def test_raw_endpoint_streams_image_bytes():
+    """The raw endpoint returns binary file contents with the right
+    Content-Type, leaving them untouched by UTF-8 decoding."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/raw/logo.png")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("image/png")
+        assert response.content == _PNG_BYTES
+        assert response.headers.get("etag") is not None
+
+
+def test_raw_endpoint_404_on_missing():
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        client = TestClient(create_api(fs))
+        response = client.get("/api/raw/missing.png")
+        assert response.status_code == 404
+
+
+def test_content_endpoint_415_for_binary():
+    """GET /api/content/{path} surfaces 415 for known-binary types so
+    callers know to use the raw endpoint instead."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/content/logo.png")
+        assert response.status_code == 415
+        assert "raw" in response.json()["detail"]
+
+
+def test_content_endpoint_404_for_missing_binary():
+    """Missing binary file should 404 — the binary-type guard must not
+    short-circuit existence checks."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/content/missing.png")
+        assert response.status_code == 404
+
+
+def test_raw_endpoint_304_on_if_none_match():
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        client = TestClient(create_api(fs))
+
+        first = client.get("/api/raw/logo.png")
+        etag = first.headers["etag"]
+        cached = client.get("/api/raw/logo.png", headers={"If-None-Match": etag})
+        assert cached.status_code == 304
+
+
+def test_raw_endpoint_sets_sandbox_csp():
+    """Every raw response must carry ``Content-Security-Policy: sandbox``
+    so scriptable artifacts (.html/.svg) opened directly run in an
+    opaque origin without access to the Stash session/API. Also locks
+    in ``X-Content-Type-Options: nosniff``."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/raw/logo.png")
+        assert response.status_code == 200
+        assert response.headers.get("content-security-policy") == "sandbox"
+        assert response.headers.get("x-content-type-options") == "nosniff"
+
+        # The 304 path applies the same policy so cached responses
+        # don't drop the sandbox.
+        cached = client.get(
+            "/api/raw/logo.png",
+            headers={"If-None-Match": response.headers["etag"]},
+        )
+        assert cached.status_code == 304
+        assert cached.headers.get("content-security-policy") == "sandbox"
+
+
+def test_content_endpoint_400_for_directory():
+    """``GET /api/content/<dir>`` must surface a 400 — falling through
+    to 404 would hide the real problem (path resolves to a directory)
+    from the client."""
+    with TemporaryDirectory() as tmpdir:
+        (Path(tmpdir) / "docs").mkdir()
+        fs = FileSystem(Path(tmpdir))
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/content/docs")
+        assert response.status_code == 400
+        assert "not a file" in response.json()["detail"].lower()
+
+
+def test_content_endpoint_415_for_non_utf8_text_file():
+    """A file without a known binary extension that contains non-UTF-8
+    bytes must 415 (with a raw-bytes hint), not 500. Locks in the
+    ``UnicodeDecodeError`` re-raise in ``FileSystem.read_file``."""
+    with TemporaryDirectory() as tmpdir:
+        # Latin-1 bytes that are invalid UTF-8.
+        (Path(tmpdir) / "notes.dat").write_bytes(b"caf\xe9 noir")
+        fs = FileSystem(Path(tmpdir))
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/content/notes.dat")
+        assert response.status_code == 415
+        assert "raw" in response.json()["detail"].lower()
+
+
+def test_content_endpoint_415_hint_preserves_request_prefix():
+    """The 415 ``detail`` must build the raw URL from the path
+    ``StoreResolverMiddleware`` stashes in
+    ``scope["stash.original_path"]``, so tenant/store-scoped
+    deployments get a usable
+    ``/api/<tenant>/<store>/raw/<path>`` hint instead of a
+    hard-coded ``/api/raw/<path>`` that would 404 in their routing.
+
+    Wraps the API in a minimal ASGI shim that mirrors what
+    ``StoreResolverMiddleware`` does in production: rewrite
+    ``/api/<tenant>/<store>/content/foo`` to ``/api/content/foo`` on
+    the inner scope, and remember the original on
+    ``scope["stash.original_path"]``. The earlier ``app.mount()``
+    version of this test passed even before the scope key existed
+    because ``mount()`` happens to leave the prefix in
+    ``request.url.path`` — production does not.
+    """
+
+    class _PrefixRewrite:
+        def __init__(self, app, public_prefix: str) -> None:
+            self.app = app
+            self.public_prefix = public_prefix
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http" and scope["path"].startswith(self.public_prefix):
+                original_path = scope["path"]
+                rewritten = original_path[len(self.public_prefix):] or "/"
+                new_scope = dict(scope)
+                new_scope["path"] = rewritten
+                new_scope["raw_path"] = rewritten.encode("utf-8")
+                new_scope["stash.original_path"] = original_path
+                await self.app(new_scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        # `/api/acme/main` is the stripped prefix; the inner API still
+        # sees `/api/content/logo.png`.
+        wrapped = _PrefixRewrite(create_api(fs), public_prefix="/api/acme/main")
+        client = TestClient(wrapped)
+
+        response = client.get("/api/acme/main/api/content/logo.png")
+        assert response.status_code == 415
+        detail = response.json()["detail"]
+        assert "/api/acme/main/api/content/logo.png" not in detail
+        assert "/api/acme/main/api/raw/logo.png" in detail
+
+
+def test_store_resolver_middleware_stashes_original_path():
+    """``StoreResolverMiddleware`` must hand the inner app the
+    original client-facing path on ``scope["stash.original_path"]``
+    so handlers can build user-facing hints. Tested directly against
+    the middleware to keep the test honest about what production
+    actually does."""
+    from stash_mcp.routing.store_resolver import StoreResolverMiddleware
+
+    captured: dict = {}
+
+    async def inner(scope, receive, send):
+        captured["path"] = scope["path"]
+        captured["original_path"] = scope.get("stash.original_path")
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    middleware = StoreResolverMiddleware(inner, registry=None, public_prefixes=())
+    # Force AUTH_ENABLED so the rewrite path runs. Falling back to the
+    # passthrough branch would skip the scope mutation entirely.
+    from stash_mcp.config import Config
+
+    previous_auth = Config.AUTH_ENABLED
+    Config.AUTH_ENABLED = True
+
+    class _FakeStore:
+        tenant_id = "tid"
+        tenant_slug = "acme"
+        slug = "main"
+
+    class _FakeRegistry:
+        async def get(self, tenant, store):  # noqa: D401
+            return _FakeStore()
+
+    middleware.registry = _FakeRegistry()
+
+    # Stub a principal that is a member of the resolved tenant_id so
+    # the middleware proceeds to the rewrite branch instead of 403ing.
+    from stash_mcp.auth.context import (
+        reset_current_principal,
+        set_current_principal,
+    )
+
+    class _StubPrincipal:
+        def has_role_on(self, tenant_id, role):  # noqa: D401
+            return True
+
+    token = set_current_principal(_StubPrincipal())
+    try:
+        async def _run() -> None:
+            scope = {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/acme/main/content/foo.png",
+                "raw_path": b"/api/acme/main/content/foo.png",
+                "headers": [],
+            }
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            sent: list = []
+
+            async def send(message):
+                sent.append(message)
+
+            await middleware(scope, receive, send)
+
+        import asyncio
+
+        asyncio.run(_run())
+    finally:
+        reset_current_principal(token)
+        Config.AUTH_ENABLED = previous_auth
+
+    # Rewritten path (what the FastAPI app sees) drops the
+    # tenant/store; original path (for hint-building) keeps it.
+    assert captured["path"] == "/api/content/foo.png"
+    assert captured["original_path"] == "/api/acme/main/content/foo.png"

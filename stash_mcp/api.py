@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .config import Config
@@ -18,7 +19,7 @@ from .filesystem import (
     FileSystemError,
     InvalidPathError,
 )
-from .mcp_server import MIME_TYPES
+from .mcp_server import BINARY_EXTENSIONS, MIME_TYPES
 from .metrics import get_metrics
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,16 @@ def _get_mime_type(path: str) -> str:
     """Get mime type for a file path based on extension."""
     suffix = PurePosixPath(path).suffix.lower()
     return MIME_TYPES.get(suffix, "text/plain")
+
+
+def _is_binary_path(path: str) -> bool:
+    """Return True when this path's extension is known-binary (image, PDF, …).
+
+    Binary files cannot be decoded as UTF-8, so the JSON ``/api/content``
+    endpoint surfaces a 415 and clients are expected to fetch the bytes
+    from ``/api/raw/{path}`` instead.
+    """
+    return PurePosixPath(path).suffix.lower() in BINARY_EXTENSIONS
 
 
 class ContentItem(BaseModel):
@@ -233,6 +244,7 @@ def create_api(
             "endpoints": {
                 "list": "/api/content",
                 "read": "/api/content/{path}",
+                "raw": "/api/raw/{path}",
                 "create": "POST /api/content/{path}",
                 "update": "PUT /api/content/{path}",
                 "delete": "DELETE /api/content/{path}",
@@ -305,9 +317,50 @@ def create_api(
 
     @app.get("/api/content/{path:path}")
     async def read_content(path: str, request: Request, response: Response):
-        """Read content file. Returns 304 when ``If-None-Match`` matches."""
+        """Read content file. Returns 304 when ``If-None-Match`` matches.
+
+        Binary file types (images, PDFs) return 415 — clients should
+        fetch them from the raw endpoint instead.
+        """
         fs = _fs()
+        # The 415 hint preserves whatever prefix the caller used so
+        # tenant/store-scoped deployments
+        # (``/api/<tenant>/<store>/content/…``) get a matching
+        # ``/api/<tenant>/<store>/raw/…`` URL instead of a hard-coded
+        # internal route that would 404 in their context.
+        # ``StoreResolverMiddleware`` strips the tenant/store prefix
+        # before this handler runs, so ``request.url.path`` no longer
+        # contains it. The middleware stashes the original
+        # client-facing path in ``scope["stash.original_path"]``;
+        # fall back to ``request.url.path`` in legacy single-store
+        # mode (no middleware) where the two are already equal.
+        original_path = request.scope.get(
+            "stash.original_path", request.url.path
+        )
+        raw_hint = original_path.replace("/content/", "/raw/", 1)
         try:
+            # Disambiguate "doesn't exist" (404) from "is a directory"
+            # (400) before the binary-type guard so a missing ``.png``
+            # still 404s and ``GET /api/content/<dir>`` still 400s.
+            try:
+                full_path = fs._resolve_path(path)
+            except InvalidPathError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            if not full_path.exists():
+                raise HTTPException(status_code=404, detail="File not found")
+            if not full_path.is_file():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Path '{path}' is not a file",
+                )
+            if _is_binary_path(path):
+                raise HTTPException(
+                    status_code=415,
+                    detail=(
+                        f"File '{path}' is binary; fetch raw bytes from "
+                        f"{raw_hint}"
+                    ),
+                )
             content = fs.read_file(path)
             etag = _etag(path)
             quoted = _quoted(etag)
@@ -322,12 +375,76 @@ def create_api(
                 updated_at=_get_updated_at(path),
             )
             return item
+        except HTTPException:
+            raise
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="File not found")
         except InvalidPathError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"File '{path}' is not UTF-8 text; fetch raw bytes "
+                    f"from {raw_hint}"
+                ),
+            )
         except Exception as e:
             logger.error(f"Error reading content: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    @app.get("/api/raw/{path:path}")
+    async def read_raw(path: str, request: Request):
+        """Stream raw file bytes with the correct ``Content-Type``.
+
+        Used by the UI to render images and PDFs that the JSON content
+        endpoint cannot represent. Honours ``If-None-Match`` so the
+        browser can cache aggressively.
+
+        Every response carries ``Content-Security-Policy: sandbox`` so
+        that if a user opens the raw URL directly (or it's linked from
+        outside the UI), executable content like ``.html`` or
+        ``.svg`` runs in an opaque origin without access to the
+        Stash session cookies, ``localStorage``, or the API. Inert
+        contexts (``<img>``, PDF ``<iframe>``) are unaffected — CSP
+        sandbox only kicks in when the response becomes a top-level
+        document.
+        """
+        # Bare ``sandbox`` (no allowances) blocks scripts, forms,
+        # popups, top-level navigation, and forces an opaque origin.
+        # ``nosniff`` keeps browsers from MIME-promoting a stored
+        # ``.txt`` into ``text/html``.
+        raw_security_headers = {
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+        }
+        fs = _fs()
+        try:
+            full_path = fs._resolve_path(path)
+            if not full_path.exists():
+                raise HTTPException(status_code=404, detail="File not found")
+            if not full_path.is_file():
+                raise HTTPException(status_code=400, detail="Path is not a file")
+            etag = _etag(path)
+            quoted = _quoted(etag)
+            if _if_none_match_matches(request.headers.get("if-none-match"), etag):
+                return Response(
+                    status_code=304,
+                    headers={"ETag": quoted, **raw_security_headers},
+                )
+            return FileResponse(
+                full_path,
+                media_type=_get_mime_type(path),
+                headers={"ETag": quoted, **raw_security_headers},
+            )
+        except HTTPException:
+            raise
+        except InvalidPathError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="File not found")
+        except Exception as e:
+            logger.error(f"Error reading raw content: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @app.post("/api/content/{path:path}", status_code=201)

@@ -13,6 +13,12 @@
   --stash-accent: #94e2d5;
   --stash-destructive: #f38ba8;
   --stash-border: #313244;
+  /* Auxiliary text — one step further from the foreground than
+   * ``text-secondary``. Used for badge labels, counts, and metadata
+   * across the spec viewers. Derived from the active theme so it
+   * tracks ``applyTheme()`` swaps (which only touch the explicit
+   * variables above). */
+  --stash-text-muted: color-mix(in srgb, var(--stash-text-secondary) 65%, var(--stash-bg-base));
 }
 
 .dark {

@@ -289,10 +289,18 @@ const GROUPS: ThemeGroup[] = [
   { label: "Dark", mode: "dark", themes: THEMES.filter((t) => t.mode === "dark") },
 ];
 
+/** Custom event dispatched after a theme is applied. Components that
+ * have already-rendered output baked from CSS vars (e.g. mermaid SVGs,
+ * which inline their colors) listen for this and re-render. */
+export const THEME_CHANGE_EVENT = "stash-theme-change";
+
 export function applyTheme(theme: Theme) {
   const root = document.documentElement;
   Object.entries(theme.vars).forEach(([k, v]) => root.style.setProperty(k, v));
   localStorage.setItem("stash-theme", theme.id);
+  window.dispatchEvent(
+    new CustomEvent(THEME_CHANGE_EVENT, { detail: { themeId: theme.id, mode: theme.mode } }),
+  );
 }
 
 /** Tiny mock-UI preview rendered entirely from a theme's raw color vars */

@@ -563,10 +563,10 @@ export function OpenApiViewer({ spec, onEndpointsChange, onActiveEndpointChange 
                 )}
                 <div className="flex items-center gap-2">
                   {apiSpec.info?.version && (
-                    <span 
+                    <span
                       className="px-3 py-1 rounded text-sm font-mono"
-                      style={{ 
-                        backgroundColor: 'rgba(148, 226, 213, 0.2)',
+                      style={{
+                        backgroundColor: 'color-mix(in srgb, var(--stash-accent) 20%, transparent)',
                         color: 'var(--stash-accent)'
                       }}
                     >
