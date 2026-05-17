@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { X, User, Palette, KeyRound, Shield } from "lucide-react";
 import { Me, StoreSummary } from "../../api/auth";
 import { AppearanceSettings } from "./AppearanceSettings";
+import { TokensManager } from "./TokensManager";
 
 interface UserSettingsModalProps {
   isOpen: boolean;
@@ -117,7 +118,7 @@ export function UserSettingsModal({
               <ProfileSettings me={me} stores={stores} />
             )}
             {activeTab === "appearance" && <AppearanceSettings />}
-            {activeTab === "tokens" && <TokensRedirect />}
+            {activeTab === "tokens" && <TokensManager />}
           </div>
         </div>
       </div>
@@ -274,33 +275,3 @@ function ReadOnlyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TokensRedirect() {
-  return (
-    <div>
-      <h3
-        className="text-base font-semibold mb-4"
-        style={{ color: "var(--stash-text-bright)" }}
-      >
-        API Tokens
-      </h3>
-      <p
-        className="text-sm mb-4"
-        style={{ color: "var(--stash-text-secondary)" }}
-      >
-        Manage personal API tokens to access Stash from scripts, agents, or
-        external services.
-      </p>
-      <a
-        href="/ui/account/tokens"
-        className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm transition-all duration-150"
-        style={{
-          backgroundColor: "var(--stash-accent)",
-          color: "var(--stash-bg-base)",
-        }}
-      >
-        <KeyRound className="w-4 h-4" />
-        Open token manager
-      </a>
-    </div>
-  );
-}

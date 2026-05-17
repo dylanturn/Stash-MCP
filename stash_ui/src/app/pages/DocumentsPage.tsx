@@ -556,6 +556,7 @@ export function DocumentsPage() {
                 if (file) handleSelectFile(file);
               }}
               gitInfo={gitInfo ?? undefined}
+              storeName={current?.display_name}
             />
           ) : isContentLoading ? (
             <div

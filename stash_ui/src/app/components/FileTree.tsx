@@ -218,10 +218,6 @@ export function FileTree({ tree, selectedFile, onSelectFile, onClearSelection, o
         }}
       >
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          <ChevronRight
-            className="w-4 h-4 flex-shrink-0"
-            style={{ color: 'var(--stash-text-secondary)' }}
-          />
           {gitInfo ? (
             <GitBranch
               className="w-4 h-4 flex-shrink-0"

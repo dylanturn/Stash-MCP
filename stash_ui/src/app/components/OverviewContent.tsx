@@ -8,6 +8,7 @@ interface OverviewContentProps {
   fileTree: FileNode[];
   onSelectFile: (path: string) => void;
   gitInfo?: GitBranchInfo;
+  storeName?: string;
 }
 
 /** Count total files and folders recursively. */
@@ -56,7 +57,7 @@ function groupByExtension(files: FileNode[]): Record<string, number> {
 // Sub-component: file-stats overview (shown when git tracking is disabled)
 // ---------------------------------------------------------------------------
 
-function FileStatsOverview({ fileTree, onSelectFile }: { fileTree: FileNode[]; onSelectFile: (path: string) => void }) {
+function FileStatsOverview({ fileTree, onSelectFile, storeName }: { fileTree: FileNode[]; onSelectFile: (path: string) => void; storeName?: string }) {
   const { files: totalFiles, folders: totalFolders } = useMemo(
     () => countNodes(fileTree),
     [fileTree]
@@ -80,7 +81,7 @@ function FileStatsOverview({ fileTree, onSelectFile }: { fileTree: FileNode[]; o
           className="text-3xl mb-2"
           style={{ color: 'var(--stash-text-bright)' }}
         >
-          Stash Overview
+          {storeName ? `${storeName} Overview` : 'Stash Overview'}
         </h1>
         <p
           className="text-sm"
@@ -290,7 +291,7 @@ function FileStatsOverview({ fileTree, onSelectFile }: { fileTree: FileNode[]; o
 // Sub-component: git overview (shown when git tracking is enabled)
 // ---------------------------------------------------------------------------
 
-function GitOverview({ gitInfo, onSelectFile }: { gitInfo: GitBranchInfo; onSelectFile: (path: string) => void }) {
+function GitOverview({ gitInfo, onSelectFile, storeName }: { gitInfo: GitBranchInfo; onSelectFile: (path: string) => void; storeName?: string }) {
   const [selectedCommit, setSelectedCommit] = React.useState<{
     changes: GitChange[];
     initialFileId?: string;
@@ -467,7 +468,7 @@ function GitOverview({ gitInfo, onSelectFile }: { gitInfo: GitBranchInfo; onSele
           className="text-3xl mb-2"
           style={{ color: 'var(--stash-text-bright)' }}
         >
-          Stash Overview
+          {storeName ? `${storeName} Overview` : 'Stash Overview'}
         </h1>
         <p
           className="text-sm"
@@ -849,7 +850,7 @@ function GitOverview({ gitInfo, onSelectFile }: { gitInfo: GitBranchInfo; onSele
 // Main export: delegates to the appropriate sub-component
 // ---------------------------------------------------------------------------
 
-export function OverviewContent({ fileTree, onSelectFile, gitInfo }: OverviewContentProps) {
+export function OverviewContent({ fileTree, onSelectFile, gitInfo, storeName }: OverviewContentProps) {
   return (
     <div
       className="h-full overflow-y-auto"
@@ -857,9 +858,9 @@ export function OverviewContent({ fileTree, onSelectFile, gitInfo }: OverviewCon
     >
       <div className="max-w-5xl mx-auto px-8 py-12">
         {gitInfo ? (
-          <GitOverview gitInfo={gitInfo} onSelectFile={onSelectFile} />
+          <GitOverview gitInfo={gitInfo} onSelectFile={onSelectFile} storeName={storeName} />
         ) : (
-          <FileStatsOverview fileTree={fileTree} onSelectFile={onSelectFile} />
+          <FileStatsOverview fileTree={fileTree} onSelectFile={onSelectFile} storeName={storeName} />
         )}
       </div>
     </div>
