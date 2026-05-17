@@ -1,5 +1,12 @@
 import { stashFetch } from './fetch';
 
+export interface TenantMembership {
+  id: string;
+  slug: string;
+  display_name: string;
+  role: 'admin' | 'member';
+}
+
 export interface Me {
   user_id: string;
   oidc_sub: string;
@@ -7,6 +14,7 @@ export interface Me {
   display_name: string;
   auth_method: 'session' | 'oidc' | 'api_token';
   tenant_roles: Record<string, 'admin' | 'member'>;
+  tenants: TenantMembership[];
 }
 
 export interface StoreSummary {
