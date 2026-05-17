@@ -19,6 +19,7 @@ different composite).
 from __future__ import annotations
 
 import logging
+import weakref
 from collections.abc import Sequence
 
 from fastmcp.resources import FunctionResource, Resource
@@ -29,13 +30,66 @@ from pydantic import AnyUrl
 logger = logging.getLogger(__name__)
 
 
+# Active MCP sessions, registered on initialize and used by
+# :func:`broadcast_catalog_changed` to push tools/list_changed +
+# resources/list_changed notifications when an admin edits an
+# MCP-server config. WeakSet so closed sessions deregister on GC.
+_active_sessions: weakref.WeakSet = weakref.WeakSet()
+
+
+async def broadcast_catalog_changed() -> None:
+    """Notify every connected session that the tool/resource catalog
+    has changed.
+
+    Called by admin endpoints after they commit a mutation to an
+    ``McpServer`` row (or its tools / content roots / mounts). Each
+    client's subsequent ``tools/list`` and ``resources/list`` requests
+    flow through :class:`AuthListingMiddleware`, which filters per
+    config — so broadcasting to all sessions is safe (clients whose
+    config didn't change will re-fetch and see the same list).
+
+    Best-effort: failures to notify a single session (closed transport,
+    backpressure) are logged at DEBUG and swallowed so admin requests
+    aren't blocked by a stuck MCP client.
+    """
+    if not _active_sessions:
+        return
+    for sess in list(_active_sessions):
+        try:
+            await sess.send_tool_list_changed()
+            await sess.send_resource_list_changed()
+        except Exception as exc:
+            logger.debug(
+                "Catalog broadcast skipped for one session: %s", exc
+            )
+
+
 class AuthListingMiddleware(Middleware):
     """List-time filter for ``tools/list`` and ``resources/list``.
 
     Runs after the HTTP middleware stack has set ``current_principal``,
     ``current_store`` and (when the token is scoped)
     ``current_mcp_server`` via contextvars.
+
+    Also registers each session in :data:`_active_sessions` on
+    ``initialize`` so admin-side config edits can fan out
+    ``tools/list_changed`` notifications via
+    :func:`broadcast_catalog_changed`.
     """
+
+    async def on_initialize(
+        self,
+        context: MiddlewareContext,
+        call_next,
+    ):
+        result = await call_next(context)
+        try:
+            session = context.fastmcp_context.session
+        except Exception:
+            session = None
+        if session is not None:
+            _active_sessions.add(session)
+        return result
 
     async def on_list_tools(
         self,

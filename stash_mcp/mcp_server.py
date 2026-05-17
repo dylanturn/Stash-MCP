@@ -446,24 +446,42 @@ def create_mcp_server(
 
             @functools.wraps(fn)
             async def _tracked(*args, **kwargs):
-                if Config.AUTH_ENABLED:
-                    _enforce_mcp_server_allowlist(tool_name)
-                    _enforce_tool_scope(tool_name, required_scope)
                 t0 = time.perf_counter()
+                success = False
+                error_type: str | None = None
                 try:
+                    if Config.AUTH_ENABLED:
+                        # Allowlist + scope checks run inside the
+                        # try/finally so their rejections are audited
+                        # too (otherwise blocked-tool attempts leave
+                        # no trail).
+                        _enforce_mcp_server_allowlist(tool_name)
+                        _enforce_tool_scope(tool_name, required_scope)
                     result = await fn(*args, **kwargs)
+                    success = True
                     get_metrics().record_tool_call(
                         tool_name, (time.perf_counter() - t0) * 1000, True
                     )
                     return result
                 except Exception as exc:
+                    error_type = type(exc).__name__
                     get_metrics().record_tool_call(
                         tool_name,
                         (time.perf_counter() - t0) * 1000,
                         False,
-                        type(exc).__name__,
+                        error_type,
                     )
                     raise
+                finally:
+                    if Config.AUTH_ENABLED:
+                        from .mcp_audit import audit_tool_call
+
+                        await audit_tool_call(
+                            tool_name,
+                            (time.perf_counter() - t0) * 1000,
+                            success,
+                            error_type,
+                        )
 
             return orig_decorator(_tracked)
 

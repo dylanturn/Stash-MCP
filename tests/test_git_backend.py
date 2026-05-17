@@ -35,6 +35,19 @@ def _init_repo(path: Path, *, initial_commit: bool = True) -> None:
         check=True,
         capture_output=True,
     )
+    # Override developer/CI global gpgsign defaults so tests don't fail
+    # in environments that have signing configured but no signing
+    # backend available.
+    subprocess.run(
+        ["git", "-C", str(path), "config", "commit.gpgsign", "false"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "tag.gpgsign", "false"],
+        check=True,
+        capture_output=True,
+    )
     if initial_commit:
         (path / "README.md").write_text("# Test\n")
         subprocess.run(
@@ -431,6 +444,15 @@ def _init_bare_repo(path: Path) -> None:
         )
         subprocess.run(
             ["git", "-C", str(work), "config", "user.name", "Test User"],
+            check=True, capture_output=True,
+        )
+        # Override developer/CI global gpgsign defaults.
+        subprocess.run(
+            ["git", "-C", str(work), "config", "commit.gpgsign", "false"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "config", "tag.gpgsign", "false"],
             check=True, capture_output=True,
         )
         (work / "README.md").write_text("# Test Repo\n")

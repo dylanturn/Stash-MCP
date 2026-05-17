@@ -210,28 +210,74 @@ class CompositeFileSystem:
         # legitimately mount the same underlying FS at different
         # subpaths, and a move between those would silently bypass the
         # cross-mount boundary if we only checked FS identity.
-        if src_mount is not dst_mount:
-            # Cross-mount moves are not supported in v1 — they'd need a
-            # copy+delete (atomicity story is fuzzy across stores) and
-            # they cross a boundary the agent's mental model treats as
-            # distinct.
-            raise InvalidPathError(
-                "cross-mount moves are not supported on composite "
-                "filesystems; use create+delete instead"
-            )
-        src_fs.move_file(src_rel, dst_rel)
+        if src_mount is dst_mount:
+            src_fs.move_file(src_rel, dst_rel)
+            return
+        # Cross-mount move: read, write to the destination, then delete
+        # the source. Not atomic — if the write succeeds and the delete
+        # fails, both copies exist; if the write fails, the source is
+        # preserved. Multi-store composites already forbid git/tx tools
+        # (single-mount rename detection isn't available here either),
+        # so the caller knows they're trading atomicity for the move.
+        content = src_fs.read_file(src_rel)
+        dst_fs.write_file(dst_rel, content)
+        try:
+            src_fs.delete_file(src_rel)
+        except Exception:
+            # Best-effort cleanup of the new copy so we don't leave the
+            # file duplicated. Re-raise the original delete error so
+            # callers see why the move didn't complete.
+            try:
+                dst_fs.delete_file(dst_rel)
+            except Exception:
+                pass
+            raise
 
     def move_directory(
         self, source_path: str, dest_path: str
     ) -> list[tuple[str, str]]:
         src_fs, src_rel, src_mount = self._resolve(source_path)
         dst_fs, dst_rel, dst_mount = self._resolve(dest_path)
-        if src_mount is not dst_mount:
+        if src_mount is dst_mount:
+            return src_fs.move_directory(src_rel, dst_rel)
+        # Cross-mount directory move: enumerate, copy each file across,
+        # then delete the originals. Same atomicity caveat as
+        # ``move_file`` — and on partial failure we roll back the
+        # already-written destination files to avoid duplicates.
+        try:
+            src_files = src_fs.list_all_files(src_rel)
+        except (ContentNotFoundError, InvalidPathError) as exc:
             raise InvalidPathError(
-                "cross-mount directory moves are not supported on "
-                "composite filesystems"
-            )
-        return src_fs.move_directory(src_rel, dst_rel)
+                f"source directory not found: {source_path!r}"
+            ) from exc
+        if not src_files:
+            return []
+
+        src_strip = src_rel + "/" if src_rel else ""
+        moves: list[tuple[str, str]] = []
+        written: list[str] = []
+        try:
+            for src_file in src_files:
+                tail = (
+                    src_file[len(src_strip):]
+                    if src_strip and src_file.startswith(src_strip)
+                    else src_file
+                )
+                dst_file = posixpath.join(dst_rel, tail) if dst_rel else tail
+                content = src_fs.read_file(src_file)
+                dst_fs.write_file(dst_file, content)
+                written.append(dst_file)
+                moves.append((src_file, dst_file))
+            for src_file, _ in moves:
+                src_fs.delete_file(src_file)
+        except Exception:
+            for dst_file in written:
+                try:
+                    dst_fs.delete_file(dst_file)
+                except Exception:
+                    pass
+            raise
+        return moves
 
     def create_directory(self, relative_path: str) -> None:
         fs, fs_rel, _m = self._resolve(relative_path)

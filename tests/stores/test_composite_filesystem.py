@@ -174,7 +174,7 @@ def test_write_and_delete_round_trip(two_stores):
     assert not docs_fs.file_exists("engineering/new.md")
 
 
-def test_cross_mount_move_rejected(two_stores):
+def test_cross_mount_move_file_copies_and_deletes(two_stores):
     docs_fs, ops_fs = two_stores
     composite = CompositeFileSystem(
         [
@@ -186,5 +186,54 @@ def test_cross_mount_move_rejected(two_stores):
             ),
         ]
     )
-    with pytest.raises(InvalidPathError):
+    composite.move_file("engineering/intro.md", "ops/intro.md")
+
+    assert not docs_fs.file_exists("engineering/intro.md")
+    assert ops_fs.read_file("runbooks/intro.md") == "engineering content"
+
+
+def test_cross_mount_move_file_rolls_back_on_delete_failure(
+    two_stores, monkeypatch
+):
+    docs_fs, ops_fs = two_stores
+    composite = CompositeFileSystem(
+        [
+            CompositeMount(
+                fs=docs_fs, subpath="engineering", virtual_prefix="engineering"
+            ),
+            CompositeMount(
+                fs=ops_fs, subpath="runbooks", virtual_prefix="ops"
+            ),
+        ]
+    )
+
+    def boom(_path: str) -> None:
+        raise OSError("simulated delete failure")
+
+    monkeypatch.setattr(docs_fs, "delete_file", boom)
+    with pytest.raises(OSError, match="simulated delete failure"):
         composite.move_file("engineering/intro.md", "ops/intro.md")
+
+    # Source preserved (delete failed), destination cleaned up.
+    assert docs_fs.read_file("engineering/intro.md") == "engineering content"
+    assert not ops_fs.file_exists("runbooks/intro.md")
+
+
+def test_cross_mount_move_directory_copies_and_deletes(two_stores):
+    docs_fs, ops_fs = two_stores
+    composite = CompositeFileSystem(
+        [
+            CompositeMount(
+                fs=docs_fs, subpath="engineering", virtual_prefix="engineering"
+            ),
+            CompositeMount(
+                fs=ops_fs, subpath="runbooks", virtual_prefix="ops"
+            ),
+        ]
+    )
+
+    moves = composite.move_directory("engineering/team-a", "ops/team-a")
+
+    assert len(moves) == 1
+    assert not docs_fs.file_exists("engineering/team-a/spec.md")
+    assert ops_fs.read_file("runbooks/team-a/spec.md") == "team-a spec"
