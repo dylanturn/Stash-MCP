@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import mermaid from 'mermaid';
 import { Code, ZoomIn, ZoomOut, RotateCcw, Download } from 'lucide-react';
 import {
@@ -308,8 +308,14 @@ function initializeMermaid() {
 initializeMermaid();
 
 // Controls component that uses the useControls hook
-function DiagramControls({ onDownload }: { onDownload: () => void }) {
-  const { zoomIn, zoomOut, resetTransform } = useControls();
+function DiagramControls({
+  onDownload,
+  onReset,
+}: {
+  onDownload: () => void;
+  onReset: () => void;
+}) {
+  const { zoomIn, zoomOut } = useControls();
 
   return (
     <div
@@ -353,7 +359,7 @@ function DiagramControls({ onDownload }: { onDownload: () => void }) {
         <ZoomOut className="w-4 h-4" />
       </button>
       <button
-        onClick={() => resetTransform()}
+        onClick={onReset}
         className="p-1.5 rounded transition-colors duration-150"
         style={{ color: 'var(--stash-text-secondary)' }}
         onMouseEnter={(e) => {
@@ -414,42 +420,41 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
     return () => window.removeEventListener(THEME_CHANGE_EVENT, handler);
   }, []);
 
-  // Fit-on-load: measure the rendered SVG against the viewport and
-  // pick an initial zoom so small diagrams stay at 1:1 (don't blow up
-  // to fill 500px of vertical space) while large diagrams scale down
-  // to fit. Runs after every re-render of the SVG markup, including
-  // theme swaps and ``showSource`` toggles. The user's manual
-  // zoom/pan resets when the SVG itself changes — re-fitting is the
-  // intended behaviour, otherwise stale transforms would point at
-  // empty space.
+  // Measure the rendered SVG against the viewport and pick a zoom
+  // that fits with a little breathing room. Capped at 1.0 so a small
+  // 2-node flowchart doesn't blow up to fill 500px of vertical space
+  // with 80px text.
+  const fitToViewport = useCallback(() => {
+    const api = transformApiRef.current;
+    const viewport = viewportRef.current;
+    const svgEl = containerRef.current?.querySelector('svg');
+    if (!api || !viewport || !svgEl) return;
+    const vb = svgEl.viewBox?.baseVal;
+    const naturalW = vb && vb.width
+      ? vb.width
+      : svgEl.getBoundingClientRect().width;
+    const naturalH = vb && vb.height
+      ? vb.height
+      : svgEl.getBoundingClientRect().height;
+    if (!naturalW || !naturalH) return;
+    const fit = Math.min(
+      viewport.offsetWidth / naturalW,
+      viewport.offsetHeight / naturalH,
+      1,
+    );
+    const scale = Math.max(fit * 0.95, 0.1);
+    api.centerView(scale, 0);
+  }, []);
+
+  // Fit on every re-render of the SVG markup (initial mount, theme
+  // swap, source toggle). The user's manual zoom/pan resets here on
+  // purpose — stale transforms would point at empty space after a
+  // re-render.
   useEffect(() => {
     if (!svg) return;
-    const raf = requestAnimationFrame(() => {
-      const api = transformApiRef.current;
-      const viewport = viewportRef.current;
-      const svgEl = containerRef.current?.querySelector('svg');
-      if (!api || !viewport || !svgEl) return;
-      const vb = svgEl.viewBox?.baseVal;
-      const naturalW = vb && vb.width
-        ? vb.width
-        : svgEl.getBoundingClientRect().width;
-      const naturalH = vb && vb.height
-        ? vb.height
-        : svgEl.getBoundingClientRect().height;
-      if (!naturalW || !naturalH) return;
-      // 0.95 leaves a little breathing room around the diagram so it
-      // doesn't kiss the viewport edges. Capped at 1.0 so a 2-node
-      // flowchart doesn't render with 80px text.
-      const fit = Math.min(
-        viewport.offsetWidth / naturalW,
-        viewport.offsetHeight / naturalH,
-        1,
-      );
-      const scale = Math.max(fit * 0.95, 0.1);
-      api.centerView(scale, 0);
-    });
+    const raf = requestAnimationFrame(fitToViewport);
     return () => cancelAnimationFrame(raf);
-  }, [svg]);
+  }, [svg, fitToViewport]);
 
   const handleDownload = () => {
     const svgData = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
@@ -663,7 +668,7 @@ export function MermaidDiagram({ chart, className = '' }: MermaidDiagramProps) {
         >
           {() => (
             <>
-              <DiagramControls onDownload={handleDownload} />
+              <DiagramControls onDownload={handleDownload} onReset={fitToViewport} />
               <TransformComponent
                 wrapperStyle={{
                   width: '100%',
