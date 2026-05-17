@@ -1,14 +1,15 @@
 import React, { useState } from "react";
-import { X, Building2, Database, Shield } from "lucide-react";
+import { X, Building2, Database, Server, Shield } from "lucide-react";
 import { useStore } from "../StoreContext";
 import { StoreSummary } from "../../api/auth";
+import { McpServersTab } from "./McpServersTab";
 
 interface OrganizationSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type SettingsTab = "general" | "stores";
+type SettingsTab = "general" | "mcp-servers" | "stores";
 
 export function OrganizationSettingsModal({
   isOpen,
@@ -31,6 +32,11 @@ export function OrganizationSettingsModal({
       id: "general" as SettingsTab,
       label: "General",
       icon: Building2,
+    },
+    {
+      id: "mcp-servers" as SettingsTab,
+      label: "MCP Servers",
+      icon: Server,
     },
     {
       id: "stores" as SettingsTab,
@@ -126,6 +132,9 @@ export function OrganizationSettingsModal({
           <div className="flex-1 overflow-y-auto p-6">
             {activeTab === "general" && (
               <GeneralSettings current={current} storeCount={tenantStores.length} />
+            )}
+            {activeTab === "mcp-servers" && (
+              <McpServersTab current={current} tenantStores={tenantStores} />
             )}
             {activeTab === "stores" && (
               <StoresList current={current} stores={tenantStores} />

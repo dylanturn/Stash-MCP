@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
   ApiToken,
@@ -7,11 +7,16 @@ import {
   listTokens,
   revokeToken,
 } from '../../api/auth';
+import {
+  VisibleMcpServer,
+  listVisibleMcpServers,
+} from '../../api/mcpServers';
 
 const ALL_SCOPES = ['read', 'write'] as const;
 
 export function TokensManager() {
   const [tokens, setTokens] = useState<ApiToken[]>([]);
+  const [visibleServers, setVisibleServers] = useState<VisibleMcpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [issued, setIssued] = useState<IssuedToken | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -28,9 +33,20 @@ export function TokensManager() {
 
   const refresh = useCallback(async () => {
     try {
-      const data = await listTokens(false);
+      // /auth/visible-mcp-servers is best-effort: it's new (spec 03) and
+      // a deployment that hasn't picked up the migration shouldn't break
+      // the tokens tab. Fall back to an empty list — the form just
+      // hides the picker.
+      const [data, vms] = await Promise.all([
+        listTokens(false),
+        listVisibleMcpServers().catch((err) => {
+          console.warn('listVisibleMcpServers failed:', err);
+          return [] as VisibleMcpServer[];
+        }),
+      ]);
       if (!mountedRef.current) return;
       setTokens(data);
+      setVisibleServers(vms);
     } catch (err) {
       if (!mountedRef.current) return;
       console.error(err);
@@ -97,6 +113,7 @@ export function TokensManager() {
 
       {showCreate && (
         <CreateTokenForm
+          visibleServers={visibleServers}
           onCancel={() => setShowCreate(false)}
           onCreated={(t) => {
             setIssued(t);
@@ -159,7 +176,12 @@ export function TokensManager() {
                     className="px-3 py-2 align-middle"
                     style={{ color: 'var(--stash-text-bright)' }}
                   >
-                    {t.name}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span>{t.name}</span>
+                      {t.mcp_server && (
+                        <McpServerChip server={t.mcp_server} />
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-2 align-middle">
                     {t.scopes.join(', ')}
@@ -203,6 +225,26 @@ export function TokensManager() {
   );
 }
 
+function McpServerChip({
+  server,
+}: {
+  server: { tenant_slug: string; slug: string; name: string };
+}) {
+  return (
+    <span
+      className="inline-block text-xs px-2 py-0.5 rounded font-mono"
+      title={server.name}
+      style={{
+        backgroundColor: 'var(--stash-bg-base)',
+        color: 'var(--stash-text-secondary)',
+        border: '1px solid var(--stash-border)',
+      }}
+    >
+      {server.tenant_slug} / {server.slug}
+    </span>
+  );
+}
+
 function formatDate(s: string | null): string {
   if (!s) return '—';
   try {
@@ -216,9 +258,11 @@ function formatDate(s: string | null): string {
 }
 
 function CreateTokenForm({
+  visibleServers,
   onCancel,
   onCreated,
 }: {
+  visibleServers: VisibleMcpServer[];
   onCancel: () => void;
   onCreated: (t: IssuedToken) => void;
 }) {
@@ -228,7 +272,23 @@ function CreateTokenForm({
     write: true,
   });
   const [expiresInDays, setExpiresInDays] = useState<number | ''>(90);
+  // `''` = unscoped (legacy behaviour). Anything else is an MCP-server
+  // config id.
+  const [mcpServerId, setMcpServerId] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
+
+  // Group the visible servers by tenant_slug for an <optgroup> dropdown.
+  const groupedServers = useMemo(() => {
+    const groups = new Map<string, VisibleMcpServer[]>();
+    for (const s of visibleServers) {
+      const arr = groups.get(s.tenant_slug) ?? [];
+      arr.push(s);
+      groups.set(s.tenant_slug, arr);
+    }
+    return Array.from(groups.entries()).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
+  }, [visibleServers]);
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -248,7 +308,8 @@ function CreateTokenForm({
       const issued = await createToken(
         name.trim(),
         selectedScopes,
-        expiresInDays === '' ? null : Number(expiresInDays)
+        expiresInDays === '' ? null : Number(expiresInDays),
+        mcpServerId === '' ? null : mcpServerId
       );
       if (!mountedRef.current) return;
       onCreated(issued);
@@ -313,6 +374,41 @@ function CreateTokenForm({
           ))}
         </div>
       </div>
+
+      {visibleServers.length > 0 && (
+        <div>
+          <label
+            className="block text-sm mb-2"
+            style={{ color: 'var(--stash-text-primary)' }}
+          >
+            MCP server{' '}
+            <span style={{ color: 'var(--stash-text-secondary)' }}>
+              — leave unscoped for legacy URL-based routing
+            </span>
+          </label>
+          <select
+            value={mcpServerId}
+            onChange={(e) => setMcpServerId(e.target.value)}
+            className="px-3 py-2 rounded-md text-sm outline-none w-full"
+            style={{
+              backgroundColor: 'var(--stash-bg-surface)',
+              color: 'var(--stash-text-primary)',
+              border: '1px solid var(--stash-border)',
+            }}
+          >
+            <option value="">Any (unscoped, legacy)</option>
+            {groupedServers.map(([tenantSlug, servers]) => (
+              <optgroup key={tenantSlug} label={tenantSlug}>
+                {servers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.slug} — {s.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </div>
+      )}
 
       <div>
         <label
