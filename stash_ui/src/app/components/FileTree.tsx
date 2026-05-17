@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { FileNode } from '../types';
-import { ChevronRight, ChevronDown, FileText, Folder, FolderOpen, Search, Plus, GitBranch } from 'lucide-react';
+import { ChevronRight, ChevronDown, FileText, Folder, FolderOpen, Search, Plus, GitBranch, LayoutDashboard } from 'lucide-react';
 import { UserBadge } from './UserBadge';
+import { StorePicker } from './StorePicker';
 import { GitBranchInfo } from '../mockData/gitChanges';
 
 interface FileTreeProps {
@@ -145,6 +146,7 @@ export function FileTree({ tree, selectedFile, onSelectFile, onClearSelection, o
     <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--stash-bg-surface)' }}>
       {/* Header */}
       <div className="p-4 border-b" style={{ borderColor: 'var(--stash-border)' }}>
+        <StorePicker className="w-full mb-3" />
         <button
           onClick={onNewDocument}
           className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-md transition-all duration-150 mb-3"
@@ -192,57 +194,64 @@ export function FileTree({ tree, selectedFile, onSelectFile, onClearSelection, o
         </div>
       </div>
 
-      {/* Branch/Activity Button */}
-      {gitInfo && (
-        <button
-          onClick={() => {
-            if (onClearSelection) {
-              onClearSelection();
-            }
-          }}
-          className="flex items-center justify-between px-3 py-2.5 border-b transition-colors duration-150"
-          style={{ 
-            borderColor: 'var(--stash-border)',
-            backgroundColor: !selectedFile ? 'var(--stash-bg-hover)' : 'transparent'
-          }}
-          onMouseEnter={(e) => {
-            if (selectedFile) {
-              e.currentTarget.style.backgroundColor = 'var(--stash-bg-hover)';
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (selectedFile) {
-              e.currentTarget.style.backgroundColor = 'transparent';
-            }
-          }}
-        >
-          <div className="flex items-center gap-2 flex-1 min-w-0">
-            <ChevronRight 
-              className="w-4 h-4 flex-shrink-0" 
-              style={{ color: 'var(--stash-text-secondary)' }} 
+      {/* Overview Button */}
+      <button
+        onClick={() => {
+          if (onClearSelection) {
+            onClearSelection();
+          }
+        }}
+        className="flex items-center justify-between px-3 py-2.5 border-b transition-colors duration-150"
+        style={{
+          borderColor: 'var(--stash-border)',
+          backgroundColor: !selectedFile ? 'var(--stash-bg-hover)' : 'transparent'
+        }}
+        onMouseEnter={(e) => {
+          if (selectedFile) {
+            e.currentTarget.style.backgroundColor = 'var(--stash-bg-hover)';
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (selectedFile) {
+            e.currentTarget.style.backgroundColor = 'transparent';
+          }
+        }}
+      >
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <ChevronRight
+            className="w-4 h-4 flex-shrink-0"
+            style={{ color: 'var(--stash-text-secondary)' }}
+          />
+          {gitInfo ? (
+            <GitBranch
+              className="w-4 h-4 flex-shrink-0"
+              style={{ color: 'var(--stash-accent)' }}
             />
-            <GitBranch 
-              className="w-4 h-4 flex-shrink-0" 
-              style={{ color: 'var(--stash-accent)' }} 
+          ) : (
+            <LayoutDashboard
+              className="w-4 h-4 flex-shrink-0"
+              style={{ color: 'var(--stash-text-secondary)' }}
             />
-            <span 
-              className="text-sm truncate"
-              style={{ color: 'var(--stash-text-primary)' }}
-            >
-              Overview
-            </span>
-          </div>
-          <div 
+          )}
+          <span
+            className="text-sm truncate"
+            style={{ color: 'var(--stash-text-primary)' }}
+          >
+            Overview
+          </span>
+        </div>
+        {gitInfo && (
+          <div
             className="flex items-center justify-center w-5 h-5 text-xs rounded flex-shrink-0"
-            style={{ 
+            style={{
               backgroundColor: 'var(--stash-bg-base)',
-              color: 'var(--stash-accent)' 
+              color: 'var(--stash-accent)'
             }}
           >
             {gitInfo.changes.length}
           </div>
-        </button>
-      )}
+        )}
+      </button>
 
       {/* File Tree */}
       <div className="flex-1 overflow-y-auto">
