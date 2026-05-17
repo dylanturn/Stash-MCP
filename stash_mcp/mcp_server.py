@@ -412,6 +412,17 @@ def create_mcp_server(
         lifespan=lifespan,
     )
 
+    # In auth mode, attach a list-time middleware that filters
+    # tools/list (per-config allowlist + multi-store git/tx gate) and
+    # augments resources/list with README.md files from the active
+    # composite filesystem. The legacy URL-based flow doesn't need it
+    # — the static enumeration above already covers a single store, and
+    # unscoped requests intentionally see the full catalog.
+    if _auth_mode:
+        from .mcp_listing import AuthListingMiddleware
+
+        mcp.add_middleware(AuthListingMiddleware())
+
     # Wrap mcp.tool() so every registered tool is automatically timed and
     # its outcome recorded in the metrics collector.  Using functools.wraps
     # preserves the original signature so FastMCP generates the correct schema.
