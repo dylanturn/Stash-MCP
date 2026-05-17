@@ -3,7 +3,7 @@ import { useStore } from '../StoreContext';
 
 // Minimal grouping: stores sort by (tenant_slug, slug) on the server, so
 // we just walk the list and inject a label whenever the tenant changes.
-export function StorePicker() {
+export function StorePicker({ className }: { className?: string }) {
   const { stores, current, setCurrent } = useStore();
   if (stores.length === 0) return null;
 
@@ -14,7 +14,7 @@ export function StorePicker() {
         const [t, s] = e.target.value.split('/');
         if (t && s) setCurrent(t, s);
       }}
-      className="px-2 py-1.5 rounded border text-sm"
+      className={`px-2 py-1.5 rounded border text-sm ${className ?? ''}`}
       style={{
         backgroundColor: 'var(--stash-bg-surface)',
         borderColor: 'var(--stash-border)',

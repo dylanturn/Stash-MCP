@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FileNode } from '../types';
 import { ChevronRight, ChevronDown, FileText, Folder, FolderOpen, Search, Plus, GitBranch, LayoutDashboard } from 'lucide-react';
 import { UserBadge } from './UserBadge';
+import { StorePicker } from './StorePicker';
 import { GitBranchInfo } from '../mockData/gitChanges';
 
 interface FileTreeProps {
@@ -145,6 +146,7 @@ export function FileTree({ tree, selectedFile, onSelectFile, onClearSelection, o
     <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--stash-bg-surface)' }}>
       {/* Header */}
       <div className="p-4 border-b" style={{ borderColor: 'var(--stash-border)' }}>
+        <StorePicker className="w-full mb-3" />
         <button
           onClick={onNewDocument}
           className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-md transition-all duration-150 mb-3"

@@ -3,7 +3,6 @@ import { Navigate } from 'react-router';
 import { FileNode, apiTreeToFileNodes } from '../types';
 import { ConcurrentEditError } from '../../api/fetch';
 import { useStore } from '../StoreContext';
-import { StorePicker } from '../components/StorePicker';
 import { FileTree } from '../components/FileTree';
 import { DocumentViewer } from '../components/DocumentViewer';
 import { DirectoryListing } from '../components/DirectoryListing';
@@ -459,29 +458,6 @@ export function DocumentsPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <StorePicker />
-          <a
-            href="/ui/account/tokens"
-            className="px-3 py-1.5 rounded border text-sm"
-            style={{
-              borderColor: 'var(--stash-border)',
-              color: 'var(--stash-text-secondary)',
-            }}
-            title="Manage API tokens"
-          >
-            Tokens
-          </a>
-          <a
-            href="/auth/logout"
-            className="px-3 py-1.5 rounded border text-sm"
-            style={{
-              borderColor: 'var(--stash-border)',
-              color: 'var(--stash-text-secondary)',
-            }}
-            title="Sign out"
-          >
-            Sign out
-          </a>
           <button
             onClick={() => setIsLeftPanelOpen(!isLeftPanelOpen)}
             className="p-2 rounded transition-all duration-150"
