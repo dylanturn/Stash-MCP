@@ -192,9 +192,41 @@ def test_cross_mount_move_file_copies_and_deletes(two_stores):
     assert ops_fs.read_file("runbooks/intro.md") == "engineering content"
 
 
-def test_cross_mount_move_file_rolls_back_on_delete_failure(
+def test_cross_mount_move_file_rolls_back_on_write_failure(
     two_stores, monkeypatch
 ):
+    """Phase-1 (write) failure must leave the source intact and clean
+    up the partial destination."""
+    docs_fs, ops_fs = two_stores
+    composite = CompositeFileSystem(
+        [
+            CompositeMount(
+                fs=docs_fs, subpath="engineering", virtual_prefix="engineering"
+            ),
+            CompositeMount(
+                fs=ops_fs, subpath="runbooks", virtual_prefix="ops"
+            ),
+        ]
+    )
+
+    def boom(_path: str, _content: str) -> None:
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(ops_fs, "write_file", boom)
+    with pytest.raises(OSError, match="simulated write failure"):
+        composite.move_file("engineering/intro.md", "ops/intro.md")
+
+    assert docs_fs.read_file("engineering/intro.md") == "engineering content"
+    assert not ops_fs.file_exists("runbooks/intro.md")
+
+
+def test_cross_mount_move_file_preserves_destination_on_delete_failure(
+    two_stores, monkeypatch
+):
+    """Phase-2 (delete) failure must NOT roll back the destination —
+    that would risk losing data if the delete had partially
+    succeeded. The destination is the canonical copy going forward;
+    the leftover source is the caller's problem to clean up."""
     docs_fs, ops_fs = two_stores
     composite = CompositeFileSystem(
         [
@@ -214,9 +246,33 @@ def test_cross_mount_move_file_rolls_back_on_delete_failure(
     with pytest.raises(OSError, match="simulated delete failure"):
         composite.move_file("engineering/intro.md", "ops/intro.md")
 
-    # Source preserved (delete failed), destination cleaned up.
+    # Both copies exist after the failed delete — no data loss.
     assert docs_fs.read_file("engineering/intro.md") == "engineering content"
-    assert not ops_fs.file_exists("runbooks/intro.md")
+    assert ops_fs.read_file("runbooks/intro.md") == "engineering content"
+
+
+def test_cross_mount_move_file_refuses_existing_destination(two_stores):
+    docs_fs, ops_fs = two_stores
+    composite = CompositeFileSystem(
+        [
+            CompositeMount(
+                fs=docs_fs, subpath="engineering", virtual_prefix="engineering"
+            ),
+            CompositeMount(
+                fs=ops_fs, subpath="runbooks", virtual_prefix="ops"
+            ),
+        ]
+    )
+    ops_fs.write_file("runbooks/intro.md", "existing")
+
+    from stash_mcp.filesystem import FileSystemError
+
+    with pytest.raises(FileSystemError, match="already exists"):
+        composite.move_file("engineering/intro.md", "ops/intro.md")
+
+    # Source and (pre-existing) destination both untouched.
+    assert docs_fs.read_file("engineering/intro.md") == "engineering content"
+    assert ops_fs.read_file("runbooks/intro.md") == "existing"
 
 
 def test_cross_mount_move_directory_copies_and_deletes(two_stores):
@@ -237,3 +293,23 @@ def test_cross_mount_move_directory_copies_and_deletes(two_stores):
     assert len(moves) == 1
     assert not docs_fs.file_exists("engineering/team-a/spec.md")
     assert ops_fs.read_file("runbooks/team-a/spec.md") == "team-a spec"
+
+
+def test_cross_mount_move_directory_raises_on_missing_source(two_stores):
+    """A typo'd source path used to silently no-op (list_all_files
+    returns [] for missing paths). Now it raises so the agent learns."""
+    docs_fs, ops_fs = two_stores
+    composite = CompositeFileSystem(
+        [
+            CompositeMount(
+                fs=docs_fs, subpath="engineering", virtual_prefix="engineering"
+            ),
+            CompositeMount(
+                fs=ops_fs, subpath="runbooks", virtual_prefix="ops"
+            ),
+        ]
+    )
+    from stash_mcp.filesystem import FileNotFoundError as ContentNotFoundError
+
+    with pytest.raises(ContentNotFoundError):
+        composite.move_directory("engineering/does-not-exist", "ops/x")

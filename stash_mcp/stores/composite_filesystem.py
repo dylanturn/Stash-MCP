@@ -24,6 +24,7 @@ from ..filesystem import (
     FileNotFoundError as ContentNotFoundError,
 )
 from ..filesystem import (
+    FileSystemError,
     InvalidPathError,
 )
 
@@ -213,25 +214,33 @@ class CompositeFileSystem:
         if src_mount is dst_mount:
             src_fs.move_file(src_rel, dst_rel)
             return
-        # Cross-mount move: read, write to the destination, then delete
-        # the source. Not atomic — if the write succeeds and the delete
-        # fails, both copies exist; if the write fails, the source is
-        # preserved. Multi-store composites already forbid git/tx tools
-        # (single-mount rename detection isn't available here either),
-        # so the caller knows they're trading atomicity for the move.
+        # Cross-mount move is two phases:
+        #   1. Copy source → destination. On failure: source intact,
+        #      partial destination rolled back. No data loss.
+        #   2. Delete source. On failure: BOTH copies preserved (the
+        #      destination is the canonical one going forward, the
+        #      stale source is a duplicate the caller can clean up).
+        #      We never roll back a successful destination write when
+        #      the delete fails — doing so would risk losing the data
+        #      entirely if the delete had partially succeeded.
+        if dst_fs.file_exists(dst_rel):
+            # Mirror FileSystem.move_file's refusal to overwrite.
+            raise FileSystemError(
+                f"Destination '{dest_path}' already exists"
+            )
         content = src_fs.read_file(src_rel)
-        dst_fs.write_file(dst_rel, content)
         try:
-            src_fs.delete_file(src_rel)
+            dst_fs.write_file(dst_rel, content)
         except Exception:
-            # Best-effort cleanup of the new copy so we don't leave the
-            # file duplicated. Re-raise the original delete error so
-            # callers see why the move didn't complete.
+            # Phase 1 failure — destination is at most partially
+            # written, source is intact. No rollback needed beyond
+            # cleaning up the partial write (best-effort).
             try:
                 dst_fs.delete_file(dst_rel)
             except Exception:
                 pass
             raise
+        src_fs.delete_file(src_rel)
 
     def move_directory(
         self, source_path: str, dest_path: str
@@ -241,19 +250,28 @@ class CompositeFileSystem:
         if src_mount is dst_mount:
             return src_fs.move_directory(src_rel, dst_rel)
         # Cross-mount directory move: enumerate, copy each file across,
-        # then delete the originals. Same atomicity caveat as
-        # ``move_file`` — and on partial failure we roll back the
-        # already-written destination files to avoid duplicates.
-        try:
-            src_files = src_fs.list_all_files(src_rel)
-        except (ContentNotFoundError, InvalidPathError) as exc:
+        # then delete the originals. ``list_all_files`` returns []
+        # both for empty directories and for missing paths, so check
+        # existence explicitly to avoid silently no-op'ing a typo.
+        src_full = src_fs._resolve_path(src_rel)
+        if not src_full.exists():
+            raise ContentNotFoundError(
+                f"Directory '{source_path}' not found"
+            )
+        if not src_full.is_dir():
             raise InvalidPathError(
-                f"source directory not found: {source_path!r}"
-            ) from exc
+                f"Path '{source_path}' is not a directory"
+            )
+        src_files = src_fs.list_all_files(src_rel)
         if not src_files:
+            # Empty directory: nothing to move across. Git doesn't
+            # track empty dirs anyway, so the no-op matches what a
+            # same-mount move + git commit would record.
             return []
 
         src_strip = src_rel + "/" if src_rel else ""
+        # Phase 1: copy every file. If any write fails, roll back
+        # destination writes (source untouched) and re-raise.
         moves: list[tuple[str, str]] = []
         written: list[str] = []
         try:
@@ -264,12 +282,14 @@ class CompositeFileSystem:
                     else src_file
                 )
                 dst_file = posixpath.join(dst_rel, tail) if dst_rel else tail
+                if dst_fs.file_exists(dst_file):
+                    raise FileSystemError(
+                        f"Destination '{dst_file}' already exists"
+                    )
                 content = src_fs.read_file(src_file)
                 dst_fs.write_file(dst_file, content)
                 written.append(dst_file)
                 moves.append((src_file, dst_file))
-            for src_file, _ in moves:
-                src_fs.delete_file(src_file)
         except Exception:
             for dst_file in written:
                 try:
@@ -277,6 +297,14 @@ class CompositeFileSystem:
                 except Exception:
                     pass
             raise
+        # Phase 2: delete source files. If a delete fails partway
+        # through, we keep the destination intact (the data is safe
+        # there) and re-raise so the caller knows some sources are
+        # still around. This intentionally avoids the rollback-on-
+        # delete strategy: rolling back would delete destination
+        # copies of files whose sources were already removed.
+        for src_file, _ in moves:
+            src_fs.delete_file(src_file)
         return moves
 
     def create_directory(self, relative_path: str) -> None:
