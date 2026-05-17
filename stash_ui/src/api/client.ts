@@ -16,6 +16,18 @@ export async function getTree(tenant: string, store: string) {
   return res.json();
 }
 
+/** Absolute URL for the raw bytes of a content file. Used by the UI to
+ * render images, PDFs, and HTML artifacts directly via ``<img>``,
+ * ``<iframe>``, etc. — the JSON content endpoint can't represent
+ * non-UTF-8 bytes. */
+export function rawUrl(tenant: string, store: string, path: string): string {
+  const cleaned = path.replace(/^\/+/, '');
+  return `${apiBase(tenant, store)}/raw/${cleaned
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')}`;
+}
+
 export async function listContent(
   tenant: string,
   store: string,
@@ -154,6 +166,7 @@ export interface ApiClient {
   deleteContent: (path: string) => Promise<any>;
   moveContent: (path: string, destination: string) => Promise<any>;
   getGitOverview: () => Promise<any | null>;
+  rawUrl: (path: string) => string;
 }
 
 export function createApiClient(tenant: string, store: string): ApiClient {
@@ -170,5 +183,6 @@ export function createApiClient(tenant: string, store: string): ApiClient {
     moveContent: (path, destination) =>
       moveContent(tenant, store, path, destination),
     getGitOverview: () => getGitOverview(tenant, store),
+    rawUrl: (path) => rawUrl(tenant, store, path),
   };
 }

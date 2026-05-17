@@ -370,3 +370,61 @@ def test_event_emitted_on_patch_move(test_client, event_listener):
     assert args[0] == "content_moved"
     assert args[1] == "moved.md"
     assert kwargs.get("source_path") == "test.md"
+
+
+# --- Raw bytes endpoint tests ---
+
+
+# 1x1 transparent PNG.
+_PNG_BYTES = bytes.fromhex(
+    "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C489"
+    "0000000D49444154789C636000000000050001E221BC330000000049454E44AE426082"
+)
+
+
+def test_raw_endpoint_streams_image_bytes():
+    """The raw endpoint returns binary file contents with the right
+    Content-Type, leaving them untouched by UTF-8 decoding."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/raw/logo.png")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("image/png")
+        assert response.content == _PNG_BYTES
+        assert response.headers.get("etag") is not None
+
+
+def test_raw_endpoint_404_on_missing():
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        client = TestClient(create_api(fs))
+        response = client.get("/api/raw/missing.png")
+        assert response.status_code == 404
+
+
+def test_content_endpoint_415_for_binary():
+    """GET /api/content/{path} surfaces 415 for known-binary types so
+    callers know to use the raw endpoint instead."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/content/logo.png")
+        assert response.status_code == 415
+        assert "raw" in response.json()["detail"]
+
+
+def test_raw_endpoint_304_on_if_none_match():
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
+        client = TestClient(create_api(fs))
+
+        first = client.get("/api/raw/logo.png")
+        etag = first.headers["etag"]
+        cached = client.get("/api/raw/logo.png", headers={"If-None-Match": etag})
+        assert cached.status_code == 304

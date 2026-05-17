@@ -5,6 +5,7 @@ import { ConcurrentEditError } from '../../api/fetch';
 import { useStore } from '../StoreContext';
 import { FileTree } from '../components/FileTree';
 import { DocumentViewer } from '../components/DocumentViewer';
+import { classifyBinary } from '../components/BinaryFileViewer';
 import { DirectoryListing } from '../components/DirectoryListing';
 import { MetadataPanel } from '../components/MetadataPanel';
 import { OverviewContent } from '../components/OverviewContent';
@@ -134,6 +135,18 @@ export function DocumentsPage() {
       setSelectedEtag(file.etag);
       // Same reason as the folder branch — clear in case an earlier
       // uncached load set the spinner and is now invalidated.
+      setIsContentLoading(false);
+      return;
+    }
+
+    // Images and PDFs are streamed by the raw-bytes endpoint and don't
+    // need text content — skip the JSON fetch so we don't 415. HTML
+    // still goes through getContent so it can be previewed and edited.
+    const binaryKind = classifyBinary(file.extension);
+    if (binaryKind === 'image' || binaryKind === 'pdf') {
+      latestSelectionRef.current += 1;
+      setSelectedFile({ ...file, content: '' });
+      setSelectedEtag(null);
       setIsContentLoading(false);
       return;
     }
@@ -599,6 +612,7 @@ export function DocumentsPage() {
               onSectionsChange={setSections}
               onActiveSectionChange={setActiveSectionId}
               onSectionsTitleChange={setSectionsTitle}
+              rawUrl={client ? (path) => client.rawUrl(path) : undefined}
             />
           )}
         </Panel>

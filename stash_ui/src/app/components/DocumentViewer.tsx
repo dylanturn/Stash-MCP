@@ -15,6 +15,7 @@ import { AsyncApiViewer } from './AsyncApiViewer';
 import { DesignTokensViewer } from './DesignTokensViewer';
 import { ComponentContractViewer } from './ComponentContractViewer';
 import { ArazzoViewer } from './ArazzoViewer';
+import { BinaryFileViewer, classifyBinary } from './BinaryFileViewer';
 
 interface DocumentViewerProps {
   file: FileNode | null;
@@ -27,6 +28,10 @@ interface DocumentViewerProps {
   onSectionsChange?: (sections: Section[]) => void;
   onActiveSectionChange?: (id: string | null) => void;
   onSectionsTitleChange?: (title: string) => void;
+  /** Returns a URL the browser can fetch the raw bytes of a content
+   * file from. Used to render images and PDFs that can't go through
+   * the JSON content endpoint. */
+  rawUrl?: (path: string) => string;
 }
 
 /** Check whether an href points to an external URL. */
@@ -69,7 +74,8 @@ export function DocumentViewer({
   onActiveEndpointChange,
   onSectionsChange,
   onActiveSectionChange,
-  onSectionsTitleChange
+  onSectionsTitleChange,
+  rawUrl,
 }: DocumentViewerProps) {
   const [mode, setMode] = useState<'view' | 'edit'>('view');
   const [editContent, setEditContent] = useState('');
@@ -327,6 +333,63 @@ export function DocumentViewer({
   const isDesignTokens = isDesignTokensSpec();
   const isComponentContract = isComponentContractSpec();
   const isArazzo = isArazzoSpec();
+  const binaryKind = classifyBinary(file.extension);
+
+  // Images and PDFs can't round-trip through the JSON content endpoint,
+  // so view mode renders them directly from the raw bytes URL. HTML
+  // artifacts render in a sandboxed iframe but keep their text content
+  // editable.
+  const isEditable = binaryKind === 'html';
+  if (binaryKind !== null && (mode === 'view' || !isEditable)) {
+    return (
+      <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--stash-bg-base)' }}>
+        <div className="flex items-center border-b" style={{ borderColor: 'var(--stash-border)' }}>
+          <button
+            onClick={() => setMode('view')}
+            className="flex items-center gap-2 px-6 py-3 transition-all duration-150 relative"
+            style={{
+              color: 'var(--stash-text-bright)',
+              borderBottom: '2px solid var(--stash-accent)',
+            }}
+          >
+            <Eye className="w-4 h-4" />
+            <span className="text-sm">
+              {binaryKind === 'image' ? 'Image'
+                : binaryKind === 'pdf' ? 'PDF'
+                : 'HTML Preview'}
+            </span>
+          </button>
+          {isEditable && (
+            <button
+              onClick={() => setMode('edit')}
+              className="flex items-center gap-2 px-6 py-3 transition-all duration-150 relative"
+              style={{
+                color: 'var(--stash-text-secondary)',
+                borderBottom: '2px solid transparent',
+              }}
+            >
+              <Edit className="w-4 h-4" />
+              <span className="text-sm">Edit</span>
+              {hasChanges && (
+                <div
+                  className="w-2 h-2 rounded-full"
+                  style={{ backgroundColor: 'var(--stash-accent)' }}
+                />
+              )}
+            </button>
+          )}
+        </div>
+        <div className="flex-1 overflow-hidden">
+          <BinaryFileViewer
+            kind={binaryKind}
+            rawUrl={rawUrl ? rawUrl(file.path) : ''}
+            htmlContent={file.content || ''}
+            fileName={file.name}
+          />
+        </div>
+      </div>
+    );
+  }
 
   // If it's an AsyncAPI spec, render with AsyncApiViewer
   if (isAsyncApi && mode === 'view') {

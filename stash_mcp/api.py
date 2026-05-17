@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .config import Config
@@ -18,7 +19,7 @@ from .filesystem import (
     FileSystemError,
     InvalidPathError,
 )
-from .mcp_server import MIME_TYPES
+from .mcp_server import BINARY_EXTENSIONS, MIME_TYPES
 from .metrics import get_metrics
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,16 @@ def _get_mime_type(path: str) -> str:
     """Get mime type for a file path based on extension."""
     suffix = PurePosixPath(path).suffix.lower()
     return MIME_TYPES.get(suffix, "text/plain")
+
+
+def _is_binary_path(path: str) -> bool:
+    """Return True when this path's extension is known-binary (image, PDF, …).
+
+    Binary files cannot be decoded as UTF-8, so the JSON ``/api/content``
+    endpoint surfaces a 415 and clients are expected to fetch the bytes
+    from ``/api/raw/{path}`` instead.
+    """
+    return PurePosixPath(path).suffix.lower() in BINARY_EXTENSIONS
 
 
 class ContentItem(BaseModel):
@@ -305,7 +316,19 @@ def create_api(
 
     @app.get("/api/content/{path:path}")
     async def read_content(path: str, request: Request, response: Response):
-        """Read content file. Returns 304 when ``If-None-Match`` matches."""
+        """Read content file. Returns 304 when ``If-None-Match`` matches.
+
+        Binary file types (images, PDFs) return 415 — clients should
+        fetch them from :http:get:`/api/raw/{path}` instead.
+        """
+        if _is_binary_path(path):
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"File '{path}' is binary; fetch raw bytes from "
+                    f"/api/raw/{path}"
+                ),
+            )
         fs = _fs()
         try:
             content = fs.read_file(path)
@@ -326,8 +349,50 @@ def create_api(
             raise HTTPException(status_code=404, detail="File not found")
         except InvalidPathError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"File '{path}' is not UTF-8 text; fetch raw bytes "
+                    f"from /api/raw/{path}"
+                ),
+            )
         except Exception as e:
             logger.error(f"Error reading content: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    @app.get("/api/raw/{path:path}")
+    async def read_raw(path: str, request: Request):
+        """Stream raw file bytes with the correct ``Content-Type``.
+
+        Used by the UI to render images, PDFs, and HTML artifacts that
+        the JSON content endpoint cannot represent. Honours
+        ``If-None-Match`` so the browser can cache aggressively.
+        """
+        fs = _fs()
+        try:
+            full_path = fs._resolve_path(path)
+            if not full_path.exists():
+                raise HTTPException(status_code=404, detail="File not found")
+            if not full_path.is_file():
+                raise HTTPException(status_code=400, detail="Path is not a file")
+            etag = _etag(path)
+            quoted = _quoted(etag)
+            if _if_none_match_matches(request.headers.get("if-none-match"), etag):
+                return Response(status_code=304, headers={"ETag": quoted})
+            return FileResponse(
+                full_path,
+                media_type=_get_mime_type(path),
+                headers={"ETag": quoted},
+            )
+        except HTTPException:
+            raise
+        except InvalidPathError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="File not found")
+        except Exception as e:
+            logger.error(f"Error reading raw content: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @app.post("/api/content/{path:path}", status_code=201)
