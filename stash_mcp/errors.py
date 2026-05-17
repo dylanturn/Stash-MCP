@@ -193,12 +193,6 @@ class McpServerMultiStoreGitForbidden(StashError):
     )
 
 
-class ContentRootNotFound(StashError):
-    problem = Problem(
-        "/problems/content-root/not-found", "Content root not found", 404
-    )
-
-
 class ToolNameInvalid(StashError):
     problem = Problem(
         "/problems/tool-name/invalid",
@@ -281,7 +275,6 @@ __all__ = [
     "PROBLEM_MEDIA_TYPE",
     "ConfirmationRequired",
     "ContentNotFound",
-    "ContentRootNotFound",
     "ETagMismatch",
     "Forbidden",
     "McpServerAlreadyExists",

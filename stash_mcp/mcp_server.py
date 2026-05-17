@@ -498,16 +498,23 @@ def create_mcp_server(
             )
 
     def _register_resource(path: str) -> bool:
-        """Add a file to the MCP resource registry if it is a README.md.
+        """Add a README to the MCP resource registry, or signal a change.
+
+        In legacy single-store mode, registers a FunctionResource so the
+        new README shows up in ``resources/list``. In auth mode, the
+        listing middleware enumerates READMEs from the active composite
+        at list time, so no static registration is needed — but callers
+        still need to fire ``send_resource_list_changed`` so clients
+        re-fetch.
 
         Returns:
-            True if a resource was registered, False otherwise.
+            True if the resource list has effectively changed (README
+            path in either mode), False otherwise.
         """
         if not _is_resource_file(path):
             return False
         if _auth_mode:
-            # Per-store resource registration is owned by 06's SPA picker.
-            return False
+            return True
         uri = f"stash://{path}"
         mcp.add_resource(FunctionResource(
             uri=AnyUrl(uri), name=path,
@@ -518,13 +525,16 @@ def create_mcp_server(
         return True
 
     def _unregister_resource(path: str) -> bool:
-        """Remove a file from the MCP resource registry.
+        """Remove a README from the MCP resource registry, or signal a change.
 
         Returns:
-            True if a resource was removed, False otherwise.
+            True if the resource list has effectively changed (README
+            path in either mode), False otherwise.
         """
         if not _is_resource_file(path):
             return False
+        if _auth_mode:
+            return True
         uri_key = f"stash://{path}"
         try:
             # fastmcp 3.x: use public local_provider API

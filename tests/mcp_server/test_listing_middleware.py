@@ -150,6 +150,80 @@ async def test_list_resources_enumerates_readmes(
     assert "stash://hello.md" not in uris
 
 
+async def test_create_readme_in_auth_mode_emits_list_changed(
+    auth_db, content_dir: Path, mock_context
+):
+    """In auth mode, creating a README must still fire
+    send_resource_list_changed so clients re-fetch the (dynamic) list."""
+    tenant, store, config, composite = await _seed_single_store(
+        auth_db, content_dir, ["create_content"]
+    )
+    mcp = create_mcp_server(USE_CURRENT_STORE)
+    create = await mcp.get_tool("create_content")
+
+    p_tok = set_current_principal(_principal(tenant.id))
+    c_tok = set_current_mcp_server(config)
+    s_tok = set_current_store(composite)
+    try:
+        await create.run({"path": "README.md", "content": "# hi"})
+    finally:
+        reset_current_store(s_tok)
+        reset_current_mcp_server(c_tok)
+        reset_current_principal(p_tok)
+
+    mock_context.send_resource_list_changed.assert_awaited()
+
+
+async def test_create_non_readme_in_auth_mode_does_not_emit_list_changed(
+    auth_db, content_dir: Path, mock_context
+):
+    tenant, store, config, composite = await _seed_single_store(
+        auth_db, content_dir, ["create_content"]
+    )
+    mcp = create_mcp_server(USE_CURRENT_STORE)
+    create = await mcp.get_tool("create_content")
+
+    p_tok = set_current_principal(_principal(tenant.id))
+    c_tok = set_current_mcp_server(config)
+    s_tok = set_current_store(composite)
+    try:
+        await create.run({"path": "notes.md", "content": "just notes"})
+    finally:
+        reset_current_store(s_tok)
+        reset_current_mcp_server(c_tok)
+        reset_current_principal(p_tok)
+
+    mock_context.send_resource_list_changed.assert_not_awaited()
+
+
+async def test_delete_readme_in_auth_mode_emits_list_changed(
+    auth_db, content_dir: Path, mock_context
+):
+    tenant, store, config, composite = await _seed_single_store(
+        auth_db, content_dir, ["delete_content"]
+    )
+    # Seed a README on disk + read it to get its sha.
+    on_disk = content_dir / str(tenant.id) / "docs"
+    (on_disk / "README.md").write_text("# top")
+    import hashlib
+    sha = hashlib.sha256(b"# top").hexdigest()
+
+    mcp = create_mcp_server(USE_CURRENT_STORE)
+    delete = await mcp.get_tool("delete_content")
+
+    p_tok = set_current_principal(_principal(tenant.id))
+    c_tok = set_current_mcp_server(config)
+    s_tok = set_current_store(composite)
+    try:
+        await delete.run({"path": "README.md", "sha": sha})
+    finally:
+        reset_current_store(s_tok)
+        reset_current_mcp_server(c_tok)
+        reset_current_principal(p_tok)
+
+    mock_context.send_resource_list_changed.assert_awaited()
+
+
 async def test_list_resources_multi_store_enumerates_under_virtual_prefixes(
     auth_db, content_dir: Path
 ):

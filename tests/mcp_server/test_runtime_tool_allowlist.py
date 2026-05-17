@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -40,18 +39,6 @@ from stash_mcp.stores.composite_filesystem import (
 )
 from stash_mcp.stores.composite_store import CompositeLoadedStore
 from stash_mcp.stores.registry import StoreRegistry
-
-
-@pytest.fixture
-def mock_context():
-    from fastmcp.server.context import Context, _current_context
-
-    ctx = MagicMock(spec=Context)
-    ctx.session = AsyncMock()
-    ctx.send_resource_list_changed = AsyncMock()
-    token = _current_context.set(ctx)
-    yield ctx
-    _current_context.reset(token)
 
 
 def _principal(tenant_id: UUID, scopes: str = "read,write") -> Principal:

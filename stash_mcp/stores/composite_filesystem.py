@@ -58,7 +58,6 @@ class CompositeFileSystem:
         # Sort longest-prefix first so a mount at "docs/team-a" matches
         # before a mount at "docs" for paths under "docs/team-a/".
         self._mounts = sorted(mounts, key=lambda m: -len(m.virtual_prefix))
-        self._content_dir = Path("/composite")  # placeholder; not used
 
     # --- routing -----------------------------------------------------
 
