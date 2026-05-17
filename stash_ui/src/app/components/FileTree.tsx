@@ -230,7 +230,7 @@ export function FileTree({ tree, selectedFile, onSelectFile, onClearSelection, o
           ) : (
             <LayoutDashboard
               className="w-4 h-4 flex-shrink-0"
-              style={{ color: 'var(--stash-accent)' }}
+              style={{ color: 'var(--stash-text-secondary)' }}
             />
           )}
           <span
