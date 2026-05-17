@@ -268,6 +268,47 @@ def _principal_scopes(principal, tenant_id) -> frozenset[str]:
     return _ROLE_SCOPES.get(role, frozenset())
 
 
+def _enforce_mcp_server_allowlist(tool_name: str) -> None:
+    """Per-config tool allowlist + multi-store git/tx safety net.
+
+    No-op when the request is unscoped (the legacy URL-based flow has
+    no MCP-server config). When a config is in scope, this check:
+
+    - Rejects tools not in ``config.tools`` with
+      :class:`McpServerToolNotAllowed`.
+    - Rejects git/transaction tools on multi-store composites with
+      :class:`McpServerMultiStoreGitForbidden`.
+
+    Both are imported lazily to avoid a circular import between
+    ``mcp_server`` and ``routing.mcp_server_resolver``.
+    """
+    from .errors import (
+        McpServerMultiStoreGitForbidden,
+        McpServerToolNotAllowed,
+    )
+    from .routing.context import current_store
+    from .routing.mcp_server_resolver import current_mcp_server
+
+    config = current_mcp_server()
+    if config is None:
+        return  # unscoped request — no per-config gating
+
+    allowed = {t.tool_name for t in config.tools}
+    if tool_name not in allowed:
+        raise McpServerToolNotAllowed(
+            f"tool {tool_name!r} is not enabled on MCP server config "
+            f"{config.slug!r}"
+        )
+    if tool_name in _MULTI_STORE_DISALLOWED_TOOLS:
+        store = current_store()
+        if store is not None and getattr(store, "is_single_store", True) is False:
+            raise McpServerMultiStoreGitForbidden(
+                f"tool {tool_name!r} requires a single-store config; "
+                f"{config.slug!r} spans "
+                f"{len(getattr(store, 'underlying_store_ids', set()))} stores"
+            )
+
+
 def _enforce_tool_scope(tool_name: str, required_scope: str) -> None:
     """Raise if the in-flight principal lacks ``required_scope``.
 
@@ -378,6 +419,7 @@ def create_mcp_server(
             @functools.wraps(fn)
             async def _tracked(*args, **kwargs):
                 if Config.AUTH_ENABLED:
+                    _enforce_mcp_server_allowlist(tool_name)
                     _enforce_tool_scope(tool_name, required_scope)
                 t0 = time.perf_counter()
                 try:

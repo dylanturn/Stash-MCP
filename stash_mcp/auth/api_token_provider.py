@@ -97,6 +97,14 @@ class ApiTokenAuthProvider(AuthProvider):
             tenant_roles: dict = {
                 m.tenant_id: _coerce_role(m.role) for m in user.memberships
             }
+            claims: dict[str, object] = {
+                "token_id": str(row.id),
+                "token_name": row.name,
+                "scopes": row.scopes,
+                "key_version": row.key_version,
+            }
+            if row.mcp_server_id is not None:
+                claims["mcp_server_id"] = str(row.mcp_server_id)
             principal = Principal(
                 user_id=user.id,
                 oidc_sub=user.oidc_sub,
@@ -104,12 +112,7 @@ class ApiTokenAuthProvider(AuthProvider):
                 display_name=user.display_name,
                 auth_method="api_token",
                 tenant_roles=tenant_roles,
-                claims={
-                    "token_id": str(row.id),
-                    "token_name": row.name,
-                    "scopes": row.scopes,
-                    "key_version": row.key_version,
-                },
+                claims=claims,
             )
 
             await session.execute(

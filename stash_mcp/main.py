@@ -256,7 +256,7 @@ def _create_auth_enabled_app() -> FastAPI:
     from .auth.routes import router as auth_router
     from .errors import install_problem_handlers
     from .mcp_server import USE_CURRENT_STORE as MCP_USE_CURRENT_STORE
-    from .routing import StoreResolverMiddleware
+    from .routing import McpServerResolverMiddleware, StoreResolverMiddleware
     from .tenant_admin import router as tenant_admin_router
 
     registry = get_store_registry()
@@ -347,10 +347,10 @@ def _create_auth_enabled_app() -> FastAPI:
         OIDCAuthProvider(),
     ]
 
-    # Order matters: add_middleware adds outermost first, so execution
-    # is last-added-runs-first. We want auth → store resolver → app.
-    # Therefore add the slash normalizer first, then store resolver,
-    # then auth.
+    # Order matters: add_middleware adds outermost-first, so execution
+    # is last-added-runs-first. The runtime order we want is:
+    #   request → Auth → McpServerResolver → StoreResolver → SlashNorm → app
+    # so add them in reverse here.
     app.add_middleware(_MCPSlashMiddleware)
     app.add_middleware(
         StoreResolverMiddleware,
@@ -367,6 +367,7 @@ def _create_auth_enabled_app() -> FastAPI:
             "/openapi.json",
         ),
     )
+    app.add_middleware(McpServerResolverMiddleware, registry=registry)
     app.add_middleware(StashAuthMiddleware, providers=auth_providers)
     # authlib's redirect/callback dance uses ``request.session`` to carry
     # the ``next`` URL across the IdP round-trip. Use a separate cookie

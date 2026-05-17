@@ -33,7 +33,6 @@ from ..errors import (
     ConfirmationRequired,
     MembershipExists,
     MembershipNotFound,
-    StoreNotFound,
     TenantAlreadyExists,
     TenantHasStores,
     TenantNotFound,
@@ -42,7 +41,6 @@ from ..errors import (
 )
 from ..stores import admin_ops
 from ..stores.admin_ops import StoreCreate as StoreCreateBody
-from ..stores.admin_ops import StoreUpdate as StoreUpdateBody
 from .dependencies import require_admin
 
 logger = logging.getLogger(__name__)
