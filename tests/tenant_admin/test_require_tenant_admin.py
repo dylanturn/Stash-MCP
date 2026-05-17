@@ -7,8 +7,8 @@ from pathlib import Path
 from stash_mcp.errors import PROBLEM_MEDIA_TYPE
 
 from .conftest import (
-    _principal,
     _make_user,
+    _principal,
     make_full_client,
 )
 

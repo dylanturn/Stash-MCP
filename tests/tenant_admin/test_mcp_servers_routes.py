@@ -15,7 +15,6 @@ from stash_mcp.db.models import (
 )
 
 from .conftest import (
-    _make_tenant,
     _make_user,
     _principal,
     make_full_client,
@@ -155,6 +154,59 @@ async def test_cross_tenant_mount_400s(
     )
     assert resp.status_code == 400
     assert resp.json()["type"] == "/problems/mount/cross-tenant"
+
+
+async def test_same_slug_in_two_tenants_resolves_to_own_tenant(
+    auth_db,
+    content_dir: Path,
+    acme_tenant,
+    beta_tenant,
+    acme_admin_principal,
+):
+    """If acme and beta both have a `docs` store, mounting `docs` in an
+    acme config must pick acme's `docs` — never beta's. Regression
+    guard for a slug-only Store query."""
+    beta_user = await _make_user(auth_db, email="beta-admin@x")
+    beta_admin = _principal(
+        tenant_roles={beta_tenant.id: "admin"}, user_id=beta_user.id
+    )
+    await _create_store(make_full_client(beta_admin), beta_tenant.id, "docs")
+
+    acme_client = make_full_client(acme_admin_principal)
+    await _create_store(acme_client, acme_tenant.id, "docs")
+
+    resp = acme_client.post(
+        f"/tenants/{acme_tenant.id}/mcp-servers",
+        json={
+            "slug": "ok",
+            "name": "Ok",
+            "content_roots": [
+                {
+                    "name": "cr",
+                    "kind": "simple",
+                    "mounts": [{"store_slug": "docs"}],
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    # The mounted store must belong to acme, not beta.
+    from uuid import UUID
+
+    mount_store_id = UUID(body["content_roots"][0]["mounts"][0]["store_id"])
+
+    from sqlalchemy import select
+
+    from stash_mcp.db.models import Store
+
+    async with auth_db() as session:
+        row = (
+            await session.execute(
+                select(Store).where(Store.id == mount_store_id)
+            )
+        ).scalar_one()
+    assert row.tenant_id == acme_tenant.id
 
 
 async def test_unknown_tool_name_400s(

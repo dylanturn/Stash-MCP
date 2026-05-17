@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID, uuid4
 
-import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -33,7 +32,6 @@ from stash_mcp.routing import (
     current_mcp_server,
 )
 from stash_mcp.routing.context import current_store
-from stash_mcp.stores.composite_store import CompositeLoadedStore
 from stash_mcp.stores.registry import StoreRegistry
 
 
@@ -198,7 +196,7 @@ async def test_scoped_token_binds_composite_store(
     client = TestClient(wrapped)
     # Hit the bare /mcp/anything — the resolver doesn't care about URL
     # shape on a scoped token; it binds from the token.
-    resp = client.get(f"/mcp/whatever/")
+    resp = client.get("/mcp/whatever/")
     assert resp.status_code == 200
     assert captured["store_type"] == "CompositeLoadedStore"
     assert captured["is_single_store"] is True

@@ -94,6 +94,10 @@ ignore = []
 # Problem Details classes use semantic names (Forbidden, ETagMismatch, …)
 # that intentionally don't end in "Error".
 "stash_mcp/errors.py" = ["N818"]
+# Test files import fixtures (auth_db, content_dir, _auth_config_defaults
+# autouse) from sibling conftests so pytest discovers them, then use the
+# same names as function parameters — ruff sees this as F811.
+"tests/**" = ["F811"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

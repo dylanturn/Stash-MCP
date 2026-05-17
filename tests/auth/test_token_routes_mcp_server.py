@@ -6,22 +6,20 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from starlette.testclient import TestClient
 
 from stash_mcp.auth.principal import Principal
 from stash_mcp.auth.routes import router as auth_router
-from stash_mcp.db.models import AuditEvent, McpServer, User
+from stash_mcp.db.models import AuditEvent, User
 from stash_mcp.errors import install_problem_handlers
 from stash_mcp.tenant_admin import router as tenant_admin_router
-
 from tests.admin.conftest import (  # noqa: F401
-    _PrincipalInjector,
     _auth_config_defaults,
     _ensure_default_tenant,
     _principal,
+    _PrincipalInjector,
     _reset_registry_singleton,
     auth_db,
     content_dir,
@@ -294,7 +292,6 @@ async def test_legacy_unscoped_token_does_not_carry_mcp_server_id_claim(
     """Pre-03 ApiTokenAuthProvider behaviour: unscoped tokens stay
     that way; the new claim is absent from Principal.claims when the
     column is NULL."""
-    from sqlalchemy import select
 
     from stash_mcp.auth.api_token_provider import ApiTokenAuthProvider
     from stash_mcp.auth.tokens import generate_token, hash_with_active_key

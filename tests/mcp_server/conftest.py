@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import event

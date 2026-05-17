@@ -7,8 +7,6 @@ both surfaces. Re-uses the existing fixtures by importing the module.
 
 from __future__ import annotations
 
-from uuid import UUID, uuid4
-
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from starlette.testclient import TestClient
@@ -24,10 +22,10 @@ from stash_mcp.tenant_admin import router as tenant_admin_router
 # resolution in tests/admin/conftest.py — pytest sees them via the test
 # directory's conftest, not via import, so re-define here.)
 from tests.admin.conftest import (  # noqa: F401
-    _PrincipalInjector,
     _auth_config_defaults,
     _ensure_default_tenant,
     _principal,
+    _PrincipalInjector,
     _reset_registry_singleton,
     auth_db,
     content_dir,

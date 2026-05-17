@@ -188,38 +188,52 @@ async def _resolve_stores(
 ) -> dict[str, Store]:
     """Map every distinct store_slug in the inputs to a Store row.
 
-    Raises :class:`StoreNotFound` for unknown slugs and
-    :class:`MountCrossTenant` for any slug whose store doesn't belong
-    to the config's tenant. The cross-tenant check exists because while
-    the route is gated on tenant-admin, a malicious hand-crafted
-    request could otherwise reference an unrelated tenant's
-    ``store_slug`` and we'd accept it.
+    Resolution is tenant-scoped: a slug that exists in a *different*
+    tenant is treated as a cross-tenant attempt
+    (:class:`MountCrossTenant`); a slug that exists in no tenant is
+    :class:`StoreNotFound`. Tenant scoping matters because slugs are
+    only unique within a tenant — two tenants can each have a ``docs``
+    store, and a global query would non-deterministically pick one.
     """
     needed = {m.store_slug for cr in content_roots for m in cr.mounts}
     if not needed:
         return {}
-    rows = (
+    in_tenant = (
         (
             await session.execute(
-                select(Store).where(Store.slug.in_(needed))
+                select(Store).where(
+                    Store.tenant_id == tenant.id,
+                    Store.slug.in_(needed),
+                )
             )
         )
         .scalars()
         .all()
     )
-    by_slug = {s.slug: s for s in rows}
+    by_slug = {s.slug: s for s in in_tenant}
     missing = needed - set(by_slug.keys())
     if missing:
-        raise StoreNotFound(
-            f"store slug(s) not found in any tenant: {sorted(missing)}"
+        # Distinguish "exists in another tenant" (cross-tenant) from
+        # "doesn't exist anywhere" (not found). Both are 400s but the
+        # Problem Details type lets the caller fix the right thing.
+        elsewhere = (
+            (
+                await session.execute(
+                    select(Store.slug).where(Store.slug.in_(missing))
+                )
+            )
+            .scalars()
+            .all()
         )
-    bad_tenant = [
-        s for s in by_slug.values() if s.tenant_id != tenant.id
-    ]
-    if bad_tenant:
-        raise MountCrossTenant(
-            "the following store slug(s) belong to a different tenant: "
-            f"{sorted(s.slug for s in bad_tenant)}"
+        cross = sorted(set(elsewhere))
+        if cross:
+            raise MountCrossTenant(
+                "the following store slug(s) belong to a different tenant: "
+                f"{cross}"
+            )
+        raise StoreNotFound(
+            f"store slug(s) not found in tenant {tenant.slug!r}: "
+            f"{sorted(missing)}"
         )
     return by_slug
 
