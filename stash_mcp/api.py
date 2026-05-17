@@ -321,16 +321,24 @@ def create_api(
         Binary file types (images, PDFs) return 415 — clients should
         fetch them from :http:get:`/api/raw/{path}` instead.
         """
-        if _is_binary_path(path):
-            raise HTTPException(
-                status_code=415,
-                detail=(
-                    f"File '{path}' is binary; fetch raw bytes from "
-                    f"/api/raw/{path}"
-                ),
-            )
         fs = _fs()
         try:
+            # Existence/path validation runs before the binary-type guard
+            # so a missing ``.png`` still 404s instead of 415-ing as if
+            # it were present.
+            if not fs.file_exists(path):
+                # ``file_exists`` swallows ``InvalidPathError`` — re-resolve
+                # to surface a 400 for traversal etc.
+                fs._resolve_path(path)
+                raise HTTPException(status_code=404, detail="File not found")
+            if _is_binary_path(path):
+                raise HTTPException(
+                    status_code=415,
+                    detail=(
+                        f"File '{path}' is binary; fetch raw bytes from "
+                        f"/api/raw/{path}"
+                    ),
+                )
             content = fs.read_file(path)
             etag = _etag(path)
             quoted = _quoted(etag)
@@ -345,6 +353,8 @@ def create_api(
                 updated_at=_get_updated_at(path),
             )
             return item
+        except HTTPException:
+            raise
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="File not found")
         except InvalidPathError as e:

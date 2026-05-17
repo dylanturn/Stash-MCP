@@ -418,6 +418,17 @@ def test_content_endpoint_415_for_binary():
         assert "raw" in response.json()["detail"]
 
 
+def test_content_endpoint_404_for_missing_binary():
+    """Missing binary file should 404 — the binary-type guard must not
+    short-circuit existence checks."""
+    with TemporaryDirectory() as tmpdir:
+        fs = FileSystem(Path(tmpdir))
+        client = TestClient(create_api(fs))
+
+        response = client.get("/api/content/missing.png")
+        assert response.status_code == 404
+
+
 def test_raw_endpoint_304_on_if_none_match():
     with TemporaryDirectory() as tmpdir:
         fs = FileSystem(Path(tmpdir))

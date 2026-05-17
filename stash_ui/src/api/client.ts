@@ -16,10 +16,12 @@ export async function getTree(tenant: string, store: string) {
   return res.json();
 }
 
-/** Absolute URL for the raw bytes of a content file. Used by the UI to
- * render images, PDFs, and HTML artifacts directly via ``<img>``,
+/** Same-origin URL (path-only, e.g. ``/api/<tenant>/<store>/raw/...``)
+ * for the raw bytes of a content file. Used by the UI to render
+ * images, PDFs, and HTML artifacts directly via ``<img>``,
  * ``<iframe>``, etc. — the JSON content endpoint can't represent
- * non-UTF-8 bytes. */
+ * non-UTF-8 bytes. Callers that need a fully qualified URL should
+ * resolve this against ``window.location.origin``. */
 export function rawUrl(tenant: string, store: string, path: string): string {
   const cleaned = path.replace(/^\/+/, '');
   return `${apiBase(tenant, store)}/raw/${cleaned

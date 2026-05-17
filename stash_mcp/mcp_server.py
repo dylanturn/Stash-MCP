@@ -76,6 +76,7 @@ MIME_TYPES: dict[str, str] = {
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
     ".webp": "image/webp",
+    ".avif": "image/avif",
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
     ".bmp": "image/bmp",
@@ -86,7 +87,7 @@ MIME_TYPES: dict[str, str] = {
 # JSON ``/api/content`` endpoint. Callers should fetch these via
 # ``/api/raw/{path}`` instead.
 BINARY_EXTENSIONS: frozenset[str] = frozenset({
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".pdf",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp", ".pdf",
 })
 
 # Only files matching this name are exposed as MCP resources.
