@@ -95,6 +95,14 @@ class StoreNotProvisioned(StashError):
     )
 
 
+class StoreInUse(StashError):
+    problem = Problem(
+        "/problems/store/in-use",
+        "Store cannot be deleted while an MCP server config mounts it",
+        409,
+    )
+
+
 class TenantNotFound(StashError):
     problem = Problem("/problems/tenant/not-found", "Tenant not found", 404)
 
@@ -135,6 +143,90 @@ class MembershipExists(StashError):
 
 class ValidationError(StashError):
     problem = Problem("/problems/validation", "Validation failed", 400)
+
+
+class McpServerAlreadyExists(StashError):
+    problem = Problem(
+        "/problems/mcp-server/already-exists",
+        "MCP server config already exists",
+        409,
+    )
+
+
+class McpServerNotFound(StashError):
+    problem = Problem(
+        "/problems/mcp-server/not-found",
+        "MCP server config not found",
+        404,
+    )
+
+
+class McpServerForbidden(StashError):
+    problem = Problem(
+        "/problems/mcp-server/forbidden",
+        "Caller cannot access this MCP server config",
+        403,
+    )
+
+
+class McpServerConfigDisabled(StashError):
+    problem = Problem(
+        "/problems/mcp-server/disabled",
+        "MCP server config is disabled",
+        403,
+    )
+
+
+class McpServerToolNotAllowed(StashError):
+    problem = Problem(
+        "/problems/mcp-server/tool-not-allowed",
+        "Tool is not enabled on this MCP server config",
+        403,
+    )
+
+
+class McpServerMultiStoreGitForbidden(StashError):
+    problem = Problem(
+        "/problems/mcp-server/multi-store-git-forbidden",
+        "Git and transaction tools require a single-store config",
+        400,
+    )
+
+
+class ContentRootNotFound(StashError):
+    problem = Problem(
+        "/problems/content-root/not-found", "Content root not found", 404
+    )
+
+
+class ToolNameInvalid(StashError):
+    problem = Problem(
+        "/problems/tool-name/invalid",
+        "Tool name is not a registered MCP tool",
+        400,
+    )
+
+
+class MountConflict(StashError):
+    problem = Problem(
+        "/problems/mount/conflict",
+        "Mounts have overlapping virtual prefixes in the same content root",
+        400,
+    )
+
+
+class MountCrossTenant(StashError):
+    problem = Problem(
+        "/problems/mount/cross-tenant",
+        "Mount references a store in a different tenant",
+        400,
+    )
+
+
+class MountInvalid(StashError):
+    problem = Problem(
+        "/problems/mount/invalid", "Mount is invalid", 400
+    )
 
 
 class ConfirmationRequired(StashError):
@@ -189,20 +281,32 @@ __all__ = [
     "PROBLEM_MEDIA_TYPE",
     "ConfirmationRequired",
     "ContentNotFound",
+    "ContentRootNotFound",
     "ETagMismatch",
     "Forbidden",
+    "McpServerAlreadyExists",
+    "McpServerConfigDisabled",
+    "McpServerForbidden",
+    "McpServerMultiStoreGitForbidden",
+    "McpServerNotFound",
+    "McpServerToolNotAllowed",
     "MembershipExists",
     "MembershipNotFound",
+    "MountConflict",
+    "MountCrossTenant",
+    "MountInvalid",
     "Problem",
     "ScopeRequired",
     "StashError",
     "StoreAlreadyExists",
+    "StoreInUse",
     "StoreNotFound",
     "StoreNotProvisioned",
     "TenantAlreadyExists",
     "TenantHasStores",
     "TenantNotFound",
     "TokenNotFound",
+    "ToolNameInvalid",
     "Unauthenticated",
     "UserNotFound",
     "ValidationError",

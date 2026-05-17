@@ -187,6 +187,59 @@ bodies then resolve the FS / git_backend from
 :func:`stash_mcp.routing.context.current_store` at call time."""
 
 
+# The universe of MCP tool names that can be registered by the server.
+# Hand-maintained alongside the ``@mcp.tool(...)`` decorators in
+# create_mcp_server below. Used by spec 02's MCP-server-config validator
+# (tools field) and by spec 04's runtime allowlist check.
+#
+# This is the *universe of names*, not the universe of currently-
+# registered tools — conditional registrations (READ_ONLY, git tracking,
+# search) mean reflection on the FastMCP server object would lie.
+REGISTERED_TOOL_NAMES: frozenset[str] = frozenset({
+    # Read tools (always registered).
+    "read_content",
+    "read_content_batch",
+    "list_content",
+    "inspect_content_structure",
+    "inspect_content_structure_batch",
+    # Write tools (suppressed in READ_ONLY mode).
+    "create_content",
+    "overwrite_content",
+    "edit_content",
+    "edit_content_batch",
+    "delete_content",
+    "move_content",
+    "move_content_directory",
+    "move_content_batch",
+    # Search tool (conditional on SEARCH_ENABLED).
+    "search_content",
+    # Git tools (conditional on GIT_TRACKING).
+    "log_content",
+    "diff_content",
+    "blame_content",
+    # Transaction tools (conditional on GIT_TRACKING + write mode).
+    "start_content_transaction",
+    "commit_content_transaction",
+    "abort_content_transaction",
+    "list_content_transactions",
+})
+
+
+# Subset of REGISTERED_TOOL_NAMES that cannot operate on a multi-store
+# composite — they assume a single git repo / single transaction
+# context. Spec 04's runtime check refuses to call these on a config
+# that spans >1 underlying store.
+_MULTI_STORE_DISALLOWED_TOOLS: frozenset[str] = frozenset({
+    "log_content",
+    "diff_content",
+    "blame_content",
+    "start_content_transaction",
+    "commit_content_transaction",
+    "abort_content_transaction",
+    "list_content_transactions",
+})
+
+
 # Role → effective scope set. Members can read+write; admins additionally
 # get the admin scope (reserved for future admin tools — none today).
 _ROLE_SCOPES: dict[str, frozenset[str]] = {

@@ -20,9 +20,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.principal import Principal
-from ..db.models import AuditEvent, Store, Tenant
+from ..db.models import (
+    AuditEvent,
+    McpServer,
+    McpServerContentRoot,
+    McpServerMount,
+    Store,
+    Tenant,
+)
 from ..db.session import get_sessionmaker as get_session_factory
-from ..errors import StoreAlreadyExists, StoreNotFound
+from ..errors import StoreAlreadyExists, StoreInUse, StoreNotFound
 from .layout import store_root
 from .registry import StoreAlreadyProvisionedError, get_store_registry
 
@@ -243,6 +250,36 @@ async def deprovision_store(
     ).scalar_one_or_none()
     if store is None:
         raise StoreNotFound(f"store {tenant.slug}/{slug} not found")
+
+    # Refuse if any MCP-server config mounts this store. The
+    # ``mcp_server_mounts.store_id`` FK is RESTRICT so the DB would
+    # also refuse, but doing it explicitly lets us name the offending
+    # config(s) in the error.
+    mount_rows = (
+        (
+            await session.execute(
+                select(McpServer.slug)
+                .join(
+                    McpServerContentRoot,
+                    McpServerContentRoot.mcp_server_id == McpServer.id,
+                )
+                .join(
+                    McpServerMount,
+                    McpServerMount.content_root_id
+                    == McpServerContentRoot.id,
+                )
+                .where(McpServerMount.store_id == store.id)
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if mount_rows:
+        raise StoreInUse(
+            f"store {tenant.slug}/{store.slug} is mounted by the following "
+            f"mcp-server config(s): {sorted(set(mount_rows))}"
+        )
 
     registry = get_store_registry()
     registry.invalidate(tenant.slug, store.slug)
