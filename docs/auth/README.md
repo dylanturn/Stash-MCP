@@ -17,6 +17,10 @@ running behind a reverse proxy or trusted network. The next phase needs:
 - **Multiple stores per tenant** so a single tenant can have several git-backed
   content repos (e.g. team-A docs, team-B docs, personal scratch).
 
+Tenant-admin self-service on top of this foundation — letting a tenant
+admin CRUD their own stores and define scoped MCP-server configs — is
+its own initiative. See [`docs/mcp/`](../mcp/README.md).
+
 ## Locked design decisions
 
 These were settled during scoping on 2026-05-15 and are not re-litigated in
@@ -77,6 +81,12 @@ OIDC group → tenant-membership mapping is intentionally **out of scope** for
 v1. The `memberships.source` column is in the schema so we can add it later
 without a migration, but admin-via-group is the only group-driven role v1
 ships.
+
+## Related work
+
+- [`docs/mcp/`](../mcp/README.md) — tenant-admin self-service for
+  stores, named MCP-server configs, token scoping to configs, and
+  runtime enforcement. Builds on this foundation.
 
 ## Working with these specs
 
