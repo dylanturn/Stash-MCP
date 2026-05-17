@@ -554,15 +554,9 @@ def create_mcp_server(
         if _auth_mode:
             return True
         uri_key = f"stash://{path}"
-        try:
-            # fastmcp 3.x: use public local_provider API
-            mcp.local_provider.remove_resource(uri_key)
-            return True
-        except AttributeError:
-            # fastmcp 2.x: ResourceManager exposes _resources dict directly
-            return mcp._resource_manager._resources.pop(uri_key, None) is not None
-        except KeyError:
-            return False
+        # ResourceManager.__resources is the only removal hook on
+        # fastmcp 2.x; revisit if/when the project upgrades to 3.x.
+        return mcp._resource_manager._resources.pop(uri_key, None) is not None
 
     # Resource template for dynamic access (resources/templates/list)
     @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")
