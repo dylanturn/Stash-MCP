@@ -244,6 +244,7 @@ def create_api(
             "endpoints": {
                 "list": "/api/content",
                 "read": "/api/content/{path}",
+                "raw": "/api/raw/{path}",
                 "create": "POST /api/content/{path}",
                 "update": "PUT /api/content/{path}",
                 "delete": "DELETE /api/content/{path}",
@@ -327,7 +328,16 @@ def create_api(
         # (``/api/<tenant>/<store>/content/…``) get a matching
         # ``/api/<tenant>/<store>/raw/…`` URL instead of a hard-coded
         # internal route that would 404 in their context.
-        raw_hint = request.url.path.replace("/content/", "/raw/", 1)
+        # ``StoreResolverMiddleware`` strips the tenant/store prefix
+        # before this handler runs, so ``request.url.path`` no longer
+        # contains it. The middleware stashes the original
+        # client-facing path in ``scope["stash.original_path"]``;
+        # fall back to ``request.url.path`` in legacy single-store
+        # mode (no middleware) where the two are already equal.
+        original_path = request.scope.get(
+            "stash.original_path", request.url.path
+        )
+        raw_hint = original_path.replace("/content/", "/raw/", 1)
         try:
             # Disambiguate "doesn't exist" (404) from "is a directory"
             # (400) before the binary-type guard so a missing ``.png``

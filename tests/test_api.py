@@ -496,24 +496,130 @@ def test_content_endpoint_415_for_non_utf8_text_file():
 
 
 def test_content_endpoint_415_hint_preserves_request_prefix():
-    """The 415 ``detail`` must build the raw URL from the caller's
-    request path so tenant/store-scoped deployments get a usable hint
-    instead of a hard-coded ``/api/raw/...`` that would 404 in their
-    routing."""
+    """The 415 ``detail`` must build the raw URL from the path
+    ``StoreResolverMiddleware`` stashes in
+    ``scope["stash.original_path"]``, so tenant/store-scoped
+    deployments get a usable
+    ``/api/<tenant>/<store>/raw/<path>`` hint instead of a
+    hard-coded ``/api/raw/<path>`` that would 404 in their routing.
+
+    Wraps the API in a minimal ASGI shim that mirrors what
+    ``StoreResolverMiddleware`` does in production: rewrite
+    ``/api/<tenant>/<store>/content/foo`` to ``/api/content/foo`` on
+    the inner scope, and remember the original on
+    ``scope["stash.original_path"]``. The earlier ``app.mount()``
+    version of this test passed even before the scope key existed
+    because ``mount()`` happens to leave the prefix in
+    ``request.url.path`` — production does not.
+    """
+
+    class _PrefixRewrite:
+        def __init__(self, app, public_prefix: str) -> None:
+            self.app = app
+            self.public_prefix = public_prefix
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http" and scope["path"].startswith(self.public_prefix):
+                original_path = scope["path"]
+                rewritten = original_path[len(self.public_prefix):] or "/"
+                new_scope = dict(scope)
+                new_scope["path"] = rewritten
+                new_scope["raw_path"] = rewritten.encode("utf-8")
+                new_scope["stash.original_path"] = original_path
+                await self.app(new_scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+
     with TemporaryDirectory() as tmpdir:
         fs = FileSystem(Path(tmpdir))
         (Path(tmpdir) / "logo.png").write_bytes(_PNG_BYTES)
-        app = create_api(fs)
-
-        # Mount the API under a scoped prefix to simulate the
-        # tenant/store layout (`/api/<tenant>/<store>/content/...`).
-        from fastapi import FastAPI
-
-        outer = FastAPI()
-        outer.mount("/api/acme/main", app)
-        client = TestClient(outer)
+        # `/api/acme/main` is the stripped prefix; the inner API still
+        # sees `/api/content/logo.png`.
+        wrapped = _PrefixRewrite(create_api(fs), public_prefix="/api/acme/main")
+        client = TestClient(wrapped)
 
         response = client.get("/api/acme/main/api/content/logo.png")
         assert response.status_code == 415
         detail = response.json()["detail"]
+        assert "/api/acme/main/api/content/logo.png" not in detail
         assert "/api/acme/main/api/raw/logo.png" in detail
+
+
+def test_store_resolver_middleware_stashes_original_path():
+    """``StoreResolverMiddleware`` must hand the inner app the
+    original client-facing path on ``scope["stash.original_path"]``
+    so handlers can build user-facing hints. Tested directly against
+    the middleware to keep the test honest about what production
+    actually does."""
+    from stash_mcp.routing.store_resolver import StoreResolverMiddleware
+
+    captured: dict = {}
+
+    async def inner(scope, receive, send):
+        captured["path"] = scope["path"]
+        captured["original_path"] = scope.get("stash.original_path")
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    middleware = StoreResolverMiddleware(inner, registry=None, public_prefixes=())
+    # Force AUTH_ENABLED so the rewrite path runs. Falling back to the
+    # passthrough branch would skip the scope mutation entirely.
+    from stash_mcp.config import Config
+
+    previous_auth = Config.AUTH_ENABLED
+    Config.AUTH_ENABLED = True
+
+    class _FakeStore:
+        tenant_id = "tid"
+        tenant_slug = "acme"
+        slug = "main"
+
+    class _FakeRegistry:
+        async def get(self, tenant, store):  # noqa: D401
+            return _FakeStore()
+
+    middleware.registry = _FakeRegistry()
+
+    # Stub a principal that is a member of the resolved tenant_id so
+    # the middleware proceeds to the rewrite branch instead of 403ing.
+    from stash_mcp.auth.context import (
+        reset_current_principal,
+        set_current_principal,
+    )
+
+    class _StubPrincipal:
+        def has_role_on(self, tenant_id, role):  # noqa: D401
+            return True
+
+    token = set_current_principal(_StubPrincipal())
+    try:
+        async def _run() -> None:
+            scope = {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/acme/main/content/foo.png",
+                "raw_path": b"/api/acme/main/content/foo.png",
+                "headers": [],
+            }
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            sent: list = []
+
+            async def send(message):
+                sent.append(message)
+
+            await middleware(scope, receive, send)
+
+        import asyncio
+
+        asyncio.run(_run())
+    finally:
+        reset_current_principal(token)
+        Config.AUTH_ENABLED = previous_auth
+
+    # Rewritten path (what the FastAPI app sees) drops the
+    # tenant/store; original path (for hint-building) keeps it.
+    assert captured["path"] == "/api/content/foo.png"
+    assert captured["original_path"] == "/api/acme/main/content/foo.png"

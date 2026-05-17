@@ -158,6 +158,13 @@ class StoreResolverMiddleware:
         new_scope = dict(scope)
         new_scope["path"] = new_path
         new_scope["raw_path"] = new_path.encode("utf-8")
+        # Stash the original client-facing path so handlers can build
+        # user-facing URLs (e.g. 415 hints pointing at the raw
+        # endpoint) that still carry the tenant/store prefix. Without
+        # this, ``request.url.path`` would only show the rewritten
+        # internal path (``/api/content/...``) which would 404 if a
+        # client tried to use it directly.
+        new_scope["stash.original_path"] = path
 
         token = set_current_store(loaded)
         try:

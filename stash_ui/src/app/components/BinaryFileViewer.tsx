@@ -6,6 +6,31 @@ const IMAGE_EXTS = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp', 'avif',
 ]);
 
+/** Map extension → MIME type for the file kinds the binary viewer
+ * handles. Mirrors ``stash_mcp/mcp_server.py``'s ``MIME_TYPES`` for
+ * these extensions so the client can populate the metadata panel
+ * without an extra round-trip when a binary file is selected (which
+ * skips the JSON content fetch). */
+const BINARY_MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  svg: 'image/svg+xml',
+  ico: 'image/x-icon',
+  bmp: 'image/bmp',
+  pdf: 'application/pdf',
+  html: 'text/html',
+  htm: 'text/html',
+};
+
+export function mimeTypeForBinary(extension: string | undefined): string | undefined {
+  if (!extension) return undefined;
+  return BINARY_MIME_BY_EXT[extension.toLowerCase()];
+}
+
 /** Classify a file as image / pdf / html / null based on extension.
  *
  * SVG renders inline as an image rather than via an HTML iframe so the

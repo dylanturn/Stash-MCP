@@ -37,7 +37,11 @@ function parseLuminance(color: string): number | null {
   let b = 0;
   const longHex = c.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/);
   const shortHex = c.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/);
-  const rgb = c.match(/^rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/);
+  // Optional 4th group captures alpha in either ``rgba(r, g, b, a)``
+  // or CSS Color Level 4 ``rgb(r g b / a)`` form.
+  const rgb = c.match(
+    /^rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?/,
+  );
   if (longHex) {
     r = parseInt(longHex[1], 16);
     g = parseInt(longHex[2], 16);
@@ -47,6 +51,18 @@ function parseLuminance(color: string): number | null {
     g = parseInt(shortHex[2] + shortHex[2], 16);
     b = parseInt(shortHex[3] + shortHex[3], 16);
   } else if (rgb) {
+    // Treat noticeably translucent fills as unparseable. The final
+    // rendered color depends on whatever sits behind the node (the
+    // diagram background, another shape, the page) which we can't
+    // see from here — picking a contrast color from the rgb channels
+    // alone would be wrong (e.g. ``rgba(255,255,255,0.05)`` on a
+    // dark theme would force dark text onto an effectively dark
+    // pixel). Caller leaves the existing text alone.
+    if (rgb[4] !== undefined) {
+      const raw = rgb[4];
+      const alpha = raw.endsWith('%') ? parseFloat(raw) / 100 : parseFloat(raw);
+      if (!Number.isFinite(alpha) || alpha < 0.85) return null;
+    }
     r = parseFloat(rgb[1]);
     g = parseFloat(rgb[2]);
     b = parseFloat(rgb[3]);
