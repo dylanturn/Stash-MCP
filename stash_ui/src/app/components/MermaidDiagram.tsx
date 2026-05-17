@@ -77,6 +77,26 @@ function applyNodeTextContrast(svgMarkup: string): string {
   const doc = new DOMParser().parseFromString(svgMarkup, 'image/svg+xml');
   if (doc.querySelector('parsererror')) return svgMarkup;
 
+  // Mermaid emits ``<svg width="100%" style="max-width: Npx">`` —
+  // inside ``react-zoom-pan-pinch``'s transformed content area, which
+  // has no defined width, ``width="100%"`` resolves to 0px and the
+  // SVG collapses to nothing. Rewrite to explicit viewBox dimensions
+  // so the content component has a real natural size to measure
+  // against when we call ``centerView()`` below.
+  const svgRoot = doc.querySelector('svg');
+  const vb = svgRoot?.viewBox?.baseVal;
+  if (svgRoot && vb && vb.width > 0 && vb.height > 0) {
+    svgRoot.setAttribute('width', String(vb.width));
+    svgRoot.setAttribute('height', String(vb.height));
+    const style = svgRoot.getAttribute('style') || '';
+    const cleaned = style
+      .replace(/(?:^|;)\s*max-width\s*:[^;]+/gi, '')
+      .replace(/^\s*;\s*/, '')
+      .trim();
+    if (cleaned) svgRoot.setAttribute('style', cleaned);
+    else svgRoot.removeAttribute('style');
+  }
+
   const ON_LIGHT = '#11151c';
   const ON_DARK = '#e0e4f0';
 
