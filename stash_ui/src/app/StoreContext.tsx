@@ -18,6 +18,7 @@ interface StoreContextValue {
   // clear message instead of falling into the /no-stores flow.
   authDisabled: boolean;
   setCurrent: (tenantSlug: string, storeSlug: string) => void;
+  refreshStores: () => Promise<void>;
   client: ApiClient | null;
 }
 
@@ -100,6 +101,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     navigate(`/${tenantSlug}/${storeSlug}`);
   }
 
+  async function refreshStores() {
+    const data = await getMyStores();
+    setStores(data);
+  }
+
   const client = useMemo<ApiClient | null>(
     () =>
       current ? createApiClient(current.tenant_slug, current.slug) : null,
@@ -108,7 +114,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <StoreCtx.Provider
-      value={{ stores, current, me, loading, error, authDisabled, setCurrent, client }}
+      value={{ stores, current, me, loading, error, authDisabled, setCurrent, refreshStores, client }}
     >
       {children}
     </StoreCtx.Provider>

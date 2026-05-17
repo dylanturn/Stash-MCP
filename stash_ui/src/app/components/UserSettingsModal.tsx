@@ -161,16 +161,6 @@ function ProfileSettings({ me, stores }: { me: Me; stores: StoreSummary[] }) {
       <div className="space-y-4">
         <ReadOnlyField label="Display name" value={me.display_name} />
         <ReadOnlyField label="Email" value={me.email} />
-        <ReadOnlyField
-          label="Authentication method"
-          value={
-            me.auth_method === "oidc"
-              ? "Single sign-on (OIDC)"
-              : me.auth_method === "api_token"
-                ? "API token"
-                : "Browser session"
-          }
-        />
       </div>
 
       <div className="mt-8">

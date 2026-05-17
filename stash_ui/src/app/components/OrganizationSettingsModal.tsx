@@ -1,8 +1,9 @@
 import React, { useState } from "react";
-import { X, Building2, Database, Server, Shield } from "lucide-react";
+import { X, Building2, Database, Server } from "lucide-react";
 import { useStore } from "../StoreContext";
 import { StoreSummary } from "../../api/auth";
 import { McpServersTab } from "./McpServersTab";
+import { StoresTab } from "./StoresTab";
 
 interface OrganizationSettingsModalProps {
   isOpen: boolean;
@@ -131,13 +132,13 @@ export function OrganizationSettingsModal({
 
           <div className="flex-1 overflow-y-auto p-6">
             {activeTab === "general" && (
-              <GeneralSettings current={current} storeCount={tenantStores.length} />
+              <GeneralSettings current={current} />
             )}
             {activeTab === "mcp-servers" && (
               <McpServersTab current={current} tenantStores={tenantStores} />
             )}
             {activeTab === "stores" && (
-              <StoresList current={current} stores={tenantStores} />
+              <StoresTab current={current} stores={tenantStores} />
             )}
           </div>
         </div>
@@ -148,10 +149,8 @@ export function OrganizationSettingsModal({
 
 function GeneralSettings({
   current,
-  storeCount,
 }: {
   current: StoreSummary | null;
-  storeCount: number;
 }) {
   if (!current) {
     return (
@@ -176,129 +175,7 @@ function GeneralSettings({
       <div className="space-y-4">
         <ReadOnlyField label="Display name" value={current.tenant_display_name} />
         <ReadOnlyField label="Slug" value={current.tenant_slug} mono />
-        <ReadOnlyField
-          label="Stores in this organization"
-          value={String(storeCount)}
-        />
-        <div>
-          <label
-            className="block text-sm mb-2 flex items-center gap-2"
-            style={{ color: "var(--stash-text-primary)" }}
-          >
-            <Shield className="w-4 h-4" />
-            Your role
-          </label>
-          <span
-            className="inline-block text-xs px-2 py-1 rounded uppercase tracking-wide"
-            style={{
-              backgroundColor: "var(--stash-bg-base)",
-              color:
-                current.role === "admin"
-                  ? "var(--stash-accent)"
-                  : "var(--stash-text-secondary)",
-              border: `1px solid ${
-                current.role === "admin"
-                  ? "var(--stash-accent)"
-                  : "var(--stash-border)"
-              }`,
-            }}
-          >
-            {current.role}
-          </span>
-        </div>
       </div>
-    </div>
-  );
-}
-
-function StoresList({
-  current,
-  stores,
-}: {
-  current: StoreSummary | null;
-  stores: StoreSummary[];
-}) {
-  if (!current) {
-    return (
-      <EmptyOrgState message="Select a store to view its organization." />
-    );
-  }
-  return (
-    <div>
-      <h3
-        className="text-base font-semibold mb-1"
-        style={{ color: "var(--stash-text-bright)" }}
-      >
-        Stores
-      </h3>
-      <p
-        className="text-sm mb-4"
-        style={{ color: "var(--stash-text-secondary)" }}
-      >
-        Content stores in <strong>{current.tenant_display_name}</strong>.
-        Provisioning new stores is handled by global admins via the{" "}
-        <code>/admin/tenants/{"{id}"}/stores</code> API.
-      </p>
-      {stores.length === 0 ? (
-        <div
-          className="p-6 rounded-md text-center text-sm"
-          style={{
-            backgroundColor: "var(--stash-bg-base)",
-            border: "1px dashed var(--stash-border)",
-            color: "var(--stash-text-secondary)",
-          }}
-        >
-          No stores visible to you in this organization.
-        </div>
-      ) : (
-        <div
-          className="rounded-md overflow-hidden"
-          style={{ border: "1px solid var(--stash-border)" }}
-        >
-          {stores.map((s, idx) => (
-            <div
-              key={s.id}
-              className="flex items-center justify-between px-4 py-3 text-sm"
-              style={{
-                backgroundColor: "var(--stash-bg-base)",
-                borderTop: idx === 0 ? "none" : "1px solid var(--stash-border)",
-              }}
-            >
-              <div className="min-w-0">
-                <div
-                  className="font-medium"
-                  style={{ color: "var(--stash-text-bright)" }}
-                >
-                  {s.display_name}
-                </div>
-                <code
-                  className="text-xs"
-                  style={{ color: "var(--stash-text-secondary)" }}
-                >
-                  /{s.tenant_slug}/{s.slug}
-                </code>
-              </div>
-              <span
-                className="text-xs px-2 py-0.5 rounded uppercase tracking-wide"
-                style={{
-                  backgroundColor: "var(--stash-bg-surface)",
-                  color:
-                    s.role === "admin"
-                      ? "var(--stash-accent)"
-                      : "var(--stash-text-secondary)",
-                  border: `1px solid ${
-                    s.role === "admin"
-                      ? "var(--stash-accent)"
-                      : "var(--stash-border)"
-                  }`,
-                }}
-              >
-                {s.role}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
