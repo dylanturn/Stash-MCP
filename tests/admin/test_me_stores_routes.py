@@ -40,6 +40,14 @@ async def test_me_returns_principal_shape(
     assert body["display_name"] == p.display_name
     assert body["auth_method"] == "session"
     assert body["tenant_roles"] == {str(tenant_id): "admin"}
+    assert body["tenants"] == [
+        {
+            "id": str(tenant_id),
+            "slug": "acme",
+            "display_name": "Acme",
+            "role": "admin",
+        }
+    ]
 
 
 async def test_stores_unauthenticated(auth_db, content_dir: Path):

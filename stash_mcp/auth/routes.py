@@ -260,6 +260,13 @@ async def logout_get(request: Request) -> RedirectResponse:
     return await logout(request)
 
 
+class TenantMembership(BaseModel):
+    id: UUID
+    slug: str
+    display_name: str
+    role: str
+
+
 class MeResponse(BaseModel):
     user_id: UUID
     oidc_sub: str
@@ -267,6 +274,7 @@ class MeResponse(BaseModel):
     display_name: str
     auth_method: str
     tenant_roles: dict[str, str]
+    tenants: list[TenantMembership]
 
 
 class StoreSummary(BaseModel):
@@ -280,16 +288,45 @@ class StoreSummary(BaseModel):
 
 
 @router.get("/me", response_model=MeResponse)
-async def me() -> MeResponse:
+async def me(
+    session: AsyncSession = Depends(get_session),
+) -> MeResponse:
     """Return the current principal as JSON for the SPA to consume.
 
     Any authenticated method is accepted; the upstream auth middleware
     has already populated the contextvar. A 401 from this endpoint is
     the SPA's cue to bounce the browser through ``/auth/login``.
+
+    Includes a ``tenants`` array with each membership's display name and
+    slug so the SPA can render tenant pickers (e.g. "create your first
+    store") without a second roundtrip.
     """
     p = current_principal()
     if p is None:
         raise Unauthenticated("login required")
+    tenant_ids = list(p.tenant_roles.keys())
+    memberships: list[TenantMembership] = []
+    if tenant_ids:
+        rows = (
+            (
+                await session.execute(
+                    select(Tenant)
+                    .where(Tenant.id.in_(tenant_ids))
+                    .order_by(Tenant.slug)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        memberships = [
+            TenantMembership(
+                id=t.id,
+                slug=t.slug,
+                display_name=t.display_name,
+                role=p.tenant_roles[t.id],
+            )
+            for t in rows
+        ]
     return MeResponse(
         user_id=p.user_id,
         oidc_sub=p.oidc_sub,
@@ -297,6 +334,7 @@ async def me() -> MeResponse:
         display_name=p.display_name,
         auth_method=p.auth_method,
         tenant_roles={str(tid): r for tid, r in p.tenant_roles.items()},
+        tenants=memberships,
     )
 
 
@@ -542,6 +580,7 @@ __all__ = [
     "TokenInfo",
     "McpServerBinding",
     "MeResponse",
+    "TenantMembership",
     "StoreSummary",
     "VisibleMcpServer",
 ]
