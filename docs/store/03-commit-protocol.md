@@ -12,13 +12,9 @@ A commit lands in **two phases**. Phase 1 stages content to S3
 `tree_entries`, and advances the `main` ref — atomically.
 
 The caller submits a list of typed **event descriptors** rather
-than raw file changes. The descriptor fields and per-kind
-requirements are in
-[02-data-model.md § EventDescriptor](./02-data-model.md#eventdescriptor);
-the contract behaviour (atomicity, conflict detection, lock
-granularity, errors) is in
-[01-storage-backend.md § Contract](./01-storage-backend.md#contract).
-All v1 events are file-grain.
+than raw file changes. Each event descriptor carries `kind`,
+`path`, the new content (if any), an optional `semantic_summary`,
+and an optional `patch_blob_sha`. All v1 events are file-grain.
 
 ## The protocol
 
@@ -26,23 +22,9 @@ All v1 events are file-grain.
 async def commit(
     store_id: UUID,
     event_descriptors: list[EventDescriptor],
-    author: Author,
+    author: Principal,
     message: str,
 ) -> UUID:
-
-    # PHASE 0 — validate the bundle before any side effects.
-    # Each descriptor is checked for internal consistency (kind ↔ required
-    # fields per the matrix in 02 § EventDescriptor); the bundle as a whole
-    # is checked for path uniqueness (see 01 § Contract).
-    seen_paths: set[str] = set()
-    for e in event_descriptors:
-        validate_descriptor_shape(e)              # raises InvalidDescriptorError
-        for p in (e.path, e.new_path) if e.kind == 'renamed' else (e.path,):
-            if p in seen_paths:
-                raise InvalidDescriptorError(
-                    f"duplicate path {p!r} in bundle"
-                )
-            seen_paths.add(p)
 
     # PHASE 1 — content to S3 (no locks, idempotent)
     # Dedup is decided in Postgres, not S3 — see "Dedup strategy" below.
@@ -80,24 +62,6 @@ async def commit(
 
         # 2b. Lock and read the 'main' ref (the only ref in v1).
         parent_commit_id = await db.fetch_ref_for_update(store_id, 'main')
-
-        # 2b-bis. Preconditions: per-kind path existence and optional
-        #         expected_before_sha. Any mismatch aborts the whole bundle.
-        #         See 01 § Contract for the typed errors raised here.
-        for e in event_descriptors:
-            current = await db.tree_entry_at(parent_commit_id, e.path)
-            if e.kind == 'created' and current is not None:
-                raise PathExistsError(e.path)
-            if e.kind in ('replaced', 'patched', 'deleted', 'renamed') and current is None:
-                raise PathNotFoundError(e.path, parent_commit_id)
-            if e.kind == 'renamed':
-                if await db.tree_entry_at(parent_commit_id, e.new_path) is not None:
-                    raise PathExistsError(e.new_path)
-            if e.expected_before_sha is not None:
-                if current is None or current.blob_sha != e.expected_before_sha:
-                    raise ConflictError(e.path, e.expected_before_sha,
-                                        current.blob_sha if current else None)
-            e.before_sha = current.blob_sha if current else None
 
         # 2c. Create the commit row.
         commit_id = uuid4()
@@ -163,16 +127,6 @@ reclaimed together by the GC pass (see
 update. Phase 1 is idempotent — a retry hits the `blob_exists`
 check and skips both the PUT and the insert.
 
-The precondition errors raised in step 2b-bis
-(`PathNotFoundError`, `PathExistsError`, `ConflictError`) are
-caller-visible — they propagate out of `commit()` unwrapped, so
-the MCP write tools and HTTP handlers can translate them to
-domain-appropriate responses. Other aborts (transient Postgres
-errors, lock acquisition failures, etc.) surface as
-`CommitAbortedError` with the underlying exception in its cause
-chain. See
-[01-storage-backend.md § Errors](./01-storage-backend.md#errors).
-
 ## Why two phases and not one
 
 S3 PUTs are not transactional with Postgres. By writing content
@@ -226,3 +180,226 @@ agents editing different parts of the same file will serialize.
 If usage patterns later show that's expensive, sections come back
 — additively, since `events.section_id` is reserved for it. See
 [09-open-questions.md](./09-open-questions.md).
+
+## Path leases
+
+The file-grain advisory locks above hold for the duration of one
+phase-2 transaction — milliseconds. They prevent torn writes but
+do **nothing** to protect an agent from the wasted-reasoning
+race:
+
+```
+Agent A: read_content("docs/auth.md")          # sees state at event E1
+Agent A: (thinks for 30 seconds, costs N tokens)
+Agent B: edit_content("docs/auth.md", ...)     # commits E2
+Agent A: edit_content("docs/auth.md", ...)     # commits E3, silently overwriting B
+```
+
+Path leases give agents a tool to opt into pessimistic isolation
+across the multi-tool-call work that produces a write. An agent
+that knows it's going to take time to read, reason, and decide
+acquires a lease on the path before reading; other agents trying
+to write that path back off until the lease is released, cancelled,
+or expires.
+
+### What a lease is
+
+A row in `path_leases` (schema in
+[02-data-model.md](./02-data-model.md)) keyed by
+`(store_id, path)`. The row carries:
+
+- `holder_id` — the principal that owns the lease
+- `acquired_at` — when the lease was first taken
+- `expires_at` — current TTL deadline; bumped by holder activity
+- `ttl_seconds` — the per-extension TTL, used to recompute
+  `expires_at` when the holder does work against the path
+
+While the lease is held and unexpired, **only the holder may
+commit events on that path**. Reads are unaffected — any agent
+may read the path at any time.
+
+### Acquisition and extension
+
+`lease_path(path, ttl_seconds)`:
+
+```python
+async def lease_path(store_id, path, holder, ttl_seconds) -> LeaseInfo | Locked:
+    async with db.begin():
+        # Brief advisory lock so two acquisitions don't race.
+        await db.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))",
+            k=f"lease:{store_id}:{path}",
+        )
+
+        existing = await db.fetch_lease(store_id, path)
+
+        # Treat an expired lease as absent (lazy GC).
+        if existing and existing.expires_at <= now():
+            await db.delete_lease(store_id, path)
+            existing = None
+
+        if existing is None:
+            # Fresh acquisition.
+            new = await db.insert_lease(
+                store_id=store_id,
+                path=path,
+                holder_id=holder.user_id,
+                acquired_at=now(),
+                expires_at=now() + ttl_seconds,
+                ttl_seconds=ttl_seconds,
+            )
+            return LeaseInfo.from_row(new)
+
+        if existing.holder_id == holder.user_id:
+            # Same holder reacquiring → extend.
+            new_expires = now() + ttl_seconds
+            await db.update_lease(
+                store_id, path,
+                expires_at=new_expires,
+                ttl_seconds=ttl_seconds,
+            )
+            return LeaseInfo(...)
+
+        # Someone else holds it.
+        return Locked(
+            held_by=existing.holder_id,
+            expires_at=existing.expires_at,
+        )
+```
+
+Calling `lease_path` against a lease the caller already holds is
+idempotent and serves as an explicit extension — the holder can
+re-set the TTL deliberately ("I'm about to think for 5 minutes,
+don't let this expire"). If the TTL passed is different from the
+stored value, the new value takes over for subsequent
+activity-extensions.
+
+### Activity-driven extension
+
+Agents are bad at estimating how long they'll take. To avoid
+making them micro-manage TTLs, **any read or write the holder
+performs on the leased path extends the lease**, provided the
+remaining TTL is below half-life. Concretely, at the entry of
+every read or write tool:
+
+```python
+async def maybe_extend_lease(store_id, path, principal):
+    lease = await db.fetch_lease(store_id, path)
+    if lease is None:
+        return
+    if lease.holder_id != principal.user_id:
+        return
+    if lease.expires_at <= now():
+        return  # expired; another agent will likely take it next
+    remaining = (lease.expires_at - now()).total_seconds()
+    if remaining < lease.ttl_seconds / 2:
+        await db.update_lease_expires_at(
+            store_id, path, now() + lease.ttl_seconds,
+        )
+```
+
+Below-half-life is the trigger so we don't write to `path_leases`
+on every read — most reads are no-ops. A burst of activity from
+the holder keeps the lease alive indefinitely; silence for longer
+than the TTL lets it expire.
+
+Activity that counts:
+
+- `read_content(path)`, `read_content_batch(paths)`,
+  `log_content(path)`, `blame_content(path)`,
+  `diff_content(path, ...)`, `get_path_history(path)`,
+  `inspect_content_structure(path)` — any tool whose argument
+  *names* the leased path.
+- Any write through `commit()` whose event descriptors include
+  the leased path.
+
+Activity that does **not** count:
+
+- `list_content(prefix)` even if the leased path is under the
+  prefix — the call doesn't single out the leased path.
+- `get_change_events(filter)` — filtered scans across many
+  paths.
+- Reads from other principals — only the holder's activity
+  extends.
+
+### Release
+
+`release_path_lease(path)`:
+
+```python
+async def release_path_lease(store_id, path, holder):
+    lease = await db.fetch_lease(store_id, path)
+    if lease is None or lease.holder_id != holder.user_id:
+        return ReleaseResult.NOT_HELD   # idempotent no-op
+    await db.delete_lease(store_id, path)
+    return ReleaseResult.RELEASED
+```
+
+Releasing a lease the caller doesn't hold is a no-op, not an
+error. Agents can call this defensively in cleanup paths.
+
+Releasing does **not** require there to be a pending commit; an
+agent that read, leased, and then decided not to write should
+still release. The lease holding past usefulness is a
+correctness-irrelevant but throughput-relevant cost — other
+agents are blocked until the explicit release, TTL expiry, or
+forced cancellation.
+
+A commit does **not** automatically release the lease. Agents
+often want to make several commits during one editing session;
+release is an explicit signal that the work is done. If the
+agent forgets to release, the lease holds until TTL or until
+activity stops.
+
+### How the commit protocol checks leases
+
+Phase 2 of `commit()` (see "The protocol" above) gains one new
+check, between step 2a and step 2b:
+
+```python
+# 2a-bis. Reject if any path is leased by a different principal.
+for e in event_descriptors:
+    lease = await db.fetch_lease(store_id, e.path)
+    if lease is None or lease.expires_at <= now():
+        continue                          # no active lease — fine
+    if lease.holder_id != author.user_id:
+        raise PathLeased(
+            path=e.path,
+            held_by=lease.holder_id,
+            expires_at=lease.expires_at,
+        )
+    # Holder is committing on their own leased path — extend.
+    if (lease.expires_at - now()).total_seconds() < lease.ttl_seconds / 2:
+        await db.update_lease_expires_at(
+            store_id, e.path, now() + lease.ttl_seconds,
+        )
+```
+
+`PathLeased` is the new failure mode. Callers see it instead of
+silently overwriting another agent's work in progress. The agent
+that loses the race can: wait until `expires_at`, work on a
+different path, fail back to the user, or — if they have a real
+reason — escalate to an admin who can forcibly release the lease.
+
+### Janitor
+
+Expired leases get cleaned up by a periodic job:
+
+```sql
+DELETE FROM path_leases WHERE expires_at < now();
+```
+
+Lazy cleanup also happens on every `lease_path` call (the
+expired-treat-as-absent step). The janitor is a backstop for
+paths that nobody happens to be acquiring leases on. It runs
+per-store, like GC.
+
+### Admin override
+
+An admin endpoint
+(`DELETE /api/<tenant>/<store>/leases/<path>?force=true`,
+tenant-admin auth) forcibly releases a lease regardless of
+holder. Useful for unsticking a tenant where an agent crashed
+holding a lease and the TTL hasn't expired yet. Logged as an
+audit event so the original holder can see what happened on its
+next read.

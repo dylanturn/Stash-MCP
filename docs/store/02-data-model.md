@@ -103,6 +103,24 @@ refs(
   commit_id  UUID REF commits,
   PRIMARY KEY (store_id, name)
 )
+
+path_leases(
+  store_id     UUID REF stores,
+  path         TEXT,
+  holder_id    UUID REF users,              -- principal holding the lease
+  acquired_at  TIMESTAMPTZ NOT NULL,
+  expires_at   TIMESTAMPTZ NOT NULL,        -- bumped on activity by the holder
+  ttl_seconds  INT NOT NULL,                -- the per-extension TTL, used to recompute expires_at
+  PRIMARY KEY (store_id, path)
+)
+CREATE INDEX path_leases_expiry_idx
+  ON path_leases (expires_at);
+-- Purpose: optional pessimistic isolation. A held lease gives the
+-- holder exclusive write access to the path until release, explicit
+-- cancellation, or TTL expiry. Acquired and released through dedicated
+-- tools; read/write tools by the holder extend the TTL automatically.
+-- See 03-commit-protocol.md for the protocol and 04-tool-surface.md
+-- for the tool surface.
 ```
 
 No `sections` table in v1. Sub-file grain attribution is deferred
@@ -141,135 +159,6 @@ intent — "added two paragraphs about the new retry behaviour,"
 "renamed config keys to match v2 schema." Optional but encouraged;
 the MCP write tools surface it as an explicit parameter (see
 [04-tool-surface.md](./04-tool-surface.md)).
-
-## EventDescriptor
-
-The caller's input to `commit()` — one descriptor per intended
-event. Fields split into **caller-supplied** (what the writer
-knows) and **derived** (filled in by the commit machinery). See
-[03-commit-protocol.md](./03-commit-protocol.md) for how the
-derived fields are computed.
-
-```
-EventDescriptor:
-  # caller-supplied
-  kind                 'created' | 'replaced' | 'patched' | 'renamed' | 'deleted'
-  path                 str                       # POSIX-relative; see 01 path grammar
-  new_path             str | None                # required iff kind == 'renamed'
-  after_bytes          bytes | None              # required for created/replaced/patched
-                                                 # and for renamed if content changed
-  patch_bytes          bytes | None              # optional; structured patch document
-  semantic_summary     str | None                # optional; writer-authored prose
-  expected_before_sha  str | None                # optional optimistic-concurrency token;
-                                                 # see 01 § Optimistic concurrency
-
-  # derived during commit
-  before_sha           str | None                # read from tree_entries in phase 2
-  after_sha            str | None                # sha256(after_bytes), phase 1
-  patch_sha            str | None                # sha256(patch_bytes), phase 1
-```
-
-The shape of a descriptor is checked at the Protocol boundary; an
-internally inconsistent descriptor (e.g., `kind='renamed'` with no
-`new_path`, or `kind='created'` with `expected_before_sha` set)
-raises `InvalidDescriptorError` before any side effects. The
-required-field matrix:
-
-| `kind`     | `path` | `new_path` | `after_bytes` | `patch_bytes` | `expected_before_sha` |
-| ---------- | ------ | ---------- | ------------- | ------------- | --------------------- |
-| `created`  | yes    | —          | yes           | optional      | must be `None`        |
-| `replaced` | yes    | —          | yes           | optional      | optional              |
-| `patched`  | yes    | —          | yes           | yes           | optional              |
-| `renamed`  | yes    | yes        | iff content changes | optional | optional (checked on old path) |
-| `deleted`  | yes    | —          | —             | —             | optional              |
-
-`patched` requires both `after_bytes` and `patch_bytes`: the
-patch is the intent / auditable record, and the resulting bytes
-are stored so reads don't have to replay the patch chain. The
-two must be consistent (`apply(before_bytes, patch) == after_bytes`),
-but consistency is the writer's responsibility, not the backend's.
-
-## Protocol-exposed types
-
-The Python-level types every backend returns from
-`StorageBackend` methods. Defined here so callers can code
-against a stable shape without depending on the SQL schema or on
-ORM models.
-
-```
-Author:
-  user_id        UUID | None       # NULL = system / automation;
-                                   # matches commits.author_user_id
-  display_name   str               # surfaced as "changed_by" on reads;
-                                   # "system" when user_id is None
-
-Event:
-  # event row, joined with its commit for cheap attribution
-  id                 UUID
-  store_id           UUID
-  commit_id          UUID
-  parent_event_id    UUID | None
-  kind               str           # see "Event kinds"
-  path               str
-  new_path           str | None
-  before_blob_sha    str | None
-  after_blob_sha     str | None
-  patch_blob_sha     str | None
-  semantic_summary   str | None
-  ts                 datetime
-
-  # denormalized from the join on commits
-  author             Author
-  commit_message     str
-  commit_ts          datetime
-
-ReadResult:
-  content            bytes
-  path               str           # the path read; identical to the request
-                                   # unless resolved through a rename chain
-  blob_sha           str
-  size_bytes         int
-  commit_id          UUID          # commit the read resolved against
-  last_event_id      UUID          # last event on path at/before commit_id
-  last_event_kind    str
-  last_changed_at    datetime      # = last event ts
-  changed_by         Author        # = last event's commit author
-  commit_message     str           # message of the commit that owned that event
-  semantic_summary   str | None    # from the last event
-
-EventFilter:
-  # all fields optional; AND'd together
-  paths              list[str] | None       # exact paths
-  path_prefix        str | None             # tree_entries-style prefix
-  kinds              list[str] | None       # subset of the event kinds
-  authors            list[UUID | None] | None  # None inside list = system
-  since              datetime | None        # events.ts >= since
-  until              datetime | None        # events.ts <  until
-  commit_id          UUID | None
-  limit              int | None             # default and max enforced by backend
-  cursor             str | None             # opaque pagination token
-```
-
-`Author.display_name` is populated by the backend at query time —
-the contract guarantees a non-empty string even for system
-commits (`"system"` is the canonical placeholder; backends are
-free to localise but must not return empty). Callers that need
-the raw `user_id` for further joins should use that field, not
-parse `display_name`.
-
-`Event` is denormalized for read convenience: every `Event`
-returned from the Protocol carries the commit's `author`,
-`message`, and `ts` fields, so a `get_path_history` call returns
-everything `blame_content` needs without a second round trip.
-
-`ReadResult.path` differs from the request only when a future
-read-through-rename mechanism is added (deferred); in v1 the two
-are always equal.
-
-`EventFilter.cursor` is opaque — backends choose the encoding
-(keyset on `(ts, id)`, page token, etc.). Callers must pass it
-back verbatim; comparing or constructing one is undefined
-behaviour.
 
 ## tree_entries materialization: full snapshot vs. delta
 
