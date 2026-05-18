@@ -272,12 +272,17 @@ def _validate_mounts(
     """Per-server validation: kind matches mount count, mounts have
     normalized paths, no prefix overlap.
 
-    Zero mounts is allowed at the type level (an unmounted server
-    exposes nothing — the runtime resolver refuses it with a clear
-    error). ``simple`` requires exactly one mount with an empty
-    ``virtual_prefix``; ``virtual`` requires at least one and no
-    overlapping prefixes.
+    ``simple`` allows zero or one mount — zero means the server is
+    inert (the runtime resolver will refuse calls with a clear error)
+    and one is the active shape. ``virtual`` requires at least one
+    mount with no overlapping prefixes; an empty mount list with
+    ``kind='virtual'`` is incoherent (a virtual server with nothing to
+    virtualize) and rejected here so it can't reach the runtime.
     """
+    if kind == "virtual" and not mounts:
+        raise ValidationError(
+            "virtual servers must have at least one mount"
+        )
     if not mounts:
         return []
     if kind == "simple" and len(mounts) != 1:

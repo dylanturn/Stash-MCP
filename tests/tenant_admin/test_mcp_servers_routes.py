@@ -223,6 +223,44 @@ async def test_simple_server_must_have_exactly_one_mount(
     assert resp.status_code == 400
 
 
+async def test_virtual_kind_with_empty_mounts_400s(
+    auth_db, content_dir: Path, acme_tenant, acme_admin_principal
+):
+    """``kind='virtual'`` declares a multi-mount layout — an empty
+    mounts list is incoherent and must be rejected at config-author
+    time rather than blowing up at runtime."""
+    client = make_full_client(acme_admin_principal)
+    resp = client.post(
+        f"/tenants/{acme_tenant.id}/mcp-servers",
+        json={"slug": "bad", "name": "Bad", "kind": "virtual", "mounts": []},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["type"] == "/problems/validation"
+
+
+async def test_patch_virtual_to_empty_mounts_400s(
+    auth_db, content_dir: Path, acme_tenant, acme_admin_principal
+):
+    """PATCHing an existing virtual server to ``mounts: []`` is the
+    same incoherent state as creating one and must also be rejected."""
+    client = make_full_client(acme_admin_principal)
+    await _create_store(client, acme_tenant.id, "docs")
+    client.post(
+        f"/tenants/{acme_tenant.id}/mcp-servers",
+        json={
+            "slug": "v",
+            "name": "V",
+            "kind": "virtual",
+            "mounts": [{"store_slug": "docs", "virtual_prefix": "d"}],
+        },
+    )
+    resp = client.patch(
+        f"/tenants/{acme_tenant.id}/mcp-servers/v",
+        json={"mounts": []},
+    )
+    assert resp.status_code == 400, resp.text
+
+
 async def test_duplicate_slug_409s(
     auth_db, content_dir: Path, acme_tenant, acme_admin_principal
 ):

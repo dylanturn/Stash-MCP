@@ -17,6 +17,7 @@ data to preserve, and the multi-root case was always degenerate (the
 UI never surfaced more than one in practice).
 """
 
+import uuid
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -152,18 +153,43 @@ def downgrade() -> None:
     )
 
     # Recreate one content root per server, carrying its kind.
+    # Use Python-side UUIDs and parameterized inserts via SQLAlchemy
+    # Core so this works on both SQLite (no native UUID type) and
+    # PostgreSQL — declaring the columns with sa.Uuid lets the dialect
+    # adapt the bind/fetch in each direction.
     bind = op.get_bind()
-    bind.execute(
-        sa.text(
-            """
-            INSERT INTO mcp_server_content_roots
-                (id, mcp_server_id, name, description, kind, sort_order)
-            SELECT
-                lower(hex(randomblob(16))), id, slug, description, kind, 0
-              FROM mcp_servers
-            """
-        )
+    servers_table = sa.table(
+        "mcp_servers",
+        sa.column("id", sa.Uuid(as_uuid=True)),
+        sa.column("slug", sa.Text()),
+        sa.column("description", sa.Text()),
+        sa.column("kind", sa.String(length=16)),
     )
+    content_roots_table = sa.table(
+        "mcp_server_content_roots",
+        sa.column("id", sa.Uuid(as_uuid=True)),
+        sa.column("mcp_server_id", sa.Uuid(as_uuid=True)),
+        sa.column("name", sa.Text()),
+        sa.column("description", sa.Text()),
+        sa.column("kind", sa.String(length=16)),
+        sa.column("sort_order", sa.SmallInteger()),
+    )
+    servers = bind.execute(sa.select(servers_table)).fetchall()
+    if servers:
+        bind.execute(
+            content_roots_table.insert(),
+            [
+                {
+                    "id": uuid.uuid4(),
+                    "mcp_server_id": s.id,
+                    "name": s.slug,
+                    "description": s.description,
+                    "kind": s.kind,
+                    "sort_order": 0,
+                }
+                for s in servers
+            ],
+        )
 
     with op.batch_alter_table("mcp_server_mounts") as batch:
         batch.add_column(
