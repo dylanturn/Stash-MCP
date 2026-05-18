@@ -1,10 +1,4 @@
-// Create / edit modal for an MCP-server config (spec 02).
-//
-// Replaces the legacy mock at ``CreateServerModal.tsx`` with three
-// concrete differences: no per-mount read/write toggle (write
-// capability is now a function of the tool allowlist), store-picker +
-// subpath instead of free-form path strings, and a grouped tool
-// catalog.
+// Create / edit modal for an MCP-server config.
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { Plus, Trash2, X } from 'lucide-react';
