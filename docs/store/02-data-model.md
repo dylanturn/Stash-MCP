@@ -142,6 +142,53 @@ intent — "added two paragraphs about the new retry behaviour,"
 the MCP write tools surface it as an explicit parameter (see
 [04-tool-surface.md](./04-tool-surface.md)).
 
+## EventDescriptor
+
+The caller's input to `commit()` — one descriptor per intended
+event. Fields split into **caller-supplied** (what the writer
+knows) and **derived** (filled in by the commit machinery). See
+[03-commit-protocol.md](./03-commit-protocol.md) for how the
+derived fields are computed.
+
+```
+EventDescriptor:
+  # caller-supplied
+  kind                 'created' | 'replaced' | 'patched' | 'renamed' | 'deleted'
+  path                 str                       # POSIX-relative; see 01 path grammar
+  new_path             str | None                # required iff kind == 'renamed'
+  after_bytes          bytes | None              # required for created/replaced/patched
+                                                 # and for renamed if content changed
+  patch_bytes          bytes | None              # optional; structured patch document
+  semantic_summary     str | None                # optional; writer-authored prose
+  expected_before_sha  str | None                # optional optimistic-concurrency token;
+                                                 # see 01 § Optimistic concurrency
+
+  # derived during commit
+  before_sha           str | None                # read from tree_entries in phase 2
+  after_sha            str | None                # sha256(after_bytes), phase 1
+  patch_sha            str | None                # sha256(patch_bytes), phase 1
+```
+
+The shape of a descriptor is checked at the Protocol boundary; an
+internally inconsistent descriptor (e.g., `kind='renamed'` with no
+`new_path`, or `kind='created'` with `expected_before_sha` set)
+raises `InvalidDescriptorError` before any side effects. The
+required-field matrix:
+
+| `kind`     | `path` | `new_path` | `after_bytes` | `patch_bytes` | `expected_before_sha` |
+| ---------- | ------ | ---------- | ------------- | ------------- | --------------------- |
+| `created`  | yes    | —          | yes           | optional      | must be `None`        |
+| `replaced` | yes    | —          | yes           | optional      | optional              |
+| `patched`  | yes    | —          | yes           | yes           | optional              |
+| `renamed`  | yes    | yes        | iff content changes | optional | optional (checked on old path) |
+| `deleted`  | yes    | —          | —             | —             | optional              |
+
+`patched` requires both `after_bytes` and `patch_bytes`: the
+patch is the intent / auditable record, and the resulting bytes
+are stored so reads don't have to replay the patch chain. The
+two must be consistent (`apply(before_bytes, patch) == after_bytes`),
+but consistency is the writer's responsibility, not the backend's.
+
 ## tree_entries materialization: full snapshot vs. delta
 
 The simple model writes one `tree_entries` row per (commit, path)

@@ -12,9 +12,13 @@ A commit lands in **two phases**. Phase 1 stages content to S3
 `tree_entries`, and advances the `main` ref — atomically.
 
 The caller submits a list of typed **event descriptors** rather
-than raw file changes. Each event descriptor carries `kind`,
-`path`, the new content (if any), an optional `semantic_summary`,
-and an optional `patch_blob_sha`. All v1 events are file-grain.
+than raw file changes. The descriptor fields and per-kind
+requirements are in
+[02-data-model.md § EventDescriptor](./02-data-model.md#eventdescriptor);
+the contract behaviour (atomicity, conflict detection, lock
+granularity, errors) is in
+[01-storage-backend.md § Contract](./01-storage-backend.md#contract).
+All v1 events are file-grain.
 
 ## The protocol
 
@@ -62,6 +66,24 @@ async def commit(
 
         # 2b. Lock and read the 'main' ref (the only ref in v1).
         parent_commit_id = await db.fetch_ref_for_update(store_id, 'main')
+
+        # 2b-bis. Preconditions: per-kind path existence and optional
+        #         expected_before_sha. Any mismatch aborts the whole bundle.
+        #         See 01 § Contract for the typed errors raised here.
+        for e in event_descriptors:
+            current = await db.tree_entry_at(parent_commit_id, e.path)
+            if e.kind == 'created' and current is not None:
+                raise PathExistsError(e.path)
+            if e.kind in ('replaced', 'patched', 'deleted', 'renamed') and current is None:
+                raise PathNotFoundError(e.path, parent_commit_id)
+            if e.kind == 'renamed':
+                if await db.tree_entry_at(parent_commit_id, e.new_path) is not None:
+                    raise PathExistsError(e.new_path)
+            if e.expected_before_sha is not None:
+                if current is None or current.blob_sha != e.expected_before_sha:
+                    raise ConflictError(e.path, e.expected_before_sha,
+                                        current.blob_sha if current else None)
+            e.before_sha = current.blob_sha if current else None
 
         # 2c. Create the commit row.
         commit_id = uuid4()
@@ -126,6 +148,16 @@ reclaimed together by the GC pass (see
 `events` rows leak — they live inside the same txn as the ref
 update. Phase 1 is idempotent — a retry hits the `blob_exists`
 check and skips both the PUT and the insert.
+
+The precondition errors raised in step 2b-bis
+(`PathNotFoundError`, `PathExistsError`, `ConflictError`) are
+caller-visible — they propagate out of `commit()` unwrapped, so
+the MCP write tools and HTTP handlers can translate them to
+domain-appropriate responses. Other aborts (transient Postgres
+errors, lock acquisition failures, etc.) surface as
+`CommitAbortedError` with the underlying exception in its cause
+chain. See
+[01-storage-backend.md § Errors](./01-storage-backend.md#errors).
 
 ## Why two phases and not one
 
