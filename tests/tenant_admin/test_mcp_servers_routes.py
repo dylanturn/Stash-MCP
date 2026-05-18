@@ -278,6 +278,45 @@ async def test_duplicate_slug_409s(
     assert r2.json()["type"] == "/problems/mcp-server/already-exists"
 
 
+async def test_patch_kind_only_rehydrates_existing_mounts(
+    auth_db, content_dir: Path, acme_tenant, acme_admin_principal
+):
+    """A PATCH that changes only ``kind`` must succeed by rehydrating
+    the existing mounts — we can't fabricate placeholder
+    ``store_slug=""`` MountInputs because the model enforces
+    ``min_length=1`` and would 422 before validation runs."""
+    client = make_full_client(acme_admin_principal)
+    await _create_store(client, acme_tenant.id, "docs")
+    create = client.post(
+        f"/tenants/{acme_tenant.id}/mcp-servers",
+        json={
+            "slug": "s",
+            "name": "S",
+            "kind": "virtual",
+            "mounts": [{"store_slug": "docs", "virtual_prefix": "d"}],
+        },
+    )
+    assert create.status_code == 201, create.text
+
+    # Flip kind to ``simple`` without resending mounts. The single
+    # existing mount must be re-validated against the new kind — and
+    # rejected because its virtual_prefix is non-empty.
+    bad = client.patch(
+        f"/tenants/{acme_tenant.id}/mcp-servers/s",
+        json={"kind": "simple"},
+    )
+    assert bad.status_code == 400, bad.text
+    assert bad.json()["type"] == "/problems/validation"
+
+    # And a coherent flip (virtual → virtual, kind unchanged shape) is
+    # accepted — proving the kind-only path doesn't itself 422.
+    ok = client.patch(
+        f"/tenants/{acme_tenant.id}/mcp-servers/s",
+        json={"kind": "virtual"},
+    )
+    assert ok.status_code == 200, ok.text
+
+
 async def test_patch_replaces_tools(
     auth_db: async_sessionmaker,
     content_dir: Path,

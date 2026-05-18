@@ -8,8 +8,9 @@ them on at runtime.
 Validation rules enforced here (defense-in-depth — the UI also
 prevents these):
 
-- ``kind='simple'`` servers must have exactly one mount with empty
-  ``virtual_prefix``; ``kind='virtual'`` must have at least one.
+- ``kind='simple'`` servers have at most one mount (zero or one) and
+  its ``virtual_prefix`` must be empty; ``kind='virtual'`` must have
+  at least one mount.
 - All mounted stores must belong to the config's tenant (no
   cross-tenant mounts).
 - Mount ``virtual_prefix`` and ``subpath`` are normalized; ``..``
@@ -627,22 +628,15 @@ async def update_mcp_server(
     next_mounts_input: list[MountInput] | None = None
     next_stores_by_slug: dict[str, Store] = {}
     if body.mounts is not None or body.kind is not None:
-        source_mounts = (
-            body.mounts
-            if body.mounts is not None
-            else [
-                MountInput(
-                    store_slug="",  # filled in below from existing rows
-                    subpath=m.subpath,
-                    virtual_prefix=m.virtual_prefix,
-                )
-                for m in server.mounts
-            ]
-        )
-        # When only kind changes, source_mounts above has empty slugs;
-        # resolve them from the existing rows so validation has real
-        # store_slugs to look up.
-        if body.mounts is None:
+        if body.mounts is not None:
+            source_mounts = body.mounts
+        else:
+            # Kind-only patch: rehydrate MountInput from the existing
+            # rows. We can't fabricate placeholder ``store_slug=""``
+            # values here — MountInput enforces ``min_length=1`` at
+            # construction time, so the request would 422 before we
+            # ever reach _validate_mounts. Resolve the real slugs
+            # first, then build the inputs.
             existing_store_ids = [m.store_id for m in server.mounts]
             existing_stores = (
                 (
