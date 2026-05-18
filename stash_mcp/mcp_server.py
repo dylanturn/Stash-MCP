@@ -423,6 +423,26 @@ def create_mcp_server(
 
         mcp.add_middleware(AuthListingMiddleware())
 
+        # Each session's serverInfo.name comes from
+        # create_initialization_options(), which is called per-session
+        # inside the StreamableHTTP task. By that point the request
+        # middleware has set current_mcp_server(), so we can return the
+        # config's slug instead of the global Config.SERVER_NAME — that
+        # way each MCP server identifies itself with its own name to
+        # the client.
+        _orig_init_options = mcp._mcp_server.create_initialization_options
+
+        def _scoped_init_options(*args, **kwargs):
+            from .routing.mcp_server_resolver import current_mcp_server
+
+            opts = _orig_init_options(*args, **kwargs)
+            cfg = current_mcp_server()
+            if cfg is not None:
+                opts.server_name = cfg.slug
+            return opts
+
+        mcp._mcp_server.create_initialization_options = _scoped_init_options
+
     # Wrap mcp.tool() so every registered tool is automatically timed and
     # its outcome recorded in the metrics collector.  Using functools.wraps
     # preserves the original signature so FastMCP generates the correct schema.
@@ -558,8 +578,14 @@ def create_mcp_server(
         # fastmcp 2.x; revisit if/when the project upgrades to 3.x.
         return mcp._resource_manager._resources.pop(uri_key, None) is not None
 
-    # Resource template for dynamic access (resources/templates/list)
-    @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")
+    # Resource template for dynamic access (resources/templates/list).
+    # The ``{path*}`` (RFC 6570 wildcard) form is required — ``{path}``
+    # alone compiles to ``[^/]+`` and would only match single-segment
+    # paths, so reads like ``stash://docs/guide/README.md`` would fall
+    # through to "Unknown resource" in auth mode (where READMEs are
+    # listed dynamically by the middleware but not statically
+    # registered as concrete resources).
+    @mcp.resource("stash://{path*}", mime_type="text/plain", description="Read any file by path")
     def read_resource(path: str) -> str:
         """Read a file by its path."""
         try:

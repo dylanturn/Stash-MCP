@@ -224,6 +224,43 @@ async def test_delete_readme_in_auth_mode_emits_list_changed(
     mock_context.send_resource_list_changed.assert_awaited()
 
 
+async def test_read_resource_template_matches_multi_segment_path(
+    auth_db, content_dir: Path
+):
+    """In auth mode the middleware enumerates READMEs in
+    ``resources/list`` but doesn't register them as concrete resources —
+    reads come back through the ``stash://{path*}`` template. The
+    wildcard form is critical: a plain ``{path}`` would only match
+    single-segment paths (RFC 6570 simple expansion → ``[^/]+``) and a
+    nested README would resolve as "Unknown resource"."""
+    tenant, store, config, composite = await _seed_single_store(
+        auth_db, content_dir, ["read_content"]
+    )
+    on_disk = content_dir / str(tenant.id) / "docs"
+    (on_disk / "backend").mkdir()
+    (on_disk / "backend" / "registry").mkdir()
+    (on_disk / "backend" / "registry" / "README.md").write_text(
+        "# nested\n"
+    )
+
+    mcp = create_mcp_server(USE_CURRENT_STORE)
+
+    p_tok = set_current_principal(_principal(tenant.id))
+    c_tok = set_current_mcp_server(config)
+    s_tok = set_current_store(composite)
+    try:
+        resource = await mcp._resource_manager.get_resource(
+            "stash://backend/registry/README.md"
+        )
+        content = await resource.fn()
+    finally:
+        reset_current_store(s_tok)
+        reset_current_mcp_server(c_tok)
+        reset_current_principal(p_tok)
+
+    assert content == "# nested\n"
+
+
 async def test_list_resources_multi_store_enumerates_under_virtual_prefixes(
     auth_db, content_dir: Path
 ):

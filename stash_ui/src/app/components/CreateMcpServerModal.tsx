@@ -1,16 +1,9 @@
-// Create / edit modal for an MCP-server config (spec 02).
-//
-// Replaces the legacy mock at ``CreateServerModal.tsx`` with three
-// concrete differences: no per-mount read/write toggle (write
-// capability is now a function of the tool allowlist), store-picker +
-// subpath instead of free-form path strings, and a grouped tool
-// catalog.
+// Create / edit modal for an MCP-server config.
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { Plus, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
-  ContentRootInput,
   McpServer,
   MULTI_STORE_DISALLOWED_TOOLS,
   MountInput,
@@ -31,18 +24,10 @@ interface Props {
   onSaved: () => void;
 }
 
-interface EditableContentRoot {
+interface EditableMount {
   // Local UI ID so React keys stay stable across edits — the server's
   // ID may or may not exist yet, and on PATCH we whole-list-replace
   // anyway, so server IDs are irrelevant to the modal's state.
-  uiId: string;
-  name: string;
-  description: string;
-  kind: 'simple' | 'virtual';
-  mounts: EditableMount[];
-}
-
-interface EditableMount {
   uiId: string;
   store_slug: string;
   subpath: string;
@@ -53,6 +38,15 @@ let _uid = 0;
 function genId(): string {
   _uid += 1;
   return `ui-${_uid}-${Date.now()}`;
+}
+
+function makeDefaultMount(stores: StoreSummary[]): EditableMount {
+  return {
+    uiId: genId(),
+    store_slug: stores[0]?.slug ?? '',
+    subpath: '',
+    virtual_prefix: '',
+  };
 }
 
 export function CreateMcpServerModal({
@@ -69,7 +63,8 @@ export function CreateMcpServerModal({
   const [timeoutSeconds, setTimeoutSeconds] = useState(60);
   const [enabled, setEnabled] = useState(true);
   const [tools, setTools] = useState<Set<string>>(new Set());
-  const [contentRoots, setContentRoots] = useState<EditableContentRoot[]>([]);
+  const [kind, setKind] = useState<'simple' | 'virtual'>('simple');
+  const [mounts, setMounts] = useState<EditableMount[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
@@ -81,18 +76,13 @@ export function CreateMcpServerModal({
       setTimeoutSeconds(editing.timeout_seconds);
       setEnabled(editing.enabled);
       setTools(new Set(editing.tools));
-      setContentRoots(
-        editing.content_roots.map((cr) => ({
+      setKind(editing.kind);
+      setMounts(
+        editing.mounts.map((m) => ({
           uiId: genId(),
-          name: cr.name,
-          description: cr.description ?? '',
-          kind: cr.kind,
-          mounts: cr.mounts.map((m) => ({
-            uiId: genId(),
-            store_slug: m.store_slug,
-            subpath: m.subpath,
-            virtual_prefix: m.virtual_prefix,
-          })),
+          store_slug: m.store_slug,
+          subpath: m.subpath,
+          virtual_prefix: m.virtual_prefix,
         })),
       );
     } else {
@@ -102,7 +92,8 @@ export function CreateMcpServerModal({
       setTimeoutSeconds(60);
       setEnabled(true);
       setTools(new Set());
-      setContentRoots([]);
+      setKind('simple');
+      setMounts([]);
     }
     setFieldErrors({});
   }, [editing]);
@@ -112,13 +103,11 @@ export function CreateMcpServerModal({
   // also refuse them, but the UI affordance avoids the round-trip.
   const distinctStoreCount = useMemo(() => {
     const ids = new Set<string>();
-    for (const cr of contentRoots) {
-      for (const m of cr.mounts) {
-        if (m.store_slug) ids.add(m.store_slug);
-      }
+    for (const m of mounts) {
+      if (m.store_slug) ids.add(m.store_slug);
     }
     return ids.size;
-  }, [contentRoots]);
+  }, [mounts]);
 
   const isMultiStore = distinctStoreCount > 1;
 
@@ -151,17 +140,10 @@ export function CreateMcpServerModal({
     setFieldErrors({});
     setSubmitting(true);
 
-    const payloadRoots: ContentRootInput[] = contentRoots.map((cr) => ({
-      name: cr.name.trim(),
-      description: cr.description.trim() || null,
-      kind: cr.kind,
-      mounts: cr.mounts.map(
-        (m): MountInput => ({
-          store_slug: m.store_slug,
-          subpath: m.subpath.trim(),
-          virtual_prefix: m.virtual_prefix.trim(),
-        }),
-      ),
+    const payloadMounts: MountInput[] = mounts.map((m) => ({
+      store_slug: m.store_slug,
+      subpath: m.subpath.trim(),
+      virtual_prefix: kind === 'simple' ? '' : m.virtual_prefix.trim(),
     }));
 
     try {
@@ -172,7 +154,8 @@ export function CreateMcpServerModal({
           timeout_seconds: timeoutSeconds,
           enabled,
           tools: Array.from(tools).sort(),
-          content_roots: payloadRoots,
+          kind,
+          mounts: payloadMounts,
         });
         toast.success(`Updated ${editing.slug}`);
       } else {
@@ -183,7 +166,8 @@ export function CreateMcpServerModal({
           timeout_seconds: timeoutSeconds,
           enabled,
           tools: Array.from(tools).sort(),
-          content_roots: payloadRoots,
+          kind,
+          mounts: payloadMounts,
         });
         toast.success(`Created ${slug.trim()}`);
       }
@@ -196,12 +180,12 @@ export function CreateMcpServerModal({
         const t = err.problem.type;
         if (t === '/problems/mcp-server/already-exists') {
           setFieldErrors({ slug: err.message });
-        } else if (t === '/problems/mount/conflict') {
-          setFieldErrors({ _content_roots: err.message });
-        } else if (t === '/problems/mount/cross-tenant') {
-          setFieldErrors({ _content_roots: err.message });
-        } else if (t === '/problems/mount/invalid') {
-          setFieldErrors({ _content_roots: err.message });
+        } else if (
+          t === '/problems/mount/conflict' ||
+          t === '/problems/mount/cross-tenant' ||
+          t === '/problems/mount/invalid'
+        ) {
+          setFieldErrors({ _mounts: err.message });
         } else if (t === '/problems/tool-name/invalid') {
           setFieldErrors({ _tools: err.message });
         } else if (t === '/problems/mcp-server/multi-store-git-forbidden') {
@@ -232,128 +216,56 @@ export function CreateMcpServerModal({
     if (!name.trim()) out.name = 'Display name is required';
     if (timeoutSeconds < 1 || timeoutSeconds > 600)
       out.timeout = 'Timeout must be between 1 and 600 seconds';
-    for (const cr of contentRoots) {
-      if (!cr.name.trim()) {
-        out._content_roots = 'Every content root needs a name';
+    if (kind === 'simple' && mounts.length > 1) {
+      out._mounts =
+        'Simple servers must have exactly one mount — switch to advanced or remove the extras';
+    }
+    for (const m of mounts) {
+      if (!m.store_slug) {
+        out._mounts = 'Each mount needs a store';
         break;
       }
-      if (cr.kind === 'simple' && cr.mounts.length !== 1) {
-        out._content_roots = `Simple content root "${cr.name}" must have exactly one mount`;
+      if (kind === 'virtual' && !m.virtual_prefix.trim()) {
+        out._mounts =
+          'Each mount in an advanced server needs a virtual prefix';
         break;
-      }
-      if (cr.kind === 'virtual' && cr.mounts.length < 1) {
-        out._content_roots = `Virtual content root "${cr.name}" needs at least one mount`;
-        break;
-      }
-      for (const m of cr.mounts) {
-        if (!m.store_slug) {
-          out._content_roots = `Mount in "${cr.name}" is missing a store`;
-          break;
-        }
       }
     }
     return out;
   }
 
-  function addContentRoot() {
-    setContentRoots((prev) => [
+  function changeKind(next: 'simple' | 'virtual') {
+    setKind(next);
+    // Switching to simple collapses to a single mount (drops the
+    // virtual_prefix that's no longer meaningful).
+    if (next === 'simple') {
+      setMounts((prev) => {
+        if (prev.length === 0) return [makeDefaultMount(tenantStores)];
+        return [{ ...prev[0], virtual_prefix: '' }];
+      });
+    } else if (mounts.length === 0) {
+      setMounts([makeDefaultMount(tenantStores)]);
+    }
+  }
+
+  function addMount() {
+    setMounts((prev) => [
       ...prev,
       {
-        uiId: genId(),
-        name: `root-${prev.length + 1}`,
-        description: '',
-        kind: 'simple',
-        mounts: [
-          {
-            uiId: genId(),
-            store_slug: tenantStores[0]?.slug ?? '',
-            subpath: '',
-            virtual_prefix: '',
-          },
-        ],
+        ...makeDefaultMount(tenantStores),
+        virtual_prefix: kind === 'virtual' ? `mount-${prev.length + 1}` : '',
       },
     ]);
   }
 
-  function updateRoot(uiId: string, patch: Partial<EditableContentRoot>) {
-    setContentRoots((prev) =>
-      prev.map((cr) => {
-        if (cr.uiId !== uiId) return cr;
-        const merged = { ...cr, ...patch };
-        // Switching from virtual to simple collapses to a single mount.
-        if (patch.kind === 'simple' && merged.mounts.length !== 1) {
-          merged.mounts = merged.mounts.slice(0, 1);
-          if (merged.mounts.length === 0) {
-            merged.mounts = [
-              {
-                uiId: genId(),
-                store_slug: tenantStores[0]?.slug ?? '',
-                subpath: '',
-                virtual_prefix: '',
-              },
-            ];
-          } else {
-            // Simple roots always have empty virtual_prefix.
-            merged.mounts = [{ ...merged.mounts[0], virtual_prefix: '' }];
-          }
-        }
-        return merged;
-      }),
+  function updateMount(mountUiId: string, patch: Partial<EditableMount>) {
+    setMounts((prev) =>
+      prev.map((m) => (m.uiId === mountUiId ? { ...m, ...patch } : m)),
     );
   }
 
-  function removeRoot(uiId: string) {
-    setContentRoots((prev) => prev.filter((cr) => cr.uiId !== uiId));
-  }
-
-  function addMount(rootUiId: string) {
-    setContentRoots((prev) =>
-      prev.map((cr) =>
-        cr.uiId !== rootUiId
-          ? cr
-          : {
-              ...cr,
-              mounts: [
-                ...cr.mounts,
-                {
-                  uiId: genId(),
-                  store_slug: tenantStores[0]?.slug ?? '',
-                  subpath: '',
-                  virtual_prefix: `mount-${cr.mounts.length + 1}`,
-                },
-              ],
-            },
-      ),
-    );
-  }
-
-  function updateMount(
-    rootUiId: string,
-    mountUiId: string,
-    patch: Partial<EditableMount>,
-  ) {
-    setContentRoots((prev) =>
-      prev.map((cr) =>
-        cr.uiId !== rootUiId
-          ? cr
-          : {
-              ...cr,
-              mounts: cr.mounts.map((m) =>
-                m.uiId === mountUiId ? { ...m, ...patch } : m,
-              ),
-            },
-      ),
-    );
-  }
-
-  function removeMount(rootUiId: string, mountUiId: string) {
-    setContentRoots((prev) =>
-      prev.map((cr) =>
-        cr.uiId !== rootUiId
-          ? cr
-          : { ...cr, mounts: cr.mounts.filter((m) => m.uiId !== mountUiId) },
-      ),
-    );
+  function removeMount(mountUiId: string) {
+    setMounts((prev) => prev.filter((m) => m.uiId !== mountUiId));
   }
 
   function toggleTool(name: string) {
@@ -540,58 +452,84 @@ export function CreateMcpServerModal({
             </div>
           </section>
 
-          {/* Content roots */}
+          {/* Content */}
           <section>
             <div className="flex items-center justify-between mb-2">
-              <SectionHeading title="Content roots" />
-              <ThemedSecondaryButton
-                type="button"
-                onClick={addContentRoot}
-                className="inline-flex items-center gap-1"
-              >
-                <Plus className="w-4 h-4" /> Add root
-              </ThemedSecondaryButton>
+              <SectionHeading title="Content" />
+              <div className="flex gap-2">
+                <KindToggle
+                  label="simple"
+                  active={kind === 'simple'}
+                  onClick={() => changeKind('simple')}
+                />
+                <KindToggle
+                  label="advanced"
+                  active={kind === 'virtual'}
+                  onClick={() => changeKind('virtual')}
+                />
+              </div>
             </div>
             <p
               className="text-sm mb-3"
               style={{ color: 'var(--stash-text-secondary)' }}
             >
-              Each root is one slice of the agent's view: <em>simple</em>{' '}
-              for a single mount at the agent's filesystem root,{' '}
-              <em>virtual</em> for one or more mounts under distinct
-              prefixes.
+              {kind === 'simple' ? (
+                <>
+                  <em>Simple</em> servers expose one store (optionally a
+                  subpath) at the agent's filesystem root.
+                </>
+              ) : (
+                <>
+                  <em>Advanced</em> servers mix one or more stores under
+                  distinct virtual prefixes — useful for stitching docs
+                  from multiple stores into a single view.
+                </>
+              )}
             </p>
-            {fieldErrors._content_roots && (
-              <ErrorLine message={fieldErrors._content_roots} />
-            )}
-            {contentRoots.length === 0 ? (
+            {fieldErrors._mounts && <ErrorLine message={fieldErrors._mounts} />}
+            {mounts.length === 0 ? (
               <div
-                className="p-4 rounded-md text-sm text-center"
+                className="p-4 rounded-md text-sm text-center mb-2"
                 style={{
                   backgroundColor: 'var(--stash-bg-base)',
                   border: '1px dashed var(--stash-border)',
                   color: 'var(--stash-text-secondary)',
                 }}
               >
-                No content roots yet — this server exposes no files.
-                Click <em>Add root</em> to mount one.
+                No mounts yet — this server exposes no files. Click{' '}
+                <em>Add mount</em> below to mount a store.
               </div>
             ) : (
-              <div className="space-y-4">
-                {contentRoots.map((cr) => (
-                  <ContentRootEditor
-                    key={cr.uiId}
-                    root={cr}
+              <div
+                className="p-3 rounded-md space-y-2"
+                style={{
+                  backgroundColor: 'var(--stash-bg-base)',
+                  border: '1px solid var(--stash-border)',
+                }}
+              >
+                {mounts.map((m) => (
+                  <MountEditor
+                    key={m.uiId}
+                    mount={m}
                     tenantStores={tenantStores}
-                    onChange={(patch) => updateRoot(cr.uiId, patch)}
-                    onRemove={() => removeRoot(cr.uiId)}
-                    onAddMount={() => addMount(cr.uiId)}
-                    onUpdateMount={(mid, patch) =>
-                      updateMount(cr.uiId, mid, patch)
-                    }
-                    onRemoveMount={(mid) => removeMount(cr.uiId, mid)}
+                    isVirtual={kind === 'virtual'}
+                    canRemove={kind === 'virtual' && mounts.length > 1}
+                    onChange={(patch) => updateMount(m.uiId, patch)}
+                    onRemove={() => removeMount(m.uiId)}
                   />
                 ))}
+              </div>
+            )}
+            {(kind === 'virtual' || mounts.length === 0) && (
+              <div className="mt-2">
+                <ThemedSecondaryButton
+                  type="button"
+                  onClick={addMount}
+                  className="inline-flex items-center gap-1 !py-1 !px-2 !text-xs"
+                  disabled={kind === 'simple' && mounts.length >= 1}
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add mount
+                </ThemedSecondaryButton>
               </div>
             )}
           </section>
@@ -617,117 +555,6 @@ export function CreateMcpServerModal({
                 ? 'Save changes'
                 : 'Create server'}
           </ThemedPrimaryButton>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ContentRootEditor({
-  root,
-  tenantStores,
-  onChange,
-  onRemove,
-  onAddMount,
-  onUpdateMount,
-  onRemoveMount,
-}: {
-  root: EditableContentRoot;
-  tenantStores: StoreSummary[];
-  onChange: (patch: Partial<EditableContentRoot>) => void;
-  onRemove: () => void;
-  onAddMount: () => void;
-  onUpdateMount: (mountUiId: string, patch: Partial<EditableMount>) => void;
-  onRemoveMount: (mountUiId: string) => void;
-}) {
-  return (
-    <div
-      className="p-3 rounded-md"
-      style={{
-        backgroundColor: 'var(--stash-bg-base)',
-        border: '1px solid var(--stash-border)',
-      }}
-    >
-      <div className="flex items-start gap-3">
-        <div className="flex-1 grid grid-cols-2 gap-3">
-          <FieldRow label="Name">
-            <ThemedInput
-              value={root.name}
-              onChange={(e) => onChange({ name: e.target.value })}
-            />
-          </FieldRow>
-          <FieldRow label="Kind">
-            <div className="flex gap-2">
-              <KindToggle
-                label="simple"
-                active={root.kind === 'simple'}
-                onClick={() => onChange({ kind: 'simple' })}
-              />
-              <KindToggle
-                label="virtual"
-                active={root.kind === 'virtual'}
-                onClick={() => onChange({ kind: 'virtual' })}
-              />
-            </div>
-          </FieldRow>
-          <div className="col-span-2">
-            <FieldRow label="Description (optional)">
-              <ThemedInput
-                value={root.description}
-                onChange={(e) => onChange({ description: e.target.value })}
-              />
-            </FieldRow>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onRemove}
-          className="p-2 rounded mt-7"
-          style={{ color: 'var(--stash-text-secondary)' }}
-          title="Remove content root"
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = 'var(--stash-bg-hover)';
-            e.currentTarget.style.color = '#f87171';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = 'transparent';
-            e.currentTarget.style.color = 'var(--stash-text-secondary)';
-          }}
-        >
-          <Trash2 className="w-4 h-4" />
-        </button>
-      </div>
-
-      <div className="mt-3">
-        <div className="flex items-center justify-between mb-2">
-          <span
-            className="text-xs uppercase tracking-wide"
-            style={{ color: 'var(--stash-text-secondary)' }}
-          >
-            Mounts ({root.mounts.length})
-          </span>
-          {root.kind === 'virtual' && (
-            <ThemedSecondaryButton
-              type="button"
-              onClick={onAddMount}
-              className="inline-flex items-center gap-1 !py-1 !px-2 !text-xs"
-            >
-              <Plus className="w-3.5 h-3.5" /> Add mount
-            </ThemedSecondaryButton>
-          )}
-        </div>
-        <div className="space-y-2">
-          {root.mounts.map((m) => (
-            <MountEditor
-              key={m.uiId}
-              mount={m}
-              tenantStores={tenantStores}
-              isVirtual={root.kind === 'virtual'}
-              canRemove={root.kind === 'virtual' && root.mounts.length > 1}
-              onChange={(patch) => onUpdateMount(m.uiId, patch)}
-              onRemove={() => onRemoveMount(m.uiId)}
-            />
-          ))}
         </div>
       </div>
     </div>

@@ -1,20 +1,21 @@
 """``/tenants/{tenant_id}/mcp-servers/*`` HTTP handlers.
 
 CRUD for the per-tenant MCP-server configuration metadata defined in
-``db.models`` (``McpServer``, ``McpServerTool``,
-``McpServerContentRoot``, ``McpServerMount``). Configs live inert until
-spec 03 wires tokens to them and spec 04 turns them on at runtime.
+``db.models`` (``McpServer``, ``McpServerTool``, ``McpServerMount``).
+Configs live inert until spec 03 wires tokens to them and spec 04 turns
+them on at runtime.
 
 Validation rules enforced here (defense-in-depth — the UI also
 prevents these):
 
-- ``simple`` content roots must have exactly one mount; ``virtual`` must
-  have at least one.
+- ``kind='simple'`` servers have at most one mount (zero or one) and
+  its ``virtual_prefix`` must be empty; ``kind='virtual'`` must have
+  at least one mount.
 - All mounted stores must belong to the config's tenant (no
   cross-tenant mounts).
 - Mount ``virtual_prefix`` and ``subpath`` are normalized; ``..``
   segments are rejected.
-- Within one content root, no two mounts may share a virtual_prefix or
+- Within one server, no two mounts may share a ``virtual_prefix`` or
   have one as a prefix of another (path-collision rule).
 - Tool names must be in ``REGISTERED_TOOL_NAMES``.
 - A config that spans more than one underlying store cannot enable any
@@ -40,7 +41,6 @@ from ..auth.principal import Principal
 from ..db.models import (
     AuditEvent,
     McpServer,
-    McpServerContentRoot,
     McpServerMount,
     McpServerTool,
     Store,
@@ -72,13 +72,6 @@ class MountInput(BaseModel):
     virtual_prefix: str = ""
 
 
-class ContentRootInput(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
-    description: str | None = None
-    kind: Literal["simple", "virtual"]
-    mounts: list[MountInput] = Field(..., min_length=1)
-
-
 class McpServerCreate(BaseModel):
     slug: str = Field(..., pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
     name: str = Field(..., min_length=1, max_length=255)
@@ -86,7 +79,8 @@ class McpServerCreate(BaseModel):
     timeout_seconds: int = Field(default=60, ge=1, le=600)
     enabled: bool = True
     tools: list[str] = Field(default_factory=list)
-    content_roots: list[ContentRootInput] = Field(default_factory=list)
+    kind: Literal["simple", "virtual"] = "simple"
+    mounts: list[MountInput] = Field(default_factory=list)
 
 
 class McpServerUpdate(BaseModel):
@@ -95,7 +89,8 @@ class McpServerUpdate(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=600)
     enabled: bool | None = None
     tools: list[str] | None = None
-    content_roots: list[ContentRootInput] | None = None
+    kind: Literal["simple", "virtual"] | None = None
+    mounts: list[MountInput] | None = None
 
 
 # --- response models --------------------------------------------------------
@@ -110,15 +105,6 @@ class MountInfo(BaseModel):
     sort_order: int
 
 
-class ContentRootInfo(BaseModel):
-    id: UUID
-    name: str
-    description: str | None
-    kind: str
-    sort_order: int
-    mounts: list[MountInfo]
-
-
 class McpServerInfo(BaseModel):
     id: UUID
     tenant_id: UUID
@@ -126,12 +112,13 @@ class McpServerInfo(BaseModel):
     slug: str
     name: str
     description: str | None
+    kind: str
     timeout_seconds: int
     enabled: bool
     created_at: datetime
     updated_at: datetime
     tools: list[str]
-    content_roots: list[ContentRootInfo]
+    mounts: list[MountInfo]
 
 
 # --- helpers ---------------------------------------------------------------
@@ -185,7 +172,7 @@ def _validate_no_prefix_overlap(prefixes: list[str]) -> None:
 async def _resolve_stores(
     session: AsyncSession,
     tenant: Tenant,
-    content_roots: list[ContentRootInput],
+    mounts: list[MountInput],
 ) -> dict[str, Store]:
     """Map every distinct store_slug in the inputs to a Store row.
 
@@ -196,7 +183,7 @@ async def _resolve_stores(
     only unique within a tenant — two tenants can each have a ``docs``
     store, and a global query would non-deterministically pick one.
     """
-    needed = {m.store_slug for cr in content_roots for m in cr.mounts}
+    needed = {m.store_slug for m in mounts}
     if not needed:
         return {}
     in_tenant = (
@@ -260,7 +247,7 @@ def _validate_tools(tools: list[str]) -> list[str]:
 def _validate_runtime_compatibility(
     *,
     tools: list[str],
-    content_roots: list[ContentRootInput],
+    mounts: list[MountInput],
     stores: dict[str, Store],
 ) -> None:
     """Refuse multi-store configs that enable git/transaction tools.
@@ -269,11 +256,7 @@ def _validate_runtime_compatibility(
     catching it at config-author time gives a clear error before any
     agent connects.
     """
-    underlying = {
-        stores[m.store_slug].id
-        for cr in content_roots
-        for m in cr.mounts
-    }
+    underlying = {stores[m.store_slug].id for m in mounts}
     if len(underlying) <= 1:
         return
     overlap = set(tools) & _MULTI_STORE_DISALLOWED_TOOLS
@@ -284,55 +267,49 @@ def _validate_runtime_compatibility(
         )
 
 
-def _validate_content_roots(
-    content_roots: list[ContentRootInput],
-) -> list[ContentRootInput]:
-    """Per-root validation: kind matches mount count, mounts have
-    normalized paths, no prefix overlap."""
-    out: list[ContentRootInput] = []
-    for cr in content_roots:
-        if cr.kind == "simple" and len(cr.mounts) != 1:
-            raise ValidationError(
-                f"content root {cr.name!r}: simple roots must have exactly "
-                f"one mount (got {len(cr.mounts)})"
-            )
-        if cr.kind == "virtual" and len(cr.mounts) < 1:
-            raise ValidationError(
-                f"content root {cr.name!r}: virtual roots must have at "
-                f"least one mount"
-            )
-        normalized_mounts: list[MountInput] = []
-        for m in cr.mounts:
-            normalized_mounts.append(
-                MountInput(
-                    store_slug=m.store_slug,
-                    subpath=_normalize_path_segment(
-                        m.subpath, field="subpath"
-                    ),
-                    virtual_prefix=_normalize_path_segment(
-                        m.virtual_prefix, field="virtual_prefix"
-                    ),
-                )
-            )
-        # For simple roots, the single mount must have empty virtual_prefix.
-        if cr.kind == "simple" and normalized_mounts[0].virtual_prefix:
-            raise ValidationError(
-                f"content root {cr.name!r}: simple roots must have an "
-                "empty virtual_prefix"
-            )
-        if cr.kind == "virtual":
-            _validate_no_prefix_overlap(
-                [m.virtual_prefix for m in normalized_mounts]
-            )
-        out.append(
-            ContentRootInput(
-                name=cr.name,
-                description=cr.description,
-                kind=cr.kind,
-                mounts=normalized_mounts,
+def _validate_mounts(
+    kind: str, mounts: list[MountInput]
+) -> list[MountInput]:
+    """Per-server validation: kind matches mount count, mounts have
+    normalized paths, no prefix overlap.
+
+    ``simple`` allows zero or one mount — zero means the server is
+    inert (the runtime resolver will refuse calls with a clear error)
+    and one is the active shape. ``virtual`` requires at least one
+    mount with no overlapping prefixes; an empty mount list with
+    ``kind='virtual'`` is incoherent (a virtual server with nothing to
+    virtualize) and rejected here so it can't reach the runtime.
+    """
+    if kind == "virtual" and not mounts:
+        raise ValidationError(
+            "virtual servers must have at least one mount"
+        )
+    if not mounts:
+        return []
+    if kind == "simple" and len(mounts) != 1:
+        raise ValidationError(
+            f"simple servers must have exactly one mount (got {len(mounts)})"
+        )
+    normalized: list[MountInput] = []
+    for m in mounts:
+        normalized.append(
+            MountInput(
+                store_slug=m.store_slug,
+                subpath=_normalize_path_segment(m.subpath, field="subpath"),
+                virtual_prefix=_normalize_path_segment(
+                    m.virtual_prefix, field="virtual_prefix"
+                ),
             )
         )
-    return out
+    if kind == "simple" and normalized[0].virtual_prefix:
+        raise ValidationError(
+            "simple servers must have an empty virtual_prefix"
+        )
+    if kind == "virtual":
+        _validate_no_prefix_overlap(
+            [m.virtual_prefix for m in normalized]
+        )
+    return normalized
 
 
 def _audit(
@@ -367,33 +344,24 @@ def _server_to_info(
         slug=server.slug,
         name=server.name,
         description=server.description,
+        kind=server.kind,
         timeout_seconds=server.timeout_seconds,
         enabled=server.enabled,
         created_at=server.created_at,
         updated_at=server.updated_at,
         tools=sorted(t.tool_name for t in server.tools),
-        content_roots=[
-            ContentRootInfo(
-                id=cr.id,
-                name=cr.name,
-                description=cr.description,
-                kind=cr.kind,
-                sort_order=cr.sort_order,
-                mounts=[
-                    MountInfo(
-                        id=m.id,
-                        store_id=m.store_id,
-                        store_slug=stores_by_id[m.store_id].slug
-                        if m.store_id in stores_by_id
-                        else "",
-                        subpath=m.subpath,
-                        virtual_prefix=m.virtual_prefix,
-                        sort_order=m.sort_order,
-                    )
-                    for m in cr.mounts
-                ],
+        mounts=[
+            MountInfo(
+                id=m.id,
+                store_id=m.store_id,
+                store_slug=stores_by_id[m.store_id].slug
+                if m.store_id in stores_by_id
+                else "",
+                subpath=m.subpath,
+                virtual_prefix=m.virtual_prefix,
+                sort_order=m.sort_order,
             )
-            for cr in server.content_roots
+            for m in server.mounts
         ],
     )
 
@@ -413,9 +381,7 @@ async def _load_full_server(
             select(McpServer)
             .options(
                 selectinload(McpServer.tools),
-                selectinload(McpServer.content_roots).selectinload(
-                    McpServerContentRoot.mounts
-                ),
+                selectinload(McpServer.mounts),
             )
             .where(McpServer.id == server_id)
         )
@@ -425,7 +391,7 @@ async def _load_full_server(
 async def _stores_by_id_for_server(
     session: AsyncSession, server: McpServer
 ) -> dict[UUID, Store]:
-    store_ids = {m.store_id for cr in server.content_roots for m in cr.mounts}
+    store_ids = {m.store_id for m in server.mounts}
     if not store_ids:
         return {}
     rows = (
@@ -462,9 +428,7 @@ async def list_mcp_servers(
                 select(McpServer)
                 .options(
                     selectinload(McpServer.tools),
-                    selectinload(McpServer.content_roots).selectinload(
-                        McpServerContentRoot.mounts
-                    ),
+                    selectinload(McpServer.mounts),
                 )
                 .where(McpServer.tenant_id == tenant.id)
                 .order_by(McpServer.slug)
@@ -507,10 +471,10 @@ async def create_mcp_server(
         )
 
     tools = _validate_tools(body.tools)
-    content_roots = _validate_content_roots(body.content_roots)
-    stores_by_slug = await _resolve_stores(session, tenant, content_roots)
+    mounts = _validate_mounts(body.kind, body.mounts)
+    stores_by_slug = await _resolve_stores(session, tenant, mounts)
     _validate_runtime_compatibility(
-        tools=tools, content_roots=content_roots, stores=stores_by_slug
+        tools=tools, mounts=mounts, stores=stores_by_slug
     )
 
     server = McpServer(
@@ -518,6 +482,7 @@ async def create_mcp_server(
         slug=body.slug,
         name=body.name,
         description=body.description,
+        kind=body.kind,
         timeout_seconds=body.timeout_seconds,
         enabled=body.enabled,
     )
@@ -529,26 +494,16 @@ async def create_mcp_server(
             McpServerTool(mcp_server_id=server.id, tool_name=name)
         )
 
-    for idx, cr in enumerate(content_roots):
-        root = McpServerContentRoot(
-            mcp_server_id=server.id,
-            name=cr.name,
-            description=cr.description,
-            kind=cr.kind,
-            sort_order=idx,
-        )
-        session.add(root)
-        await session.flush()
-        for midx, m in enumerate(cr.mounts):
-            session.add(
-                McpServerMount(
-                    content_root_id=root.id,
-                    store_id=stores_by_slug[m.store_slug].id,
-                    subpath=m.subpath,
-                    virtual_prefix=m.virtual_prefix,
-                    sort_order=midx,
-                )
+    for midx, m in enumerate(mounts):
+        session.add(
+            McpServerMount(
+                mcp_server_id=server.id,
+                store_id=stores_by_slug[m.store_slug].id,
+                subpath=m.subpath,
+                virtual_prefix=m.virtual_prefix,
+                sort_order=midx,
             )
+        )
 
     _audit(
         session,
@@ -594,9 +549,7 @@ async def get_mcp_server(
             select(McpServer)
             .options(
                 selectinload(McpServer.tools),
-                selectinload(McpServer.content_roots).selectinload(
-                    McpServerContentRoot.mounts
-                ),
+                selectinload(McpServer.mounts),
             )
             .where(
                 McpServer.tenant_id == tenant.id,
@@ -629,9 +582,7 @@ async def update_mcp_server(
             select(McpServer)
             .options(
                 selectinload(McpServer.tools),
-                selectinload(McpServer.content_roots).selectinload(
-                    McpServerContentRoot.mounts
-                ),
+                selectinload(McpServer.mounts),
             )
             .where(
                 McpServer.tenant_id == tenant.id,
@@ -662,34 +613,65 @@ async def update_mcp_server(
         changed_fields.append("enabled")
 
     # For the joint validate-multi-store check we need the resolved
-    # post-patch set of tools and content roots.
+    # post-patch set of tools and mounts.
     next_tools: list[str] = (
         _validate_tools(body.tools)
         if body.tools is not None
         else [t.tool_name for t in server.tools]
     )
-    next_roots_input: list[ContentRootInput] | None = None
+    # kind and mounts move in lockstep: validating mounts depends on
+    # the post-patch kind, so if either is in the body we re-validate
+    # both against the merged state.
+    next_kind: str = (
+        body.kind if body.kind is not None else server.kind
+    )
+    next_mounts_input: list[MountInput] | None = None
     next_stores_by_slug: dict[str, Store] = {}
-    if body.content_roots is not None:
-        next_roots_input = _validate_content_roots(body.content_roots)
+    if body.mounts is not None or body.kind is not None:
+        if body.mounts is not None:
+            source_mounts = body.mounts
+        else:
+            # Kind-only patch: rehydrate MountInput from the existing
+            # rows. We can't fabricate placeholder ``store_slug=""``
+            # values here — MountInput enforces ``min_length=1`` at
+            # construction time, so the request would 422 before we
+            # ever reach _validate_mounts. Resolve the real slugs
+            # first, then build the inputs.
+            existing_store_ids = [m.store_id for m in server.mounts]
+            existing_stores = (
+                (
+                    await session.execute(
+                        select(Store).where(
+                            Store.id.in_(existing_store_ids or {None})
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            by_id = {s.id: s for s in existing_stores}
+            source_mounts = [
+                MountInput(
+                    store_slug=by_id[m.store_id].slug,
+                    subpath=m.subpath,
+                    virtual_prefix=m.virtual_prefix,
+                )
+                for m in server.mounts
+                if m.store_id in by_id
+            ]
+        next_mounts_input = _validate_mounts(next_kind, source_mounts)
         next_stores_by_slug = await _resolve_stores(
-            session, tenant, next_roots_input
+            session, tenant, next_mounts_input
         )
     else:
-        # Existing content roots stay; need stores_by_slug for the
-        # multi-store check below.
+        # Neither kind nor mounts changed; build the existing-mounts
+        # view for the multi-store check.
+        existing_store_ids = [m.store_id for m in server.mounts]
         stores = (
             (
                 await session.execute(
                     select(Store).where(
-                        Store.id.in_(
-                            {
-                                m.store_id
-                                for cr in server.content_roots
-                                for m in cr.mounts
-                            }
-                            or {None}
-                        )
+                        Store.id.in_(existing_store_ids or {None})
                     )
                 )
             )
@@ -697,33 +679,20 @@ async def update_mcp_server(
             .all()
         )
         next_stores_by_slug = {s.slug: s for s in stores}
-        next_roots_input = [
-            ContentRootInput(
-                name=cr.name,
-                description=cr.description,
-                kind=cr.kind,  # type: ignore[arg-type]
-                mounts=[
-                    MountInput(
-                        store_slug=next(
-                            (
-                                s.slug
-                                for s in stores
-                                if s.id == m.store_id
-                            ),
-                            "",
-                        ),
-                        subpath=m.subpath,
-                        virtual_prefix=m.virtual_prefix,
-                    )
-                    for m in cr.mounts
-                ],
+        by_id = {s.id: s for s in stores}
+        next_mounts_input = [
+            MountInput(
+                store_slug=by_id[m.store_id].slug,
+                subpath=m.subpath,
+                virtual_prefix=m.virtual_prefix,
             )
-            for cr in server.content_roots
+            for m in server.mounts
+            if m.store_id in by_id
         ]
 
     _validate_runtime_compatibility(
         tools=next_tools,
-        content_roots=next_roots_input,
+        mounts=next_mounts_input,
         stores=next_stores_by_slug,
     )
 
@@ -740,32 +709,26 @@ async def update_mcp_server(
             )
         changed_fields.append("tools")
 
-    # Whole-list replace for content roots.
-    if body.content_roots is not None:
-        for cr in list(server.content_roots):
-            await session.delete(cr)
+    if body.kind is not None and body.kind != server.kind:
+        server.kind = body.kind
+        changed_fields.append("kind")
+
+    # Whole-list replace for mounts.
+    if body.mounts is not None:
+        for m in list(server.mounts):
+            await session.delete(m)
         await session.flush()
-        for idx, cr in enumerate(next_roots_input):
-            root = McpServerContentRoot(
-                mcp_server_id=server.id,
-                name=cr.name,
-                description=cr.description,
-                kind=cr.kind,
-                sort_order=idx,
-            )
-            session.add(root)
-            await session.flush()
-            for midx, m in enumerate(cr.mounts):
-                session.add(
-                    McpServerMount(
-                        content_root_id=root.id,
-                        store_id=next_stores_by_slug[m.store_slug].id,
-                        subpath=m.subpath,
-                        virtual_prefix=m.virtual_prefix,
-                        sort_order=midx,
-                    )
+        for midx, m_in in enumerate(next_mounts_input):
+            session.add(
+                McpServerMount(
+                    mcp_server_id=server.id,
+                    store_id=next_stores_by_slug[m_in.store_slug].id,
+                    subpath=m_in.subpath,
+                    virtual_prefix=m_in.virtual_prefix,
+                    sort_order=midx,
                 )
-        changed_fields.append("content_roots")
+            )
+        changed_fields.append("mounts")
 
     if changed_fields:
         _audit(
@@ -837,10 +800,8 @@ async def delete_mcp_server(
 __all__ = [
     "router",
     "MountInput",
-    "ContentRootInput",
     "McpServerCreate",
     "McpServerUpdate",
     "McpServerInfo",
-    "ContentRootInfo",
     "MountInfo",
 ]

@@ -17,15 +17,6 @@ export interface Mount {
   sort_order: number;
 }
 
-export interface ContentRoot {
-  id: string;
-  name: string;
-  description: string | null;
-  kind: 'simple' | 'virtual';
-  sort_order: number;
-  mounts: Mount[];
-}
-
 export interface McpServer {
   id: string;
   tenant_id: string;
@@ -33,25 +24,19 @@ export interface McpServer {
   slug: string;
   name: string;
   description: string | null;
+  kind: 'simple' | 'virtual';
   timeout_seconds: number;
   enabled: boolean;
   created_at: string;
   updated_at: string;
   tools: string[];
-  content_roots: ContentRoot[];
+  mounts: Mount[];
 }
 
 export interface MountInput {
   store_slug: string;
   subpath?: string;
   virtual_prefix?: string;
-}
-
-export interface ContentRootInput {
-  name: string;
-  description?: string | null;
-  kind: 'simple' | 'virtual';
-  mounts: MountInput[];
 }
 
 export interface McpServerCreate {
@@ -61,7 +46,8 @@ export interface McpServerCreate {
   timeout_seconds?: number;
   enabled?: boolean;
   tools?: string[];
-  content_roots?: ContentRootInput[];
+  kind?: 'simple' | 'virtual';
+  mounts?: MountInput[];
 }
 
 export interface McpServerUpdate {
@@ -70,7 +56,8 @@ export interface McpServerUpdate {
   timeout_seconds?: number;
   enabled?: boolean;
   tools?: string[];
-  content_roots?: ContentRootInput[];
+  kind?: 'simple' | 'virtual';
+  mounts?: MountInput[];
 }
 
 export interface VisibleMcpServer {

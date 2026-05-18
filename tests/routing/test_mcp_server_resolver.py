@@ -20,7 +20,6 @@ from stash_mcp.auth.principal import Principal
 from stash_mcp.config import Config
 from stash_mcp.db.models import (
     McpServer,
-    McpServerContentRoot,
     McpServerMount,
     Store,
     Tenant,
@@ -63,21 +62,14 @@ async def _seed(sm: async_sessionmaker[AsyncSession], content_dir: Path):
             tenant_id=tenant.id,
             slug="eng",
             name="Engineering",
+            kind="simple",
             enabled=True,
         )
         session.add(config)
         await session.flush()
-        cr = McpServerContentRoot(
-            mcp_server_id=config.id,
-            name="r",
-            kind="simple",
-            sort_order=0,
-        )
-        session.add(cr)
-        await session.flush()
         session.add(
             McpServerMount(
-                content_root_id=cr.id,
+                mcp_server_id=config.id,
                 store_id=store.id,
                 subpath="",
                 virtual_prefix="",

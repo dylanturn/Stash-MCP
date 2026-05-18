@@ -108,7 +108,7 @@ async def test_resource_mime_types(mcp_server):
 async def test_resource_templates(mcp_server):
     """Test that resource template is registered."""
     templates = await mcp_server.get_resource_templates()
-    assert "stash://{path}" in templates
+    assert "stash://{path*}" in templates
 
 
 async def test_read_resource_via_template(mcp_server):

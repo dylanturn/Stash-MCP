@@ -1,5 +1,13 @@
 # 02 — MCP server configs (data + API + UI, inert)
 
+> **Note (2026-05-18):** the original two-level shape described below
+> (server → content_roots → mounts) was simplified to one level
+> (server → mounts) in alembic revision `0004`. The `kind` field —
+> originally per-content-root — now lives on `mcp_servers` directly, and
+> `mcp_server_mounts.content_root_id` was replaced by `mcp_server_id`.
+> The rest of this doc reads as the original spec; the surviving model
+> is in `stash_mcp/db/models.py`.
+
 ## Goal
 
 Let a tenant admin define multiple named MCP-server *configurations*
