@@ -17,7 +17,7 @@ replaced wholesale, not wrapped behind an adapter — see
 ```
 StorageBackend (Protocol)
 ├── S3CASBackend          (production — Postgres + S3)
-└── InMemoryBackend       (test fake — Python dicts and lists)
+└── InMemoryBackend       (in-memory reference impl — for tests)
 ```
 
 The Protocol declares the methods every backend implements.
@@ -214,12 +214,18 @@ or MCP error payloads.
 Three reasons, all independent of having a second production
 backend:
 
-- **Test ergonomics.** `InMemoryBackend` is ~100 lines of Python
-  dicts and lists implementing the same surface as
-  `S3CASBackend`. Unit tests run against it in milliseconds with
-  no Postgres or S3 in the picture. Integration tests still hit
-  `S3CASBackend` via testcontainers, but the unit-test fast path
-  matters for everyday development.
+- **Test ergonomics.** `InMemoryBackend` is an in-memory
+  reference implementation that honours the same Contract as
+  `S3CASBackend` — including locks, two-phase ordering,
+  precondition checks, and typed errors — but stores all state
+  in Python data structures. Unit tests run against it in
+  milliseconds with no Postgres or S3 in the picture.
+  Integration tests still hit `S3CASBackend` via testcontainers
+  for the storage substrate itself, but the Contract-level
+  guarantees are exercised against the reference implementation
+  too — that's what makes the abstraction earn its keep. A fake
+  that skipped the locks would let `S3CASBackend` ship with
+  races that no unit test catches.
 - **Architectural firewall.** MCP tools, search indexer, admin
   endpoints can only call `StorageBackend` methods. They can't
   reach into S3CAS-internal things (table names, SQL queries, S3
@@ -236,11 +242,9 @@ justifies it.
 
 ## InMemoryBackend
 
-A pure-Python implementation backed by dicts and lists. No
-Postgres connection, no S3 client, no docker. Tests against it
-run in milliseconds.
-
-The fake holds the same conceptual state as production:
+A pure-Python reference implementation. No Postgres connection,
+no S3 client, no docker. Tests against it run in milliseconds.
+The conceptual state mirrors production:
 
 ```python
 class InMemoryBackend:
@@ -250,17 +254,47 @@ class InMemoryBackend:
         self.events: list[Event] = []
         self.tree_entries: dict[str, dict[str, str]] = {}       # commit_id -> {path -> sha}
         self.refs: dict[str, str | None] = {"main": None}       # ref name -> commit_id
+        self.path_locks: dict[tuple[UUID, str], asyncio.Lock] = {}
+        self.ref_lock: asyncio.Lock = asyncio.Lock()
 ```
 
-Reads resolve through `refs["main"]` and `tree_entries`, identical
-to the Postgres-backed path. Writes follow the same commit protocol
-as [03-commit-protocol.md](./03-commit-protocol.md) but skip the
-S3 layer entirely — blobs are stored inline in the dict.
+Reads resolve through `refs["main"]` and `tree_entries`,
+identical to the Postgres-backed path. Writes follow the same
+commit protocol as
+[03-commit-protocol.md](./03-commit-protocol.md) but skip the S3
+layer entirely — blobs are stored inline in the dict.
 
-The fake is **not** a durable backend. It exists for unit tests
-of the layers above the Protocol. It does not load from or save
-to the filesystem; restarting the test process loses all state.
-That's the point.
+**Faithfulness is the point, not minimalism.** The reference
+implementation honours every clause of § Contract above, not just
+the read/write surface — because if it didn't, unit tests against
+it would pass for code that races in production. Specifically:
+
+- Phase-0 validation (descriptor shape, bundle path uniqueness)
+- Two-phase commit ordering (validate → stage blobs → atomic apply)
+- Per-`(store_id, path)` lock acquisition in sorted-path order,
+  via `path_locks`
+- Atomic ref CAS via `ref_lock`
+- Per-kind path-existence preconditions
+- `expected_before_sha` conflict detection
+- All six typed `BackendError` subclasses raised with the same
+  fields as `S3CASBackend`
+- `tree_entries` materialization (copy-forward from parent +
+  apply event)
+- `get_path_history` walking `parent_event_id` chains
+- `get_events` with the full `EventFilter`, including opaque
+  cursor pagination
+- `read_batch` resolving all paths against one commit
+
+The implementation is small in absolute terms — Python data
+structures are concise — but it's not "a few dicts plus a global
+lock," and changes to it should be reviewed against § Contract
+the same way as changes to `S3CASBackend`. The line count is
+not the contract.
+
+It is **not** a durable backend. It exists for unit tests of the
+layers above the Protocol. It does not load from or save to the
+filesystem; restarting the test process loses all state. That's
+the point.
 
 ## S3CASBackend
 
