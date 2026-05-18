@@ -412,6 +412,17 @@ def create_mcp_server(
         lifespan=lifespan,
     )
 
+    # In auth mode, attach a list-time middleware that filters
+    # tools/list (per-config allowlist + multi-store git/tx gate) and
+    # augments resources/list with README.md files from the active
+    # composite filesystem. The legacy URL-based flow doesn't need it
+    # — the static enumeration above already covers a single store, and
+    # unscoped requests intentionally see the full catalog.
+    if _auth_mode:
+        from .mcp_listing import AuthListingMiddleware
+
+        mcp.add_middleware(AuthListingMiddleware())
+
     # Wrap mcp.tool() so every registered tool is automatically timed and
     # its outcome recorded in the metrics collector.  Using functools.wraps
     # preserves the original signature so FastMCP generates the correct schema.
@@ -435,24 +446,42 @@ def create_mcp_server(
 
             @functools.wraps(fn)
             async def _tracked(*args, **kwargs):
-                if Config.AUTH_ENABLED:
-                    _enforce_mcp_server_allowlist(tool_name)
-                    _enforce_tool_scope(tool_name, required_scope)
                 t0 = time.perf_counter()
+                success = False
+                error_type: str | None = None
                 try:
+                    if Config.AUTH_ENABLED:
+                        # Allowlist + scope checks run inside the
+                        # try/finally so their rejections are audited
+                        # too (otherwise blocked-tool attempts leave
+                        # no trail).
+                        _enforce_mcp_server_allowlist(tool_name)
+                        _enforce_tool_scope(tool_name, required_scope)
                     result = await fn(*args, **kwargs)
+                    success = True
                     get_metrics().record_tool_call(
                         tool_name, (time.perf_counter() - t0) * 1000, True
                     )
                     return result
                 except Exception as exc:
+                    error_type = type(exc).__name__
                     get_metrics().record_tool_call(
                         tool_name,
                         (time.perf_counter() - t0) * 1000,
                         False,
-                        type(exc).__name__,
+                        error_type,
                     )
                     raise
+                finally:
+                    if Config.AUTH_ENABLED:
+                        from .mcp_audit import audit_tool_call
+
+                        await audit_tool_call(
+                            tool_name,
+                            (time.perf_counter() - t0) * 1000,
+                            success,
+                            error_type,
+                        )
 
             return orig_decorator(_tracked)
 
@@ -487,16 +516,23 @@ def create_mcp_server(
             )
 
     def _register_resource(path: str) -> bool:
-        """Add a file to the MCP resource registry if it is a README.md.
+        """Add a README to the MCP resource registry, or signal a change.
+
+        In legacy single-store mode, registers a FunctionResource so the
+        new README shows up in ``resources/list``. In auth mode, the
+        listing middleware enumerates READMEs from the active composite
+        at list time, so no static registration is needed — but callers
+        still need to fire ``send_resource_list_changed`` so clients
+        re-fetch.
 
         Returns:
-            True if a resource was registered, False otherwise.
+            True if the resource list has effectively changed (README
+            path in either mode), False otherwise.
         """
         if not _is_resource_file(path):
             return False
         if _auth_mode:
-            # Per-store resource registration is owned by 06's SPA picker.
-            return False
+            return True
         uri = f"stash://{path}"
         mcp.add_resource(FunctionResource(
             uri=AnyUrl(uri), name=path,
@@ -507,23 +543,20 @@ def create_mcp_server(
         return True
 
     def _unregister_resource(path: str) -> bool:
-        """Remove a file from the MCP resource registry.
+        """Remove a README from the MCP resource registry, or signal a change.
 
         Returns:
-            True if a resource was removed, False otherwise.
+            True if the resource list has effectively changed (README
+            path in either mode), False otherwise.
         """
         if not _is_resource_file(path):
             return False
-        uri_key = f"stash://{path}"
-        try:
-            # fastmcp 3.x: use public local_provider API
-            mcp.local_provider.remove_resource(uri_key)
+        if _auth_mode:
             return True
-        except AttributeError:
-            # fastmcp 2.x: ResourceManager exposes _resources dict directly
-            return mcp._resource_manager._resources.pop(uri_key, None) is not None
-        except KeyError:
-            return False
+        uri_key = f"stash://{path}"
+        # ResourceManager.__resources is the only removal hook on
+        # fastmcp 2.x; revisit if/when the project upgrades to 3.x.
+        return mcp._resource_manager._resources.pop(uri_key, None) is not None
 
     # Resource template for dynamic access (resources/templates/list)
     @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")

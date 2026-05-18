@@ -24,6 +24,7 @@ from ..filesystem import (
     FileNotFoundError as ContentNotFoundError,
 )
 from ..filesystem import (
+    FileSystemError,
     InvalidPathError,
 )
 
@@ -58,7 +59,6 @@ class CompositeFileSystem:
         # Sort longest-prefix first so a mount at "docs/team-a" matches
         # before a mount at "docs" for paths under "docs/team-a/".
         self._mounts = sorted(mounts, key=lambda m: -len(m.virtual_prefix))
-        self._content_dir = Path("/composite")  # placeholder; not used
 
     # --- routing -----------------------------------------------------
 
@@ -211,32 +211,148 @@ class CompositeFileSystem:
         # legitimately mount the same underlying FS at different
         # subpaths, and a move between those would silently bypass the
         # cross-mount boundary if we only checked FS identity.
-        if src_mount is not dst_mount:
-            # Cross-mount moves are not supported in v1 — they'd need a
-            # copy+delete (atomicity story is fuzzy across stores) and
-            # they cross a boundary the agent's mental model treats as
-            # distinct.
-            raise InvalidPathError(
-                "cross-mount moves are not supported on composite "
-                "filesystems; use create+delete instead"
+        if src_mount is dst_mount:
+            src_fs.move_file(src_rel, dst_rel)
+            return
+        # Cross-mount move is two phases:
+        #   1. Copy source → destination. On failure: source intact,
+        #      partial destination rolled back. No data loss.
+        #   2. Delete source. On failure: BOTH copies preserved (the
+        #      destination is the canonical one going forward, the
+        #      stale source is a duplicate the caller can clean up).
+        #      We never roll back a successful destination write when
+        #      the delete fails — doing so would risk losing the data
+        #      entirely if the delete had partially succeeded.
+        if dst_fs.file_exists(dst_rel):
+            # Mirror FileSystem.move_file's refusal to overwrite.
+            raise FileSystemError(
+                f"Destination '{dest_path}' already exists"
             )
-        src_fs.move_file(src_rel, dst_rel)
+        content = src_fs.read_file(src_rel)
+        try:
+            dst_fs.write_file(dst_rel, content)
+        except Exception:
+            # Phase 1 failure — destination is at most partially
+            # written, source is intact. No rollback needed beyond
+            # cleaning up the partial write (best-effort).
+            try:
+                dst_fs.delete_file(dst_rel)
+            except Exception:
+                pass
+            raise
+        src_fs.delete_file(src_rel)
 
     def move_directory(
         self, source_path: str, dest_path: str
     ) -> list[tuple[str, str]]:
         src_fs, src_rel, src_mount = self._resolve(source_path)
         dst_fs, dst_rel, dst_mount = self._resolve(dest_path)
-        if src_mount is not dst_mount:
-            raise InvalidPathError(
-                "cross-mount directory moves are not supported on "
-                "composite filesystems"
+        if src_mount is dst_mount:
+            # Convert the underlying FS's FS-relative paths back into
+            # the agent-facing namespace before returning, so callers
+            # (mcp_server.move_content_directory in particular) can
+            # emit events and trigger resource notifications against
+            # the URIs they expect.
+            fs_moves = src_fs.move_directory(src_rel, dst_rel)
+            return [
+                (
+                    self._to_agent_path(src_mount, s),
+                    self._to_agent_path(src_mount, d),
+                )
+                for s, d in fs_moves
+            ]
+        # Cross-mount directory move: enumerate, copy each file across,
+        # then delete the originals. ``list_all_files`` returns []
+        # both for empty directories and for missing paths, so check
+        # existence explicitly to avoid silently no-op'ing a typo.
+        src_full = src_fs._resolve_path(src_rel)
+        if not src_full.exists():
+            raise ContentNotFoundError(
+                f"Directory '{source_path}' not found"
             )
-        return src_fs.move_directory(src_rel, dst_rel)
+        if not src_full.is_dir():
+            raise InvalidPathError(
+                f"Path '{source_path}' is not a directory"
+            )
+        src_files = src_fs.list_all_files(src_rel)
+        if not src_files:
+            # Empty directory: nothing to move across. Git doesn't
+            # track empty dirs anyway, so the no-op matches what a
+            # same-mount move + git commit would record.
+            return []
+
+        src_strip = src_rel + "/" if src_rel else ""
+        # Phase 1: copy every file. If any write fails, roll back
+        # destination writes (source untouched) and re-raise.
+        # ``moves`` is the agent-facing return value; ``fs_pairs``
+        # holds FS-relative paths needed for phase-2 deletion.
+        moves: list[tuple[str, str]] = []
+        fs_pairs: list[tuple[str, str]] = []
+        written: list[str] = []
+        try:
+            for src_file in src_files:
+                tail = (
+                    src_file[len(src_strip):]
+                    if src_strip and src_file.startswith(src_strip)
+                    else src_file
+                )
+                dst_file = posixpath.join(dst_rel, tail) if dst_rel else tail
+                agent_src = self._to_agent_path(src_mount, src_file)
+                agent_dst = self._to_agent_path(dst_mount, dst_file)
+                if dst_fs.file_exists(dst_file):
+                    raise FileSystemError(
+                        f"Destination '{agent_dst}' already exists"
+                    )
+                content = src_fs.read_file(src_file)
+                dst_fs.write_file(dst_file, content)
+                written.append(dst_file)
+                moves.append((agent_src, agent_dst))
+                fs_pairs.append((src_file, dst_file))
+        except Exception:
+            for dst_file in written:
+                try:
+                    dst_fs.delete_file(dst_file)
+                except Exception:
+                    pass
+            raise
+        # Phase 2: delete source files. If a delete fails partway
+        # through, we keep the destination intact (the data is safe
+        # there) and re-raise so the caller knows some sources are
+        # still around. This intentionally avoids the rollback-on-
+        # delete strategy: rolling back would delete destination
+        # copies of files whose sources were already removed.
+        for src_file, _ in fs_pairs:
+            src_fs.delete_file(src_file)
+        return moves
 
     def create_directory(self, relative_path: str) -> None:
         fs, fs_rel, _m = self._resolve(relative_path)
         fs.create_directory(fs_rel)
+
+    # --- namespace conversion ---------------------------------------
+
+    def _to_agent_path(self, mount: CompositeMount, fs_rel: str) -> str:
+        """Inverse of :meth:`_resolve`: take an FS-relative path under
+        ``mount`` and re-prefix it into the agent-facing namespace.
+
+        Mirrors the path-rewriting branch in :meth:`list_all_files` so
+        return values from ``move_directory`` (and any future caller
+        that needs to surface paths to MCP clients) speak the same
+        language the agent used on the way in.
+        """
+        strip = mount.subpath + "/" if mount.subpath else ""
+        rel = (
+            fs_rel[len(strip):]
+            if strip and fs_rel.startswith(strip)
+            else fs_rel
+        )
+        if mount.virtual_prefix:
+            return (
+                posixpath.join(mount.virtual_prefix, rel)
+                if rel
+                else mount.virtual_prefix
+            )
+        return rel
 
     # --- containment-check exposure ---------------------------------
 

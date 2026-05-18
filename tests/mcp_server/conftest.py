@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import event
@@ -75,3 +76,20 @@ def _reset_registry_singleton(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(registry_mod, "_registry", None, raising=False)
     yield
     monkeypatch.setattr(registry_mod, "_registry", None, raising=False)
+
+
+@pytest.fixture
+def mock_context():
+    """Bind a mock fastmcp Context so tools can call ctx.session.* etc.
+
+    Tools that depend on resource-list-changed notifications use this
+    fixture to spy on the awaited call.
+    """
+    from fastmcp.server.context import Context, _current_context
+
+    ctx = MagicMock(spec=Context)
+    ctx.session = AsyncMock()
+    ctx.send_resource_list_changed = AsyncMock()
+    token = _current_context.set(ctx)
+    yield ctx
+    _current_context.reset(token)

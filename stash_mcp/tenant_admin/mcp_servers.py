@@ -60,6 +60,7 @@ from ..errors import (
     ToolNameInvalid,
     ValidationError,
 )
+from ..mcp_listing import broadcast_catalog_changed
 from ..mcp_server import _MULTI_STORE_DISALLOWED_TOOLS, REGISTERED_TOOL_NAMES
 
 # --- request models ---------------------------------------------------------
@@ -570,6 +571,7 @@ async def create_mcp_server(
             f"mcp-server {tenant.slug}/{body.slug} already exists"
         ) from exc
 
+    await broadcast_catalog_changed()
     fresh = await _load_full_server(session, server.id)
     assert fresh is not None
     stores_by_id = await _stores_by_id_for_server(session, fresh)
@@ -776,6 +778,8 @@ async def update_mcp_server(
         )
     server_id = server.id
     await session.commit()
+    if changed_fields:
+        await broadcast_catalog_changed()
     # Drop the cached `server` (and its now-stale relationship
     # collections) from the identity map so the re-read sees post-commit
     # truth. `expire_all` would also work but would trigger lazy reload
@@ -827,6 +831,7 @@ async def delete_mcp_server(
     )
     await session.delete(server)
     await session.commit()
+    await broadcast_catalog_changed()
 
 
 __all__ = [
