@@ -56,6 +56,7 @@ services:
       - stash-index:/data/.stash-index
       - stash-auth:/data/auth
     environment:
+      - LOG_LEVEL=DEBUG
       - STASH_CONTENT_ROOT=/data/content
       - STASH_HOST=0.0.0.0
       - STASH_PORT=8000
@@ -73,6 +74,9 @@ services:
       - STASH_OIDC_CLIENT_ID=stash-mcp
       - STASH_OIDC_CLIENT_SECRET=dev-secret-do-not-use-in-prod
       - STASH_OIDC_ADMIN_GROUP=stash-admins
+
+      # MCP Stuff
+      - STASH_MCP_CONFIGS_ENABLED=true
     # Run alembic migrations before booting the server so the auth tables
     # exist on first start. `exec` keeps PID 1 as the server so signals
     # forward correctly.
