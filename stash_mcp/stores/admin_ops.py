@@ -23,7 +23,6 @@ from ..auth.principal import Principal
 from ..db.models import (
     AuditEvent,
     McpServer,
-    McpServerContentRoot,
     McpServerMount,
     Store,
     Tenant,
@@ -260,13 +259,8 @@ async def deprovision_store(
             await session.execute(
                 select(McpServer.slug)
                 .join(
-                    McpServerContentRoot,
-                    McpServerContentRoot.mcp_server_id == McpServer.id,
-                )
-                .join(
                     McpServerMount,
-                    McpServerMount.content_root_id
-                    == McpServerContentRoot.id,
+                    McpServerMount.mcp_server_id == McpServer.id,
                 )
                 .where(McpServerMount.store_id == store.id)
                 .distinct()

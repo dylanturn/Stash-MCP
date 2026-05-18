@@ -46,12 +46,13 @@ async def test_create_minimal_config(
     assert body["slug"] == "min"
     assert body["name"] == "Minimal"
     assert body["tools"] == []
-    assert body["content_roots"] == []
+    assert body["mounts"] == []
+    assert body["kind"] == "simple"
     assert body["enabled"] is True
     assert body["tenant_slug"] == "acme"
 
 
-async def test_create_with_simple_root(
+async def test_create_with_simple_mount(
     auth_db,
     content_dir: Path,
     acme_tenant,
@@ -66,16 +67,11 @@ async def test_create_with_simple_root(
             "slug": "engineering-docs",
             "name": "Engineering docs",
             "tools": ["read_content", "list_content"],
-            "content_roots": [
+            "kind": "simple",
+            "mounts": [
                 {
-                    "name": "engineering",
-                    "kind": "simple",
-                    "mounts": [
-                        {
-                            "store_slug": "docs",
-                            "subpath": "engineering",
-                        }
-                    ],
+                    "store_slug": "docs",
+                    "subpath": "engineering",
                 }
             ],
         },
@@ -83,12 +79,11 @@ async def test_create_with_simple_root(
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert sorted(body["tools"]) == ["list_content", "read_content"]
-    roots = body["content_roots"]
-    assert len(roots) == 1
-    assert roots[0]["kind"] == "simple"
-    assert len(roots[0]["mounts"]) == 1
-    assert roots[0]["mounts"][0]["store_slug"] == "docs"
-    assert roots[0]["mounts"][0]["subpath"] == "engineering"
+    assert body["kind"] == "simple"
+    mounts = body["mounts"]
+    assert len(mounts) == 1
+    assert mounts[0]["store_slug"] == "docs"
+    assert mounts[0]["subpath"] == "engineering"
 
 
 async def test_overlapping_virtual_prefixes_400s(
@@ -101,18 +96,10 @@ async def test_overlapping_virtual_prefixes_400s(
         json={
             "slug": "bad",
             "name": "Bad",
-            "content_roots": [
-                {
-                    "name": "v",
-                    "kind": "virtual",
-                    "mounts": [
-                        {"store_slug": "docs", "virtual_prefix": "docs"},
-                        {
-                            "store_slug": "docs",
-                            "virtual_prefix": "docs/team-a",
-                        },
-                    ],
-                }
+            "kind": "virtual",
+            "mounts": [
+                {"store_slug": "docs", "virtual_prefix": "docs"},
+                {"store_slug": "docs", "virtual_prefix": "docs/team-a"},
             ],
         },
     )
@@ -143,13 +130,8 @@ async def test_cross_tenant_mount_400s(
         json={
             "slug": "bad",
             "name": "Bad",
-            "content_roots": [
-                {
-                    "name": "cr",
-                    "kind": "simple",
-                    "mounts": [{"store_slug": "ops"}],
-                }
-            ],
+            "kind": "simple",
+            "mounts": [{"store_slug": "ops"}],
         },
     )
     assert resp.status_code == 400
@@ -180,13 +162,8 @@ async def test_same_slug_in_two_tenants_resolves_to_own_tenant(
         json={
             "slug": "ok",
             "name": "Ok",
-            "content_roots": [
-                {
-                    "name": "cr",
-                    "kind": "simple",
-                    "mounts": [{"store_slug": "docs"}],
-                }
-            ],
+            "kind": "simple",
+            "mounts": [{"store_slug": "docs"}],
         },
     )
     assert resp.status_code == 201, resp.text
@@ -194,7 +171,7 @@ async def test_same_slug_in_two_tenants_resolves_to_own_tenant(
     # The mounted store must belong to acme, not beta.
     from uuid import UUID
 
-    mount_store_id = UUID(body["content_roots"][0]["mounts"][0]["store_id"])
+    mount_store_id = UUID(body["mounts"][0]["store_id"])
 
     from sqlalchemy import select
 
@@ -225,38 +202,21 @@ async def test_unknown_tool_name_400s(
     assert resp.json()["type"] == "/problems/tool-name/invalid"
 
 
-async def test_simple_root_must_have_exactly_one_mount(
+async def test_simple_server_must_have_exactly_one_mount(
     auth_db, content_dir: Path, acme_tenant, acme_admin_principal
 ):
     client = make_full_client(acme_admin_principal)
     await _create_store(client, acme_tenant.id, "docs")
-    # Zero mounts → caught by pydantic min_length=1
+    # Two mounts on a simple kind → 400 from our validator
     resp = client.post(
         f"/tenants/{acme_tenant.id}/mcp-servers",
         json={
             "slug": "bad",
             "name": "Bad",
-            "content_roots": [
-                {"name": "x", "kind": "simple", "mounts": []}
-            ],
-        },
-    )
-    assert resp.status_code == 422  # pydantic validation
-    # Two mounts → 400 from our validator
-    resp = client.post(
-        f"/tenants/{acme_tenant.id}/mcp-servers",
-        json={
-            "slug": "bad",
-            "name": "Bad",
-            "content_roots": [
-                {
-                    "name": "x",
-                    "kind": "simple",
-                    "mounts": [
-                        {"store_slug": "docs"},
-                        {"store_slug": "docs", "virtual_prefix": "alt"},
-                    ],
-                }
+            "kind": "simple",
+            "mounts": [
+                {"store_slug": "docs"},
+                {"store_slug": "docs", "virtual_prefix": "alt"},
             ],
         },
     )
@@ -316,7 +276,7 @@ async def test_patch_replaces_tools(
     assert "tools" in detail["changed_fields"]
 
 
-async def test_patch_replaces_content_roots_cleanly(
+async def test_patch_replaces_mounts_cleanly(
     auth_db: async_sessionmaker,
     content_dir: Path,
     acme_tenant,
@@ -331,34 +291,23 @@ async def test_patch_replaces_content_roots_cleanly(
         json={
             "slug": "x",
             "name": "X",
-            "content_roots": [
-                {
-                    "name": "r1",
-                    "kind": "simple",
-                    "mounts": [{"store_slug": "docs"}],
-                }
-            ],
+            "kind": "simple",
+            "mounts": [{"store_slug": "docs"}],
         },
     )
     resp = client.patch(
         f"/tenants/{acme_tenant.id}/mcp-servers/x",
         json={
-            "content_roots": [
-                {
-                    "name": "r2",
-                    "kind": "simple",
-                    "mounts": [{"store_slug": "ops"}],
-                }
-            ]
+            "kind": "simple",
+            "mounts": [{"store_slug": "ops"}],
         },
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert len(body["content_roots"]) == 1
-    assert body["content_roots"][0]["name"] == "r2"
-    assert body["content_roots"][0]["mounts"][0]["store_slug"] == "ops"
+    assert len(body["mounts"]) == 1
+    assert body["mounts"][0]["store_slug"] == "ops"
 
-    # Old mounts and roots should be gone, not orphaned.
+    # Old mounts should be gone, not orphaned.
     async with auth_db() as session:
         rows = (await session.execute(select(McpServerMount))).scalars().all()
     assert len(rows) == 1
@@ -391,13 +340,8 @@ async def test_delete_with_confirm_cascades(
             "slug": "x",
             "name": "X",
             "tools": ["read_content"],
-            "content_roots": [
-                {
-                    "name": "r",
-                    "kind": "simple",
-                    "mounts": [{"store_slug": "docs"}],
-                }
-            ],
+            "kind": "simple",
+            "mounts": [{"store_slug": "docs"}],
         },
     )
     resp = client.delete(
@@ -426,13 +370,8 @@ async def test_store_in_use_by_config_blocks_store_delete(
         json={
             "slug": "uses-docs",
             "name": "X",
-            "content_roots": [
-                {
-                    "name": "r",
-                    "kind": "simple",
-                    "mounts": [{"store_slug": "docs"}],
-                }
-            ],
+            "kind": "simple",
+            "mounts": [{"store_slug": "docs"}],
         },
     )
     resp = client.delete(
@@ -483,21 +422,10 @@ async def test_multi_store_with_git_tool_400s(
             "slug": "bad-multi",
             "name": "Bad",
             "tools": ["read_content", "log_content"],
-            "content_roots": [
-                {
-                    "name": "r",
-                    "kind": "virtual",
-                    "mounts": [
-                        {
-                            "store_slug": "docs",
-                            "virtual_prefix": "engineering",
-                        },
-                        {
-                            "store_slug": "ops",
-                            "virtual_prefix": "ops",
-                        },
-                    ],
-                }
+            "kind": "virtual",
+            "mounts": [
+                {"store_slug": "docs", "virtual_prefix": "engineering"},
+                {"store_slug": "ops", "virtual_prefix": "ops"},
             ],
         },
     )

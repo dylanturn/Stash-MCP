@@ -202,10 +202,7 @@ function ServerRow({
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const mountCount = server.content_roots.reduce(
-    (n, cr) => n + cr.mounts.length,
-    0,
-  );
+  const mountCount = server.mounts.length;
   return (
     <div
       className="flex items-center justify-between px-4 py-3 text-sm gap-3"
@@ -241,9 +238,8 @@ function ServerRow({
           style={{ color: 'var(--stash-text-secondary)' }}
         >
           <code>{server.slug}</code> · {server.tools.length} tool
-          {server.tools.length === 1 ? '' : 's'} · {server.content_roots.length}{' '}
-          root{server.content_roots.length === 1 ? '' : 's'} ({mountCount}{' '}
-          mount{mountCount === 1 ? '' : 's'})
+          {server.tools.length === 1 ? '' : 's'} · {server.kind} ·{' '}
+          {mountCount} mount{mountCount === 1 ? '' : 's'}
         </div>
         {server.description && (
           <div

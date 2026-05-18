@@ -6,7 +6,7 @@ Runs after :class:`StashAuthMiddleware` and before
 requests. If the in-flight principal carries an ``mcp_server_id`` claim
 (populated by :class:`ApiTokenAuthProvider`), the middleware:
 
-1. Loads the config + tools + content roots + mounts from the DB.
+1. Loads the config + tools + mounts from the DB.
 2. Builds a :class:`CompositeFileSystem` and wraps it in a
    :class:`CompositeLoadedStore`.
 3. Sets ``current_store`` (so the downstream
@@ -31,7 +31,6 @@ from ..auth.context import current_principal
 from ..config import Config
 from ..db.models import (
     McpServer,
-    McpServerContentRoot,
     Store,
     Tenant,
 )
@@ -76,8 +75,7 @@ def current_mcp_server() -> McpServer | None:
 async def _build_composite(
     config: McpServer, registry: StoreRegistry
 ) -> CompositeLoadedStore:
-    """Walk a config's content roots / mounts and assemble the
-    composite store.
+    """Walk a config's mounts and assemble the composite store.
 
     For single-store composites, the composite's ``git_backend`` and
     ``transaction_manager`` are forwarded from the underlying store's
@@ -96,12 +94,7 @@ async def _build_composite(
                     .join(Tenant, Tenant.id == Store.tenant_id)
                     .where(
                         Store.id.in_(
-                            {
-                                m.store_id
-                                for cr in config.content_roots
-                                for m in cr.mounts
-                            }
-                            or {None}
+                            {m.store_id for m in config.mounts} or {None}
                         )
                     )
                 )
@@ -114,31 +107,30 @@ async def _build_composite(
     for store_id, (store, tenant) in by_id.items():
         loaded_stores[store_id] = await registry.get(tenant.slug, store.slug)
 
-    is_single = len({m.store_id for cr in config.content_roots for m in cr.mounts}) == 1
+    is_single = len({m.store_id for m in config.mounts}) == 1
 
     # Build mounts in the order they appear (sort_order is already
     # applied by the relationship `order_by`).
     mounts: list[CompositeMount] = []
-    for cr in config.content_roots:
-        for m in cr.mounts:
-            loaded = loaded_stores[m.store_id]
-            # For single-store configs we want the transaction-wrapped
-            # FS so write tools go through the transaction layer.
-            fs = loaded.fs_for_mcp if is_single else loaded.filesystem
-            mounts.append(
-                CompositeMount(
-                    fs=fs,
-                    subpath=m.subpath,
-                    virtual_prefix=m.virtual_prefix,
-                )
+    for m in config.mounts:
+        loaded = loaded_stores[m.store_id]
+        # For single-store configs we want the transaction-wrapped FS so
+        # write tools go through the transaction layer.
+        fs = loaded.fs_for_mcp if is_single else loaded.filesystem
+        mounts.append(
+            CompositeMount(
+                fs=fs,
+                subpath=m.subpath,
+                virtual_prefix=m.virtual_prefix,
             )
+        )
 
-    # If the config has zero content roots the composite has nothing to
-    # mount — refuse with a clear error so the tool handler doesn't
-    # later get a misleading "path not in any mount" message.
+    # If the config has zero mounts the composite has nothing to mount
+    # — refuse with a clear error so the tool handler doesn't later get
+    # a misleading "path not in any mount" message.
     if not mounts:
         raise McpServerConfigDisabled(
-            f"mcp-server {config.slug!r} has no content roots configured"
+            f"mcp-server {config.slug!r} has no mounts configured"
         )
 
     composite_fs = CompositeFileSystem(mounts)
@@ -253,9 +245,7 @@ class McpServerResolverMiddleware:
                     select(McpServer)
                     .options(
                         selectinload(McpServer.tools),
-                        selectinload(McpServer.content_roots).selectinload(
-                            McpServerContentRoot.mounts
-                        ),
+                        selectinload(McpServer.mounts),
                     )
                     .where(McpServer.id == server_uuid)
                 )

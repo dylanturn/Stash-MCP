@@ -223,13 +223,20 @@ class McpServer(Base):
     """A named MCP-server configuration scoped to a single tenant.
 
     Defines a slice of the tenant's content (composed from one or more
-    stores) and an allowlist of MCP tools that callers see. Tokens are
+    mounts) and an allowlist of MCP tools that callers see. Tokens are
     bound to a config via :attr:`ApiToken.mcp_server_id` (spec 03).
+
+    ``kind='simple'`` means a single mount at the agent's filesystem root
+    (the mount has an empty ``virtual_prefix``). ``kind='virtual'`` means
+    one or more mounts under distinct non-overlapping prefixes.
     """
 
     __tablename__ = "mcp_servers"
     __table_args__ = (
         UniqueConstraint("tenant_id", "slug", name="uq_mcp_servers_tenant_slug"),
+        CheckConstraint(
+            "kind IN ('simple','virtual')", name="ck_mcp_servers_kind"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -243,6 +250,9 @@ class McpServer(Base):
     slug: Mapped[str] = mapped_column(String(63), nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="simple"
+    )
     timeout_seconds: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, server_default="60"
     )
@@ -265,11 +275,11 @@ class McpServer(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
-    content_roots: Mapped[list[McpServerContentRoot]] = relationship(
+    mounts: Mapped[list[McpServerMount]] = relationship(
         back_populates="mcp_server",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        order_by="McpServerContentRoot.sort_order",
+        order_by="McpServerMount.sort_order",
     )
 
 
@@ -295,46 +305,12 @@ class McpServerTool(Base):
     mcp_server: Mapped[McpServer] = relationship(back_populates="tools")
 
 
-class McpServerContentRoot(Base):
-    """A named slice of content composed from one or more mounts."""
-
-    __tablename__ = "mcp_server_content_roots"
-    __table_args__ = (
-        CheckConstraint(
-            "kind IN ('simple','virtual')", name="ck_content_roots_kind"
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    mcp_server_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("mcp_servers.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    kind: Mapped[str] = mapped_column(String(16), nullable=False)
-    sort_order: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, server_default="0"
-    )
-
-    mcp_server: Mapped[McpServer] = relationship(back_populates="content_roots")
-    mounts: Mapped[list[McpServerMount]] = relationship(
-        back_populates="content_root",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        order_by="McpServerMount.sort_order",
-    )
-
-
 class McpServerMount(Base):
     """One physical store-subpath mounted at a virtual prefix.
 
-    A simple content root has exactly one mount with empty
-    virtual_prefix; a virtual content root has 1+ mounts with distinct
-    non-overlapping prefixes.
+    A ``simple`` server has exactly one mount with empty virtual_prefix;
+    a ``virtual`` server has 1+ mounts with distinct non-overlapping
+    prefixes.
 
     ``store_id`` uses RESTRICT so a tenant admin can't delete a store
     that some config still mounts — they see a clear error and can fix
@@ -346,9 +322,9 @@ class McpServerMount(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    content_root_id: Mapped[uuid.UUID] = mapped_column(
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("mcp_server_content_roots.id", ondelete="CASCADE"),
+        ForeignKey("mcp_servers.id", ondelete="CASCADE"),
         nullable=False,
     )
     store_id: Mapped[uuid.UUID] = mapped_column(
@@ -364,5 +340,5 @@ class McpServerMount(Base):
         SmallInteger, nullable=False, server_default="0"
     )
 
-    content_root: Mapped[McpServerContentRoot] = relationship(back_populates="mounts")
+    mcp_server: Mapped[McpServer] = relationship(back_populates="mounts")
     store: Mapped[Store] = relationship()

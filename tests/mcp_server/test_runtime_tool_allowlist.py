@@ -17,7 +17,6 @@ from stash_mcp.auth.context import (
 from stash_mcp.auth.principal import Principal
 from stash_mcp.db.models import (
     McpServer,
-    McpServerContentRoot,
     McpServerMount,
     McpServerTool,
     Store,
@@ -82,7 +81,11 @@ async def _seed_single_store(sm, content_dir, allowed_tools: list[str]):
         session.add(store)
         await session.flush()
         config = McpServer(
-            tenant_id=tenant.id, slug="eng", name="E", enabled=True
+            tenant_id=tenant.id,
+            slug="eng",
+            name="E",
+            kind="simple",
+            enabled=True,
         )
         session.add(config)
         await session.flush()
@@ -90,14 +93,9 @@ async def _seed_single_store(sm, content_dir, allowed_tools: list[str]):
             session.add(
                 McpServerTool(mcp_server_id=config.id, tool_name=t)
             )
-        cr = McpServerContentRoot(
-            mcp_server_id=config.id, name="r", kind="simple", sort_order=0
-        )
-        session.add(cr)
-        await session.flush()
         session.add(
             McpServerMount(
-                content_root_id=cr.id,
+                mcp_server_id=config.id,
                 store_id=store.id,
                 subpath="",
                 virtual_prefix="",
@@ -108,7 +106,7 @@ async def _seed_single_store(sm, content_dir, allowed_tools: list[str]):
         await session.refresh(tenant)
         await session.refresh(store)
         await session.refresh(config)
-        # Eager-load tools/content_roots/mounts.
+        # Eager-load tools/mounts.
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
 
@@ -117,9 +115,7 @@ async def _seed_single_store(sm, content_dir, allowed_tools: list[str]):
                 select(McpServer)
                 .options(
                     selectinload(McpServer.tools),
-                    selectinload(McpServer.content_roots).selectinload(
-                        McpServerContentRoot.mounts
-                    ),
+                    selectinload(McpServer.mounts),
                 )
                 .where(McpServer.id == config.id)
             )
@@ -172,7 +168,11 @@ async def _seed_multi_store(sm, content_dir, allowed_tools: list[str]):
         session.add_all([s1, s2])
         await session.flush()
         config = McpServer(
-            tenant_id=tenant.id, slug="multi", name="M", enabled=True
+            tenant_id=tenant.id,
+            slug="multi",
+            name="M",
+            kind="virtual",
+            enabled=True,
         )
         session.add(config)
         await session.flush()
@@ -180,21 +180,16 @@ async def _seed_multi_store(sm, content_dir, allowed_tools: list[str]):
             session.add(
                 McpServerTool(mcp_server_id=config.id, tool_name=t)
             )
-        cr = McpServerContentRoot(
-            mcp_server_id=config.id, name="r", kind="virtual", sort_order=0
-        )
-        session.add(cr)
-        await session.flush()
         session.add_all([
             McpServerMount(
-                content_root_id=cr.id,
+                mcp_server_id=config.id,
                 store_id=s1.id,
                 subpath="",
                 virtual_prefix="engineering",
                 sort_order=0,
             ),
             McpServerMount(
-                content_root_id=cr.id,
+                mcp_server_id=config.id,
                 store_id=s2.id,
                 subpath="",
                 virtual_prefix="ops",
@@ -212,9 +207,7 @@ async def _seed_multi_store(sm, content_dir, allowed_tools: list[str]):
                 select(McpServer)
                 .options(
                     selectinload(McpServer.tools),
-                    selectinload(McpServer.content_roots).selectinload(
-                        McpServerContentRoot.mounts
-                    ),
+                    selectinload(McpServer.mounts),
                 )
                 .where(McpServer.id == config.id)
             )
