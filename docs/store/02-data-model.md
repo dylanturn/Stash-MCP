@@ -189,6 +189,88 @@ are stored so reads don't have to replay the patch chain. The
 two must be consistent (`apply(before_bytes, patch) == after_bytes`),
 but consistency is the writer's responsibility, not the backend's.
 
+## Protocol-exposed types
+
+The Python-level types every backend returns from
+`StorageBackend` methods. Defined here so callers can code
+against a stable shape without depending on the SQL schema or on
+ORM models.
+
+```
+Author:
+  user_id        UUID | None       # NULL = system / automation;
+                                   # matches commits.author_user_id
+  display_name   str               # surfaced as "changed_by" on reads;
+                                   # "system" when user_id is None
+
+Event:
+  # event row, joined with its commit for cheap attribution
+  id                 UUID
+  store_id           UUID
+  commit_id          UUID
+  parent_event_id    UUID | None
+  kind               str           # see "Event kinds"
+  path               str
+  new_path           str | None
+  before_blob_sha    str | None
+  after_blob_sha     str | None
+  patch_blob_sha     str | None
+  semantic_summary   str | None
+  ts                 datetime
+
+  # denormalized from the join on commits
+  author             Author
+  commit_message     str
+  commit_ts          datetime
+
+ReadResult:
+  content            bytes
+  path               str           # the path read; identical to the request
+                                   # unless resolved through a rename chain
+  blob_sha           str
+  size_bytes         int
+  commit_id          UUID          # commit the read resolved against
+  last_event_id      UUID          # last event on path at/before commit_id
+  last_event_kind    str
+  last_changed_at    datetime      # = last event ts
+  changed_by         Author        # = last event's commit author
+  commit_message     str           # message of the commit that owned that event
+  semantic_summary   str | None    # from the last event
+
+EventFilter:
+  # all fields optional; AND'd together
+  paths              list[str] | None       # exact paths
+  path_prefix        str | None             # tree_entries-style prefix
+  kinds              list[str] | None       # subset of the event kinds
+  authors            list[UUID | None] | None  # None inside list = system
+  since              datetime | None        # events.ts >= since
+  until              datetime | None        # events.ts <  until
+  commit_id          UUID | None
+  limit              int | None             # default and max enforced by backend
+  cursor             str | None             # opaque pagination token
+```
+
+`Author.display_name` is populated by the backend at query time —
+the contract guarantees a non-empty string even for system
+commits (`"system"` is the canonical placeholder; backends are
+free to localise but must not return empty). Callers that need
+the raw `user_id` for further joins should use that field, not
+parse `display_name`.
+
+`Event` is denormalized for read convenience: every `Event`
+returned from the Protocol carries the commit's `author`,
+`message`, and `ts` fields, so a `get_path_history` call returns
+everything `blame_content` needs without a second round trip.
+
+`ReadResult.path` differs from the request only when a future
+read-through-rename mechanism is added (deferred); in v1 the two
+are always equal.
+
+`EventFilter.cursor` is opaque — backends choose the encoding
+(keyset on `(ts, id)`, page token, etc.). Callers must pass it
+back verbatim; comparing or constructing one is undefined
+behaviour.
+
 ## tree_entries materialization: full snapshot vs. delta
 
 The simple model writes one `tree_entries` row per (commit, path)

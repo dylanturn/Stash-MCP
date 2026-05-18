@@ -26,6 +26,7 @@ exposes no cross-store operations.
 
 - `commit(store_id, descriptors, author, message) -> commit_id`
 - `read(store_id, path, at_commit=None, at_event=None) -> ReadResult`
+- `read_batch(store_id, paths, at_commit=None, at_event=None) -> dict[str, ReadResult]`
 - `list_paths(store_id, prefix, at_commit=None) -> list[str]`
 - `get_events(store_id, filter) -> list[Event]`
 - `get_path_history(store_id, path) -> list[Event]`
@@ -35,9 +36,19 @@ exposes no cross-store operations.
 `ReadResult` carries the content plus the event-grain metadata
 the MCP read tools surface (`blob_sha`, `last_changed_at`,
 `changed_by`, `commit_message`, `semantic_summary`) so callers
-don't pay a second round trip for blame. See
-[02-data-model.md](./02-data-model.md) for the `Event`,
-`EventDescriptor`, and `ReadResult` shapes.
+don't pay a second round trip for blame. The Python-level shapes
+of `ReadResult`, `Event`, `EventDescriptor`, `EventFilter`, and
+`Author` are defined in
+[02-data-model.md § Protocol-exposed types](./02-data-model.md#protocol-exposed-types).
+
+`read_batch` returns a `dict` keyed by the input paths; paths
+absent at the resolved commit are omitted from the result (the
+caller compares input vs result keys to detect misses). The
+backend resolves all paths against a single commit — fetched
+once for the batch, not per-path — so partial drift mid-batch is
+not possible. Implementations should issue blob fetches in
+parallel; `InMemoryBackend` does so trivially, `S3CASBackend`
+issues parallel S3 GETs.
 
 `current_commit` exists so callers can pin a sequence of reads to
 a single commit (pass the returned id as `at_commit` on
@@ -66,6 +77,23 @@ are reclaimed by GC and never observable to readers
 (`tree_entries` never references them). See
 [03-commit-protocol.md](./03-commit-protocol.md) for the staging
 mechanism.
+
+### One descriptor per path per bundle
+
+Descriptors in a single `commit()` call must reference disjoint
+paths. The check covers `path` *and* `new_path` (so a rename
+target can't collide with another descriptor's path). Violating
+this raises `InvalidDescriptorError` before any side effect,
+including before S3 PUTs in phase 1.
+
+The rule exists because precondition checks (kind + sha) resolve
+against the parent commit, not against an intermediate state
+within the bundle. A bundle with `deleted(a.md) + created(a.md)`
+would have the `created` descriptor see `a.md` still present at
+the parent commit and fail its precondition — surprising. The
+right way to express "replace via delete+recreate" is a single
+`replaced` descriptor; the right way to swap two paths is two
+sequential commits.
 
 ### Consistency
 
@@ -169,8 +197,11 @@ or MCP error payloads.
 
 - **It does not enforce auth.** The caller is responsible for
   authorising the operation against the principal *before*
-  calling `commit()`. The backend takes `author: Principal` for
-  attribution, not authorisation.
+  calling `commit()`. The backend takes `author: Author` (see
+  [02-data-model.md § Protocol-exposed types](./02-data-model.md#protocol-exposed-types))
+  for attribution only, not authorisation. `Author` is
+  deliberately narrower than the auth domain's `Principal` so
+  the backend doesn't depend on auth internals.
 - **It does not validate content type.** Bytes in, bytes out.
   Markdown structure, JSON validity, etc. are higher-layer
   concerns.

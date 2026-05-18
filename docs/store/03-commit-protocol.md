@@ -26,9 +26,23 @@ All v1 events are file-grain.
 async def commit(
     store_id: UUID,
     event_descriptors: list[EventDescriptor],
-    author: Principal,
+    author: Author,
     message: str,
 ) -> UUID:
+
+    # PHASE 0 — validate the bundle before any side effects.
+    # Each descriptor is checked for internal consistency (kind ↔ required
+    # fields per the matrix in 02 § EventDescriptor); the bundle as a whole
+    # is checked for path uniqueness (see 01 § Contract).
+    seen_paths: set[str] = set()
+    for e in event_descriptors:
+        validate_descriptor_shape(e)              # raises InvalidDescriptorError
+        for p in (e.path, e.new_path) if e.kind == 'renamed' else (e.path,):
+            if p in seen_paths:
+                raise InvalidDescriptorError(
+                    f"duplicate path {p!r} in bundle"
+                )
+            seen_paths.add(p)
 
     # PHASE 1 — content to S3 (no locks, idempotent)
     # Dedup is decided in Postgres, not S3 — see "Dedup strategy" below.
