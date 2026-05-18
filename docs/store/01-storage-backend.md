@@ -17,38 +17,215 @@ replaced wholesale, not wrapped behind an adapter — see
 ```
 StorageBackend (Protocol)
 ├── S3CASBackend          (production — Postgres + S3)
-└── InMemoryBackend       (test fake — Python dicts and lists)
+└── InMemoryBackend       (in-memory reference impl — for tests)
 ```
 
-The Protocol declares the methods every backend implements:
+The Protocol declares the methods every backend implements.
+Every method takes `store_id` — the backend is multi-tenant and
+exposes no cross-store operations.
 
-- `commit(list[EventDescriptor], author, message) -> commit_id`
-- `get_events(filter) -> list[Event]`
-- `get_path_history(path) -> list[Event]`
-- `read(path, at_commit=None, at_event=None) -> bytes`
-- `list_paths(prefix) -> list[str]`
+- `commit(store_id, descriptors, author, message) -> commit_id`
+- `read(store_id, path, at_commit=None, at_event=None) -> ReadResult`
+- `read_batch(store_id, paths, at_commit=None, at_event=None) -> dict[str, ReadResult]`
+- `list_paths(store_id, prefix, at_commit=None) -> list[str]`
+- `get_events(store_id, filter) -> list[Event]`
+- `get_path_history(store_id, path) -> list[Event]`
+- `get_event(store_id, event_id) -> Event | None`
+- `current_commit(store_id) -> UUID | None`
 
-Return types carry event-grain fields (`kind`, `semantic_summary`,
-`patch_blob_sha`) — every backend produces them. See
-[02-data-model.md](./02-data-model.md) for the `Event` and
-`EventDescriptor` shapes.
+`ReadResult` carries the content plus the event-grain metadata
+the MCP read tools surface (`blob_sha`, `last_changed_at`,
+`changed_by`, `commit_message`, `semantic_summary`) so callers
+don't pay a second round trip for blame. The Python-level shapes
+of `ReadResult`, `Event`, `EventDescriptor`, `EventFilter`, and
+`Author` are defined in
+[02-data-model.md § Protocol-exposed types](./02-data-model.md#protocol-exposed-types).
+
+`read_batch` returns a `dict` keyed by the input paths; paths
+absent at the resolved commit are omitted from the result (the
+caller compares input vs result keys to detect misses). The
+backend resolves all paths against a single commit — fetched
+once for the batch, not per-path — so partial drift mid-batch is
+not possible. Implementations should issue blob fetches in
+parallel; `InMemoryBackend` does so trivially, `S3CASBackend`
+issues parallel S3 GETs.
+
+`current_commit` exists so callers can pin a sequence of reads to
+a single commit (pass the returned id as `at_commit` on
+subsequent calls). Without it, two reads back-to-back may resolve
+against different commits — see "Consistency" below.
 
 No branch operations in v1; the `refs` table exists in the
 schema but the Protocol exposes no methods for creating, listing,
 or promoting refs. See [09-open-questions.md](./09-open-questions.md)
 for the deferred-branches rationale.
 
+## Contract
+
+The behaviour every backend must implement, independent of
+storage substrate. `InMemoryBackend` and `S3CASBackend` are both
+held to this contract; tests in the layers above the Protocol
+should pass identically against either.
+
+### Atomicity
+
+`commit()` is all-or-nothing. Either every descriptor in the
+bundle lands as an event row under one `commit_id` with the ref
+advanced, or no events land and the ref is unchanged. Phase 1's
+S3 blobs and `blobs` rows may persist on phase-2 failure — they
+are reclaimed by GC and never observable to readers
+(`tree_entries` never references them). See
+[03-commit-protocol.md](./03-commit-protocol.md) for the staging
+mechanism.
+
+### One descriptor per path per bundle
+
+Descriptors in a single `commit()` call must reference disjoint
+paths. The check covers `path` *and* `new_path` (so a rename
+target can't collide with another descriptor's path). Violating
+this raises `InvalidDescriptorError` before any side effect,
+including before S3 PUTs in phase 1.
+
+The rule exists because precondition checks (kind + sha) resolve
+against the parent commit, not against an intermediate state
+within the bundle. A bundle with `deleted(a.md) + created(a.md)`
+would have the `created` descriptor see `a.md` still present at
+the parent commit and fail its precondition — surprising. The
+right way to express "replace via delete+recreate" is a single
+`replaced` descriptor; the right way to swap two paths is two
+sequential commits.
+
+### Consistency
+
+**Read-after-write within a caller scope.** A caller that
+awaits `commit()` and then issues a read against the same backend
+instance observes the just-committed state on that read. The
+backend is responsible for the mechanism (transaction reuse,
+connection affinity, in-memory cache invalidation); the contract
+is the observability, not the implementation.
+
+**Across caller scopes**, reads resolve the `main` ref at request
+time. Two HTTP reads served by different pods around a write may
+see different commits — this is the cost of stateless fanout, not
+a bug. Callers that need a stable snapshot across multiple reads
+must pin via `current_commit()` + `at_commit=` and pass the same
+commit id to every subsequent read.
+
+### Optimistic concurrency
+
+`EventDescriptor` carries an optional `expected_before_sha` field
+that the backend checks against the path's current `blob_sha`
+inside the commit transaction, after acquiring the per-path lock.
+A mismatch raises `ConflictError` and the whole bundle aborts
+— including any other descriptors that would have succeeded.
+
+The kind itself also imposes a precondition:
+
+| Descriptor `kind`   | Path precondition | `expected_before_sha` permitted |
+| ------------------- | ----------------- | ------------------------------- |
+| `created`           | must be absent    | must be `None` (kind enforces absence) |
+| `replaced`          | must exist        | optional; if set, must match    |
+| `patched`           | must exist        | optional; if set, must match    |
+| `renamed`           | old path exists, new path absent | optional on old path |
+| `deleted`           | must exist        | optional; if set, must match    |
+
+Violating the kind precondition is a separate error from the sha
+mismatch — see "Errors" below. The MCP write tools translate
+their existing `expected_sha256` parameter to this field one-for-
+one.
+
+### Lock granularity
+
+Writes serialize per `(store_id, path)`. Two `commit()` calls
+touching disjoint path sets do not contend. Two `commit()` calls
+that share at least one path serialize on that path; on the same
+path, the second commit observes the first's result before its
+precondition check runs.
+
+Bulk operations (import) additionally take a per-store lock at
+job start. This serializes whole-store rewrites without blocking
+per-path writes during the bulk job's streaming phase.
+
+The backend chooses how to acquire multiple per-path locks within
+a single commit; for `S3CASBackend` the locks are acquired in
+sorted-path order to avoid deadlock between concurrent multi-path
+commits. `InMemoryBackend` uses a single asyncio lock per path
+and the same ordering.
+
+### Path grammar
+
+Paths are POSIX-style, store-relative strings. The backend
+rejects with `InvalidPathError`:
+
+- empty strings
+- leading `/`
+- any `..` segment after normalization
+- any segment containing NUL (`\0`)
+- non-UTF-8 bytes
+
+The backend does **not** enforce a maximum path length, content
+type, or filename character set beyond the above — those are
+higher-layer concerns (the import pipeline has its own rules; the
+MCP write tools may impose more).
+
+### Errors
+
+The Protocol defines a typed error hierarchy that every backend
+raises:
+
+- `PathNotFoundError(path, at_commit)` — read or write of an
+  absent path that the operation requires to exist.
+- `PathExistsError(path)` — `created` event on an existing path,
+  or `renamed` event whose new path already exists.
+- `ConflictError(path, expected_sha, actual_sha)` —
+  `expected_before_sha` did not match the actual current
+  `blob_sha`.
+- `InvalidPathError(path, reason)` — path grammar violation.
+- `InvalidDescriptorError(reason)` — descriptor fields are
+  internally inconsistent (e.g., `kind='renamed'` with no
+  `new_path`).
+- `CommitAbortedError(reason, cause)` — phase-2 transaction
+  aborted for a reason not covered above (e.g., underlying
+  Postgres error). The `cause` chain carries the underlying
+  exception.
+
+All six are `BackendError` subclasses. Callers above the
+Protocol may catch the base class to convert to HTTP responses
+or MCP error payloads.
+
+### What the Protocol does not do
+
+- **It does not enforce auth.** The caller is responsible for
+  authorising the operation against the principal *before*
+  calling `commit()`. The backend takes `author: Author` (see
+  [02-data-model.md § Protocol-exposed types](./02-data-model.md#protocol-exposed-types))
+  for attribution only, not authorisation. `Author` is
+  deliberately narrower than the auth domain's `Principal` so
+  the backend doesn't depend on auth internals.
+- **It does not validate content type.** Bytes in, bytes out.
+  Markdown structure, JSON validity, etc. are higher-layer
+  concerns.
+- **It does not emit events to subscribers.** The existing
+  `events.py` pub/sub bus is a separate concern that wraps
+  `commit()` at a higher layer.
+
 ## Why keep the abstraction at all
 
 Three reasons, all independent of having a second production
 backend:
 
-- **Test ergonomics.** `InMemoryBackend` is ~100 lines of Python
-  dicts and lists implementing the same surface as
-  `S3CASBackend`. Unit tests run against it in milliseconds with
-  no Postgres or S3 in the picture. Integration tests still hit
-  `S3CASBackend` via testcontainers, but the unit-test fast path
-  matters for everyday development.
+- **Test ergonomics.** `InMemoryBackend` is an in-memory
+  reference implementation that honours the same Contract as
+  `S3CASBackend` — including locks, two-phase ordering,
+  precondition checks, and typed errors — but stores all state
+  in Python data structures. Unit tests run against it in
+  milliseconds with no Postgres or S3 in the picture.
+  Integration tests still hit `S3CASBackend` via testcontainers
+  for the storage substrate itself, but the Contract-level
+  guarantees are exercised against the reference implementation
+  too — that's what makes the abstraction earn its keep. A fake
+  that skipped the locks would let `S3CASBackend` ship with
+  races that no unit test catches.
 - **Architectural firewall.** MCP tools, search indexer, admin
   endpoints can only call `StorageBackend` methods. They can't
   reach into S3CAS-internal things (table names, SQL queries, S3
@@ -65,11 +242,9 @@ justifies it.
 
 ## InMemoryBackend
 
-A pure-Python implementation backed by dicts and lists. No
-Postgres connection, no S3 client, no docker. Tests against it
-run in milliseconds.
-
-The fake holds the same conceptual state as production:
+A pure-Python reference implementation. No Postgres connection,
+no S3 client, no docker. Tests against it run in milliseconds.
+The conceptual state mirrors production:
 
 ```python
 class InMemoryBackend:
@@ -79,17 +254,47 @@ class InMemoryBackend:
         self.events: list[Event] = []
         self.tree_entries: dict[str, dict[str, str]] = {}       # commit_id -> {path -> sha}
         self.refs: dict[str, str | None] = {"main": None}       # ref name -> commit_id
+        self.path_locks: dict[tuple[UUID, str], asyncio.Lock] = {}
+        self.ref_lock: asyncio.Lock = asyncio.Lock()
 ```
 
-Reads resolve through `refs["main"]` and `tree_entries`, identical
-to the Postgres-backed path. Writes follow the same commit protocol
-as [03-commit-protocol.md](./03-commit-protocol.md) but skip the
-S3 layer entirely — blobs are stored inline in the dict.
+Reads resolve through `refs["main"]` and `tree_entries`,
+identical to the Postgres-backed path. Writes follow the same
+commit protocol as
+[03-commit-protocol.md](./03-commit-protocol.md) but skip the S3
+layer entirely — blobs are stored inline in the dict.
 
-The fake is **not** a durable backend. It exists for unit tests
-of the layers above the Protocol. It does not load from or save
-to the filesystem; restarting the test process loses all state.
-That's the point.
+**Faithfulness is the point, not minimalism.** The reference
+implementation honours every clause of § Contract above, not just
+the read/write surface — because if it didn't, unit tests against
+it would pass for code that races in production. Specifically:
+
+- Phase-0 validation (descriptor shape, bundle path uniqueness)
+- Two-phase commit ordering (validate → stage blobs → atomic apply)
+- Per-`(store_id, path)` lock acquisition in sorted-path order,
+  via `path_locks`
+- Atomic ref CAS via `ref_lock`
+- Per-kind path-existence preconditions
+- `expected_before_sha` conflict detection
+- All six typed `BackendError` subclasses raised with the same
+  fields as `S3CASBackend`
+- `tree_entries` materialization (copy-forward from parent +
+  apply event)
+- `get_path_history` walking `parent_event_id` chains
+- `get_events` with the full `EventFilter`, including opaque
+  cursor pagination
+- `read_batch` resolving all paths against one commit
+
+The implementation is small in absolute terms — Python data
+structures are concise — but it's not "a few dicts plus a global
+lock," and changes to it should be reviewed against § Contract
+the same way as changes to `S3CASBackend`. The line count is
+not the contract.
+
+It is **not** a durable backend. It exists for unit tests of the
+layers above the Protocol. It does not load from or save to the
+filesystem; restarting the test process loses all state. That's
+the point.
 
 ## S3CASBackend
 
