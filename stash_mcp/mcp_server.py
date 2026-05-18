@@ -578,8 +578,14 @@ def create_mcp_server(
         # fastmcp 2.x; revisit if/when the project upgrades to 3.x.
         return mcp._resource_manager._resources.pop(uri_key, None) is not None
 
-    # Resource template for dynamic access (resources/templates/list)
-    @mcp.resource("stash://{path}", mime_type="text/plain", description="Read any file by path")
+    # Resource template for dynamic access (resources/templates/list).
+    # The ``{path*}`` (RFC 6570 wildcard) form is required — ``{path}``
+    # alone compiles to ``[^/]+`` and would only match single-segment
+    # paths, so reads like ``stash://docs/guide/README.md`` would fall
+    # through to "Unknown resource" in auth mode (where READMEs are
+    # listed dynamically by the middleware but not statically
+    # registered as concrete resources).
+    @mcp.resource("stash://{path*}", mime_type="text/plain", description="Read any file by path")
     def read_resource(path: str) -> str:
         """Read a file by its path."""
         try:
