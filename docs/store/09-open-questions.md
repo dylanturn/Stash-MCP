@@ -86,20 +86,14 @@ euphemism.
   (`similar` via PyO3) becomes worth it. Decide after profiling.
   The structured-patch path (Phase 3) sidesteps this for writes
   that supply a patch; it only matters for fallback byte-diffs.
-- **Read-after-write within a request.** A writer who commits
-  and then immediately reads should see their own write. S3 is
-  read-after-write consistent for new keys; the worry is the
-  metadata side. Solved by reading through the same Postgres
-  connection (or a serialisable txn) within a request, but
-  should be made explicit in the `StorageBackend` contract.
-- **What "the current commit" means for HTTP read fanout.**
-  Stateless HTTP across pods means each read resolves the `main`
-  ref from Postgres at request time. That's fine, but a fast
-  succession of writes can serve different reads from different
-  commits — caller-visible. Document the semantics; the
-  existing optional `at_commit` / `at_event` parameters on the
-  read tools cover the "I need stable reads across multiple
-  calls" use case.
+- **Read-after-write and cross-request consistency.** Resolved
+  in [01-storage-backend.md § Consistency](./01-storage-backend.md#consistency):
+  same-caller-scope reads observe the just-committed state;
+  cross-scope reads resolve `main` per-request and may see
+  different commits in fast write succession. Callers needing
+  stable multi-read snapshots pin via `current_commit()` +
+  `at_commit=`. Listed here only as a marker of where it used to
+  live.
 - **Event retention policy.** Events are durable forever in the
   v1 design. At some scale we'll want to prune — but pruning an
   event the `tree_entries` snapshot doesn't reference is safe;
