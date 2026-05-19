@@ -56,6 +56,7 @@ class TransactionManager:
         self._active_session: str | None = None
         self._active_id: str | None = None
         self._timeout_task: asyncio.Task | None = None
+        self._timeout_seconds: int = 0
         self._pause_sync: Callable[[], None] | None = None
         self._resume_sync: Callable[[], None] | None = None
 
@@ -111,6 +112,7 @@ class TransactionManager:
         txn_id = str(uuid.uuid4())
         self._active_session = session_id
         self._active_id = txn_id
+        self._timeout_seconds = timeout
 
         if self._pause_sync is not None:
             self._pause_sync()
@@ -207,10 +209,20 @@ class TransactionManager:
     def _clear_and_release(self) -> None:
         self._active_session = None
         self._active_id = None
+        self._timeout_seconds = 0
         if self._resume_sync is not None:
             self._resume_sync()
         if self._lock.locked():
             self._lock.release()
+
+    def _reset_timeout(self) -> None:
+        """Cancel the current timeout task and start a fresh one."""
+        self._cancel_timeout()
+        if self._active_id and self._timeout_seconds > 0:
+            self._timeout_task = asyncio.create_task(
+                self._auto_abort(self._timeout_seconds),
+                name=f"txn-timeout-{self._active_id[:8]}",
+            )
 
     def _require_active_transaction(self) -> None:
         """Raise :class:`TransactionError` when no transaction is active for the calling session."""
@@ -223,6 +235,7 @@ class TransactionManager:
             raise TransactionError(
                 "No active transaction. Call start_content_transaction first."
             )
+        self._reset_timeout()
 
     def get_transaction_status(self, session_id: str | None = None) -> dict:
         """Return the current transaction state.

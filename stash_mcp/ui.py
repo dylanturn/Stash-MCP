@@ -1,5 +1,6 @@
 """Content browser & editor UI with three-panel layout."""
 
+import base64
 import html
 import logging
 from datetime import UTC, datetime
@@ -12,6 +13,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileSystem
 from .mcp_server import MIME_TYPES
+
+_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp"})
+_SVG_EXTENSIONS = frozenset({".svg"})
+_HTML_EXTENSIONS = frozenset({".html", ".htm"})
+_MERMAID_EXTENSIONS = frozenset({".mmd", ".mermaid"})
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +138,40 @@ _ICONS = {
         '<path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/>'
         '<path d="M10 12h4"/></svg>'
     ),
+    "image": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>'
+        '<circle cx="9" cy="9" r="2"/>'
+        '<path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>'
+    ),
+    "code": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/>'
+        '<polyline points="8 6 2 12 8 18"/></svg>'
+    ),
+    "globe": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><circle cx="12" cy="12" r="10"/>'
+        '<path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>'
+        '<path d="M2 12h20"/></svg>'
+    ),
+    "git-branch": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><line x1="6" x2="6" y1="3" y2="15"/>'
+        '<circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'
+        '<path d="M18 9a9 9 0 0 1-9 9"/></svg>'
+    ),
+    "external-link": (
+        '<svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="M15 3h6v6"/>'
+        '<path d="M10 14 21 3"/>'
+        '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>'
+    ),
     "pen-line": (
         '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
         'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
@@ -152,8 +192,17 @@ def _icon(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _file_icon(_name: str) -> str:
+def _file_icon(name: str) -> str:
     """Return a Lucide SVG icon for a file."""
+    suffix = PurePosixPath(name).suffix.lower()
+    if suffix in _IMAGE_EXTENSIONS or suffix in _SVG_EXTENSIONS:
+        return _icon("image")
+    if suffix in _HTML_EXTENSIONS:
+        return _icon("globe")
+    if suffix in _MERMAID_EXTENSIONS:
+        return _icon("git-branch")
+    if suffix in {".json"}:
+        return _icon("file-json")
     return _icon("file-text")
 
 
@@ -519,6 +568,35 @@ border-radius:4px;border-left:3px solid #f38ba8;margin-bottom:12px}
 /* mermaid diagrams */
 .markdown-body .mermaid{background:#181825;padding:1.5rem;border-radius:6px;
 margin-bottom:1.5rem;display:flex;justify-content:center}
+
+/* rich content viewers */
+.viewer-svg{display:flex;justify-content:center;align-items:center;flex:1;
+padding:2rem;min-height:300px}
+.viewer-svg svg{max-width:100%;height:auto}
+.viewer-image{display:flex;justify-content:center;align-items:center;flex:1;
+padding:2rem;min-height:300px}
+.viewer-image img{max-width:100%;max-height:80vh;object-fit:contain;
+border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3)}
+.viewer-image .image-meta{text-align:center;color:#7f849c;font-size:12px;
+margin-top:12px}
+.viewer-html-frame{flex:1;border:1px solid #313244;border-radius:6px;
+overflow:hidden;min-height:400px;background:#fff}
+.viewer-html-frame iframe{width:100%;height:100%;border:none;min-height:600px}
+.viewer-mermaid{display:flex;justify-content:center;align-items:center;flex:1;
+padding:2rem;min-height:300px}
+.viewer-mermaid .mermaid{background:#181825;padding:2rem;border-radius:6px;
+display:flex;justify-content:center;width:100%}
+.viewer-toolbar{display:flex;align-items:center;gap:8px;padding:8px 0;
+margin-bottom:8px;flex-shrink:0}
+.viewer-toolbar .badge{display:inline-flex;align-items:center;gap:4px;
+padding:4px 10px;background:#272738;border:1px solid #313244;border-radius:4px;
+font-size:12px;color:#7f849c}
+.viewer-toolbar .badge .icon{color:#94e2d5}
+.btn-raw{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;
+background:transparent;border:1px solid #313244;border-radius:4px;
+font-size:12px;color:#94e2d5;text-decoration:none;
+transition:background 150ms ease,border-color 150ms ease}
+.btn-raw:hover{background:#2e2e42;border-color:#94e2d5;text-decoration:none}
 """
 
 # ---------------------------------------------------------------------------
@@ -678,6 +756,14 @@ var _unsaved=false;
   });
   _restoreTreeState();
   _trackTreeToggles();
+  var _sb=document.querySelector('.sidebar');
+  if(_sb){
+    var _saved=sessionStorage.getItem('stash_sidebar_scroll');
+    if(_saved)_sb.scrollTop=parseInt(_saved,10);
+    window.addEventListener('beforeunload',function(){
+      sessionStorage.setItem('stash_sidebar_scroll',_sb.scrollTop);
+    });
+  }
 })();
 
 if(typeof mermaid!=='undefined'){
@@ -948,18 +1034,65 @@ def create_ui_router(
 
         # --- file view ---
         if full.is_file():
-            try:
-                content = filesystem.read_file(path)
-            except Exception as exc:
-                center = (
-                    f'<div class="breadcrumbs">{breadcrumbs}</div>'
-                    f'<div class="error-msg">Error reading file: {html.escape(str(exc))}</div>'
-                )
-                return _page("Error", sidebar, center)
+            suffix = PurePosixPath(path).suffix.lower()
+            is_binary = suffix in _IMAGE_EXTENSIONS
+            content = ""
+            if not is_binary:
+                try:
+                    content = filesystem.read_file(path)
+                except Exception as exc:
+                    center = (
+                        f'<div class="breadcrumbs">{breadcrumbs}</div>'
+                        f'<div class="error-msg">Error reading file: {html.escape(str(exc))}</div>'
+                    )
+                    return _page("Error", sidebar, center)
 
-            escaped_content = html.escape(content)
+            escaped_content = html.escape(content) if content else ""
             toc_html = ""
-            if path.endswith((".md", ".markdown")):
+            escaped_path = html.escape(path)
+
+            if suffix in _IMAGE_EXTENSIONS:
+                raw_url = f"/ui/raw/{escaped_path}"
+                mime = _mime_type(path)
+                center = (
+                    f'<div class="viewer-toolbar">'
+                    f'<span class="badge">{_icon("image")} {html.escape(mime)}</span>'
+                    f'<a href="{raw_url}" target="_blank" class="btn-raw">'
+                    f'{_icon("external-link")} Open original</a></div>'
+                    f'<div class="viewer-image">'
+                    f'<div><img src="{raw_url}" alt="{html.escape(PurePosixPath(path).name)}">'
+                    f'</div></div>'
+                )
+            elif suffix in _SVG_EXTENSIONS:
+                raw_url = f"/ui/raw/{escaped_path}"
+                center = (
+                    f'<div class="viewer-toolbar">'
+                    f'<span class="badge">{_icon("image")} image/svg+xml</span>'
+                    f'<a href="{raw_url}" target="_blank" class="btn-raw">'
+                    f'{_icon("external-link")} Open original</a></div>'
+                    f'<div class="viewer-svg">{content}</div>'
+                )
+            elif suffix in _HTML_EXTENSIONS:
+                b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+                raw_url = f"/ui/raw/{escaped_path}"
+                center = (
+                    f'<div class="viewer-toolbar">'
+                    f'<span class="badge">{_icon("globe")} text/html</span>'
+                    f'<a href="{raw_url}" target="_blank" class="btn-raw">'
+                    f'{_icon("external-link")} Open in new tab</a></div>'
+                    f'<div class="viewer-html-frame">'
+                    f'<iframe src="data:text/html;base64,{b64}" '
+                    f'sandbox="allow-scripts allow-same-origin" '
+                    f'title="{html.escape(PurePosixPath(path).name)}"></iframe></div>'
+                )
+            elif suffix in _MERMAID_EXTENSIONS:
+                center = (
+                    f'<div class="viewer-toolbar">'
+                    f'<span class="badge">{_icon("git-branch")} Mermaid diagram</span></div>'
+                    f'<div class="viewer-mermaid">'
+                    f'<div class="mermaid">{escaped_content}</div></div>'
+                )
+            elif path.endswith((".md", ".markdown")):
                 rendered, toc_html = _render_markdown(content)
                 center = (
                     f'<div class="viewer-content markdown-body">{rendered}</div>'
@@ -979,8 +1112,6 @@ def create_ui_router(
             except Exception:
                 size = "\u2014"
                 mtime = "\u2014"
-            words = len(content.split())
-            chars = len(content)
             _meta_body = (
                 '<div class="meta-field">'
                 '<div class="meta-field-label">File Path</div>'
@@ -998,14 +1129,19 @@ def create_ui_router(
                 '<div class="meta-field-label">Last Modified</div>'
                 f'<div class="meta-field-value">{mtime}</div>'
                 '</div>'
-                '<div class="meta-field">'
-                '<div class="meta-stats-heading">Content Stats</div>'
-                f'<div class="meta-stat-row"><span class="label">Characters:</span>'
-                f'<span class="value">{chars}</span></div>'
-                f'<div class="meta-stat-row"><span class="label">Words:</span>'
-                f'<span class="value">{words}</span></div>'
-                '</div>'
             )
+            if not is_binary:
+                words = len(content.split())
+                chars = len(content)
+                _meta_body += (
+                    '<div class="meta-field">'
+                    '<div class="meta-stats-heading">Content Stats</div>'
+                    f'<div class="meta-stat-row"><span class="label">Characters:</span>'
+                    f'<span class="value">{chars}</span></div>'
+                    f'<div class="meta-stat-row"><span class="label">Words:</span>'
+                    f'<span class="value">{words}</span></div>'
+                    '</div>'
+                )
             _action_stack = "" if read_only else (
                 '<div class="action-stack">'
                 f'<button class="btn-rename" onclick="showRename(this)">'
@@ -1057,9 +1193,10 @@ def create_ui_router(
                     '</div>'
                     f'<div class="right-bottom">{_action_stack}</div>'
                 )
+            hide_edit = read_only or is_binary
             return _page(
                 PurePosixPath(path).name, sidebar, center, right, mode="view", path=path,
-                read_only=read_only,
+                read_only=hide_edit,
             )
 
         # path exists but is neither dir nor file
@@ -1102,6 +1239,24 @@ def create_ui_router(
                 }
             )
 
+    # --- raw file serving (images, SVG, HTML) ---
+    @router.get("/ui/raw/{path:path}")
+    async def ui_raw(path: str):
+        """Serve a raw file with its native MIME type."""
+        path = path.strip("/")
+        try:
+            full = filesystem._resolve_path(path)
+        except Exception:
+            return Response(content="Invalid path", status_code=400)
+        if not full.is_file():
+            return Response(content="Not found", status_code=404)
+        mime = _mime_type(path)
+        try:
+            data = full.read_bytes()
+        except Exception as exc:
+            return Response(content=f"Error: {exc}", status_code=500)
+        return Response(content=data, media_type=mime)
+
     # --- edit ---
     @router.get("/ui/edit/{path:path}", response_class=HTMLResponse)
     async def ui_edit(path: str) -> str:
@@ -1109,6 +1264,9 @@ def create_ui_router(
         if read_only:
             return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
         path = path.strip("/")
+        suffix = PurePosixPath(path).suffix.lower()
+        if suffix in _IMAGE_EXTENSIONS:
+            return RedirectResponse(url=f"/ui/browse/{path}", status_code=302)
         sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled, read_only=read_only)
         breadcrumbs = _breadcrumbs_html(path)
 
