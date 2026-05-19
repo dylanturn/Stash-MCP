@@ -270,7 +270,8 @@ def _render_openapi(spec: dict) -> tuple[str, str]:
                         )
 
         for tag, operations in tag_groups.items():
-            tag_id = f"tag-{html.escape(tag).replace(' ', '-').lower()}"
+            tag_slug = re.sub(r'[^a-z0-9_-]', '-', tag.lower()).strip('-')
+            tag_id = f"tag-{html.escape(tag_slug)}"
             tag_esc = html.escape(tag)
             toc_items.append(
                 f'<a href="#{tag_id}" class="toc-link">{tag_esc}'
@@ -381,7 +382,7 @@ def _render_openapi(spec: dict) -> tuple[str, str]:
         )
         for name, schema in schemas.items():
             name_esc = html.escape(name)
-            schema_type = html.escape(schema.get("type", "object"))
+            schema_type = html.escape(_oas_type_label(schema))
             desc = html.escape(schema.get("description", ""))
             parts.append(
                 f'<details class="oas-op oas-schema-def">'
@@ -530,12 +531,14 @@ _RELATIVE_URL_RE = re.compile(
 
 def _rewrite_relative_urls(html_str: str, base_dir: str) -> str:
     """Rewrite relative src/href in rendered HTML to /ui/raw/ or /ui/browse/ paths."""
+    from urllib.parse import quote
+    safe_dir = quote(base_dir, safe="/")
     if not base_dir:
         raw_prefix = "/ui/raw/"
         browse_prefix = "/ui/browse/"
     else:
-        raw_prefix = f"/ui/raw/{base_dir}/"
-        browse_prefix = f"/ui/browse/{base_dir}/"
+        raw_prefix = f"/ui/raw/{html.escape(safe_dir)}/"
+        browse_prefix = f"/ui/browse/{html.escape(safe_dir)}/"
 
     def _replace(m: re.Match) -> str:
         tag_img = m.group(1)
@@ -1130,8 +1133,11 @@ var _unsaved=false;
 })();
 
 function _initPanZoom(wrap){
+  if(!wrap.firstElementChild)return;
+  var child=wrap.firstElementChild;
   var scale=1,tx=0,ty=0,panning=false,px=0,py=0,ptx=0,pty=0;
-  function apply(){wrap.firstElementChild.style.transform='translate('+tx+'px,'+ty+'px) scale('+scale+')';}
+  child.style.transformOrigin='0 0';
+  function apply(){child.style.transform='translate('+tx+'px,'+ty+'px) scale('+scale+')';}
   wrap.addEventListener('wheel',function(e){
     e.preventDefault();
     var f=e.deltaY>0?0.9:1.1;var ns=Math.min(Math.max(scale*f,0.2),5);
@@ -1154,7 +1160,6 @@ function _initPanZoom(wrap){
   });
   wrap.style.cursor='grab';
   wrap.style.overflow='hidden';
-  if(wrap.firstElementChild)wrap.firstElementChild.style.transformOrigin='0 0';
 }
 
 if(typeof mermaid!=='undefined'){
@@ -1198,19 +1203,18 @@ if(typeof StashGantt!=='undefined'){
     var pre=block.parentElement;
     var container=document.createElement('div');
     container.className='viewer-gantt';
+    container.textContent='Loading Gantt chart…';
     pre.parentElement.replaceChild(container,pre);
-    try{
-      var data=JSON.parse(container.getAttribute('data-gantt')||'null');
-      if(!data){
-        // Post YAML to a parse endpoint; fall back to displaying raw
-        var x=new XMLHttpRequest();
-        x.open('POST','/ui/parse-gantt',false);
-        x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
-        x.send('yaml='+encodeURIComponent(yaml));
-        if(x.status===200) data=JSON.parse(x.responseText);
-      }
-      if(data) StashGantt.render(container,data,{readOnly:true});
-    }catch(e){container.textContent='Gantt parse error: '+e.message;}
+    var data=JSON.parse(container.getAttribute('data-gantt')||'null');
+    if(data){
+      container.textContent='';
+      StashGantt.render(container,data,{readOnly:true});
+    }else{
+      fetch('/ui/parse-gantt',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'yaml='+encodeURIComponent(yaml)})
+      .then(function(r){if(!r.ok)throw new Error('Server error');return r.json();})
+      .then(function(d){container.textContent='';StashGantt.render(container,d,{readOnly:true});})
+      .catch(function(e){container.textContent='Gantt parse error: '+e.message;});
+    }
   });
 }
 
@@ -1709,7 +1713,8 @@ def create_ui_router(
             data = _yaml.safe_load(yaml)
             return JSONResponse(_json.loads(_json.dumps(data, default=str)))
         except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            logger.warning("Gantt YAML parse error: %s", exc)
+            return JSONResponse({"error": "Invalid Gantt YAML"}, status_code=400)
 
     # --- raw file serving (images, SVG, HTML) ---
     @router.get("/ui/raw/{path:path}")
