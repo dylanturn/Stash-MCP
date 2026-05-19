@@ -52,9 +52,11 @@ edit_content(path, sha, edits=[
 - Edits are sequential — edit #2 sees the result of edit #1. Plan accordingly.
 - SHA mismatch means the file changed. Re-read, check the diff, then retry.
 
-## Pattern: Transactional Multi-File Change
+## Pattern: Transactional Write
 
-**When:** Any operation touching more than one file. Reorganizations, template-based creation, coordinated updates.
+**When:** Every write, whenever git tracking is enabled — single edits, multi-file reorganizations, template-based creation, or any call to a mutating tool. The gated set is `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. Any of these without an active transaction fails with:
+
+> `TransactionError: No active transaction. Call start_content_transaction first.`
 
 ```
 list_content_transactions()
@@ -65,13 +67,13 @@ list_content_transactions()
 start_content_transaction()
   → acquire the global write lock
 
-[... multiple create/edit/delete/move operations ...]
+[... one or more write operations (create/overwrite/edit/delete/move, including batch variants) ...]
 
 commit_content_transaction(message="descriptive message about what changed and why")
   → atomic commit of all changes
 ```
 
-**Why:** Without transactions, a failure after modifying 3 of 5 files leaves the store inconsistent. Transactions ensure all-or-nothing. They also batch all changes into a single git commit, keeping history clean.
+**Why:** With git tracking on, every write is wrapped in a transaction so each change becomes a clean git commit with attribution. Batching multiple operations into one transaction yields one atomic commit instead of many — useful for reorganizations and template-based creation where a half-applied set of changes would leave the store inconsistent.
 
 **Watch for:**
 - Always check for orphans first. A crashed session may have left a lock open.
