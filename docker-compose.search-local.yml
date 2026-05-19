@@ -15,7 +15,6 @@ services:
       - STASH_SEARCH_ENABLED=true
       - STASH_SEARCH_EMBEDDER_MODEL=sentence-transformers:all-mpnet-base-v2
     restart: unless-stopped
-
 volumes:
   stash-models:
   stash-index:

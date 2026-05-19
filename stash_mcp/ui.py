@@ -1,7 +1,9 @@
 """Content browser & editor UI with three-panel layout."""
 
 import base64
+import csv
 import html
+import io
 import json as _json
 import logging
 import re
@@ -22,6 +24,7 @@ _SVG_EXTENSIONS = frozenset({".svg"})
 _HTML_EXTENSIONS = frozenset({".html", ".htm"})
 _MERMAID_EXTENSIONS = frozenset({".mmd", ".mermaid"})
 _GANTT_EXTENSIONS = frozenset({".gantt"})
+_CSV_EXTENSIONS = frozenset({".csv", ".tsv"})
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +186,12 @@ _ICONS = {
         '3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l'
         '.838-2.872a2 2 0 0 1 .506-.854z"/></svg>'
     ),
+    "table": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="M12 3v18"/><rect width="18" height="18" '
+        'x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></svg>'
+    ),
 }
 
 
@@ -205,6 +214,8 @@ def _file_icon(name: str) -> str:
         return _icon("globe")
     if suffix in _MERMAID_EXTENSIONS or suffix in _GANTT_EXTENSIONS:
         return _icon("git-branch")
+    if suffix in _CSV_EXTENSIONS:
+        return _icon("table")
     if suffix in {".json"}:
         return _icon("file-json")
     return _icon("file-text")
@@ -499,6 +510,24 @@ def _breadcrumbs_html(path: str) -> str:
     return f' <span class="sep">{_icon("chevron-right")}</span> '.join(items)
 
 
+_CSV_FENCE_RE = re.compile(
+    r"^```(?P<lang>csv|tsv)\s*\n(?P<body>.*?)^```\s*$",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _csv_fence_replace(m: re.Match) -> str:
+    """Replace a ```csv/tsv fenced block with a rendered HTML table."""
+    lang = m.group("lang")
+    body = m.group("body")
+    suffix = f".{lang}"
+    try:
+        table_html, _ = _render_csv(body, suffix)
+        return table_html
+    except Exception:
+        return m.group(0)
+
+
 def _render_markdown(content: str) -> tuple[str, str]:
     """Render markdown to HTML with extensions. Returns (html, toc_html).
 
@@ -507,6 +536,7 @@ def _render_markdown(content: str) -> tuple[str, str]:
     <details>, <img>, and <div> in markdown files are intentionally supported.
     Do not expose the UI to untrusted third-party content.
     """
+    content = _CSV_FENCE_RE.sub(_csv_fence_replace, content)
     converter = md.Markdown(extensions=[
         "fenced_code",
         "tables",
@@ -548,6 +578,47 @@ def _rewrite_relative_urls(html_str: str, base_dir: str) -> str:
         return tag_a + browse_prefix
 
     return _RELATIVE_URL_RE.sub(_replace, html_str)
+
+
+def _render_csv(content: str, suffix: str) -> tuple[str, str]:
+    """Render CSV/TSV content as an HTML table. Returns (center_html, toc_html)."""
+    delimiter = "\t" if suffix == ".tsv" else ","
+    reader = csv.reader(io.StringIO(content), delimiter=delimiter)
+    rows = list(reader)
+    if not rows:
+        return '<div class="viewer-content"><pre></pre></div>', ""
+
+    has_header = csv.Sniffer().has_header(content[:8192]) if len(content) > 0 else False
+    header = rows[0] if has_header else [f"Col {i + 1}" for i in range(len(rows[0]))]
+    data_rows = rows[1:] if has_header else rows
+    num_cols = len(header)
+
+    thead = "".join(f"<th>{html.escape(h)}</th>" for h in header)
+    thead = f'<th class="csv-row-num">#</th>{thead}'
+
+    tbody_parts: list[str] = []
+    for i, row in enumerate(data_rows, start=1):
+        cells = "".join(
+            f"<td>{html.escape(row[j]) if j < len(row) else ''}</td>"
+            for j in range(num_cols)
+        )
+        tbody_parts.append(f'<tr><td class="csv-row-num">{i}</td>{cells}</tr>')
+
+    num_rows = len(data_rows)
+    stats = (
+        f'<div class="csv-stats">'
+        f"<span>{num_rows:,} row{'s' if num_rows != 1 else ''}</span>"
+        f"<span>{num_cols:,} column{'s' if num_cols != 1 else ''}</span>"
+        f"</div>"
+    )
+
+    center = (
+        f'<div class="viewer-csv">'
+        f'<table class="csv-table"><thead><tr>{thead}</tr></thead>'
+        f'<tbody>{"".join(tbody_parts)}</tbody></table>'
+        f"{stats}</div>"
+    )
+    return center, ""
 
 
 def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
@@ -902,6 +973,22 @@ box-shadow:0 4px 12px rgba(0,0,0,0.4)}
 .gantt-tip-section{color:#94e2d5;font-size:11px}
 .gantt-tip-dur{color:#7f849c;font-size:11px}
 
+/* csv table viewer */
+.viewer-csv{padding:24px 32px;flex:1;overflow:auto}
+.csv-table{width:100%;border-collapse:collapse;font-size:13px;font-family:'Monaco','Menlo','Ubuntu Mono',monospace}
+.csv-table thead th{position:sticky;top:0;z-index:1;text-align:left;padding:8px 12px;
+background:#272738;color:#e0e4f0;font-weight:600;font-size:12px;
+border-bottom:2px solid #313244;white-space:nowrap}
+.csv-table tbody td{padding:6px 12px;border-bottom:1px solid #232334;color:#cdd6f4;
+white-space:nowrap;max-width:400px;overflow:hidden;text-overflow:ellipsis}
+.csv-table tbody tr:hover td{background:#2e2e42}
+.csv-row-num{color:#585b70;text-align:right;font-size:11px;user-select:none;
+padding-right:16px !important;border-right:1px solid #313244}
+.csv-stats{display:flex;gap:16px;font-size:12px;color:#7f849c;margin-top:8px}
+.viewer-csv-inline{padding:0;margin-bottom:1.5rem;border:1px solid #313244;border-radius:6px;overflow:auto}
+.viewer-csv-inline .csv-table{font-size:12px}
+.viewer-csv-inline .csv-stats{padding:6px 12px;border-top:1px solid #313244;background:#1e1e2e}
+
 /* openapi schema viewer */
 .viewer-openapi{padding:24px 32px}
 .oas-header{margin-bottom:2rem}
@@ -1202,16 +1289,10 @@ if(typeof StashGantt!=='undefined'){
     container.className='viewer-gantt';
     container.textContent='Loading Gantt chart…';
     pre.parentElement.replaceChild(container,pre);
-    var data=JSON.parse(container.getAttribute('data-gantt')||'null');
-    if(data){
-      container.textContent='';
-      StashGantt.render(container,data,{readOnly:true});
-    }else{
-      fetch('/ui/parse-gantt',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'yaml='+encodeURIComponent(yaml)})
-      .then(function(r){if(!r.ok)throw new Error('Server error');return r.json();})
-      .then(function(d){container.textContent='';StashGantt.render(container,d,{readOnly:true});})
-      .catch(function(e){container.textContent='Gantt parse error: '+e.message;});
-    }
+    fetch('/ui/parse-gantt',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'yaml='+encodeURIComponent(yaml)})
+    .then(function(r){if(!r.ok)throw new Error('Server error');return r.json();})
+    .then(function(d){container.textContent='';StashGantt.render(container,d,{readOnly:true});})
+    .catch(function(e){container.textContent='Gantt parse error: '+e.message;});
   });
 }
 
@@ -1519,17 +1600,19 @@ def create_ui_router(
                     f'<div class="mermaid">{escaped_content}</div></div>'
                 )
             elif suffix in _GANTT_EXTENSIONS:
+                gantt_data = None
+                gantt_error = False
                 try:
                     gantt_data = _yaml.safe_load(content)
                 except Exception as exc:
-                    gantt_data = None
+                    gantt_error = True
                     center = (
                         f'<div class="error-msg">Invalid YAML: {html.escape(str(exc))}</div>'
                         f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
                     )
                 if gantt_data is not None:
-                    js_data = _json.dumps(gantt_data, default=str)
-                    js_path = _json.dumps(path)
+                    js_data = _json.dumps(gantt_data, default=str).replace("</", "<\\/")
+                    js_path = _json.dumps(path).replace("</", "<\\/")
                     ro_flag = "true" if read_only else "false"
                     center = (
                         f'<div class="viewer-gantt" id="gantt-root"></div>'
@@ -1538,6 +1621,10 @@ def create_ui_router(
                         f'StashGantt.render(document.getElementById("gantt-root"),'
                         f'{js_data},{{savePath:{js_path},readOnly:{ro_flag}}});'
                         f'}});</script>'
+                    )
+                elif not gantt_error:
+                    center = (
+                        f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
                     )
             elif path.endswith((".md", ".markdown")):
                 rendered, toc_html = _render_markdown(content)
@@ -1558,6 +1645,13 @@ def create_ui_router(
                 except (ValueError, TypeError):
                     pass
                 if not oas_rendered:
+                    center = (
+                        f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
+                    )
+            elif suffix in _CSV_EXTENSIONS:
+                try:
+                    center, toc_html = _render_csv(content, suffix)
+                except Exception:
                     center = (
                         f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
                     )
@@ -1731,7 +1825,12 @@ def create_ui_router(
             data = full.read_bytes()
         except Exception as exc:
             return Response(content=f"Error: {exc}", status_code=500)
-        return Response(content=data, media_type=mime)
+        suffix = PurePosixPath(path).suffix.lower()
+        headers: dict[str, str] = {}
+        if suffix in _HTML_EXTENSIONS or suffix in _SVG_EXTENSIONS:
+            headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+            headers["Content-Disposition"] = "inline"
+        return Response(content=data, media_type=mime, headers=headers)
 
     # --- edit ---
     @router.get("/ui/edit/{path:path}", response_class=HTMLResponse)
