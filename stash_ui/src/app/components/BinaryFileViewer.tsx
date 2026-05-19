@@ -68,12 +68,15 @@ interface BinaryFileViewerProps {
   fileName: string;
 }
 
-/** Renders images, PDFs, and HTML artifacts inside the document
- * viewport. Images and PDFs stream from the API's raw endpoint;
- * HTML is wrapped in a same-document blob URL and loaded into an
- * iframe with a strict ``sandbox`` so the artifact runs in a null
- * origin — blob URLs replace the legacy ``srcDoc`` approach to avoid
- * its length cap and per-keystroke re-render. */
+/** Renders images, PDFs, SVGs, and HTML artifacts inside the
+ * document viewport. Images and PDFs stream from the API's raw
+ * endpoint; HTML is wrapped in a same-document blob URL and loaded
+ * into an iframe with a strict ``sandbox`` so the artifact runs in a
+ * null origin — blob URLs replace the legacy ``srcDoc`` approach to
+ * avoid its length cap and per-keystroke re-render. SVG is rendered
+ * via an ``<img>`` element pointing at a blob URL built from the
+ * in-memory document, which keeps any embedded ``<script>`` tags
+ * inert and lets unsaved edits preview live. */
 export function BinaryFileViewer({ kind, rawUrl, htmlContent, svgContent, fileName }: BinaryFileViewerProps) {
   if (kind === 'svg') {
     return <SvgPreview content={svgContent ?? ''} rawUrl={rawUrl} fileName={fileName} />;

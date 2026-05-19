@@ -381,16 +381,127 @@ export function DocumentViewer({
     );
   }
 
-  // Images and PDFs can't round-trip through the JSON content endpoint,
-  // so view mode renders them directly from the raw bytes URL. HTML
-  // and SVG artifacts are text — they render in a preview pane but
-  // keep their source editable in a textarea.
-  const isEditable = binaryKind === 'html' || binaryKind === 'svg';
+  // SVG documents have their own branch so edit mode can render a
+  // live preview alongside the source textarea — unlike HTML (where
+  // an iframe re-render on every keystroke would be costly), an
+  // `<img>`-backed SVG preview cheaply reflects each edit.
+  if (binaryKind === 'svg') {
+    const previewContent = mode === 'edit' ? editContent : (file.content || '');
+    return (
+      <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--stash-bg-base)' }}>
+        <div className="flex items-center border-b" style={{ borderColor: 'var(--stash-border)' }}>
+          <button
+            onClick={() => setMode('view')}
+            className="flex items-center gap-2 px-6 py-3 transition-all duration-150 relative"
+            style={{
+              color: mode === 'view' ? 'var(--stash-text-bright)' : 'var(--stash-text-secondary)',
+              borderBottom: mode === 'view' ? '2px solid var(--stash-accent)' : '2px solid transparent',
+            }}
+          >
+            <Eye className="w-4 h-4" />
+            <span className="text-sm">SVG Preview</span>
+          </button>
+          <button
+            onClick={() => setMode('edit')}
+            className="flex items-center gap-2 px-6 py-3 transition-all duration-150 relative"
+            style={{
+              color: mode === 'edit' ? 'var(--stash-text-bright)' : 'var(--stash-text-secondary)',
+              borderBottom: mode === 'edit' ? '2px solid var(--stash-accent)' : '2px solid transparent',
+            }}
+          >
+            <Edit className="w-4 h-4" />
+            <span className="text-sm">Edit</span>
+            {hasChanges && (
+              <div
+                className="w-2 h-2 rounded-full"
+                style={{ backgroundColor: 'var(--stash-accent)' }}
+              />
+            )}
+          </button>
+        </div>
+        <div className="flex-1 overflow-hidden">
+          {mode === 'view' ? (
+            <BinaryFileViewer
+              kind="svg"
+              rawUrl={rawUrl ? rawUrl(file.path) : undefined}
+              svgContent={previewContent}
+              fileName={file.name}
+            />
+          ) : (
+            <div className="h-full flex" style={{ borderColor: 'var(--stash-border)' }}>
+              <div
+                className="flex-1 overflow-auto p-4"
+                style={{ borderRight: '1px solid var(--stash-border)' }}
+              >
+                <textarea
+                  value={editContent}
+                  onChange={(e) => handleContentChange(e.target.value)}
+                  className="w-full h-full p-4 rounded-md font-mono text-sm resize-none outline-none"
+                  style={{
+                    backgroundColor: 'var(--stash-bg-surface)',
+                    color: 'var(--stash-text-primary)',
+                    border: '1px solid var(--stash-border)',
+                    lineHeight: '1.6',
+                    minHeight: '600px',
+                  }}
+                />
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <BinaryFileViewer
+                  kind="svg"
+                  rawUrl={rawUrl ? rawUrl(file.path) : undefined}
+                  svgContent={previewContent}
+                  fileName={file.name}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+        {hasChanges && mode === 'edit' && (
+          <div
+            className="sticky bottom-0 flex items-center justify-center gap-3 px-8 py-4 backdrop-blur-md"
+            style={{
+              backgroundColor: 'rgba(30, 30, 46, 0.95)',
+              borderTop: '1px solid var(--stash-border)',
+            }}
+          >
+            <button
+              onClick={handleSave}
+              className="flex items-center gap-2 px-6 py-2 rounded-md transition-all duration-150"
+              style={{
+                backgroundColor: 'var(--stash-accent)',
+                color: 'var(--stash-bg-base)',
+              }}
+            >
+              <Save className="w-4 h-4" />
+              <span className="text-sm">Save</span>
+            </button>
+            <button
+              onClick={handleDiscard}
+              className="flex items-center gap-2 px-6 py-2 rounded-md transition-all duration-150"
+              style={{
+                backgroundColor: 'transparent',
+                color: 'var(--stash-text-secondary)',
+                border: '1px solid var(--stash-border)',
+              }}
+            >
+              <X className="w-4 h-4" />
+              <span className="text-sm">Discard</span>
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Images, PDFs, and HTML round trip through the binary viewer. HTML
+  // is editable via a fall-through to the textarea below; images and
+  // PDFs are view-only.
+  const isEditable = binaryKind === 'html';
   if (binaryKind !== null && (mode === 'view' || !isEditable)) {
     const previewLabel =
       binaryKind === 'image' ? 'Image'
         : binaryKind === 'pdf' ? 'PDF'
-        : binaryKind === 'svg' ? 'SVG Preview'
         : 'HTML Preview';
     return (
       <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--stash-bg-base)' }}>
@@ -431,7 +542,6 @@ export function DocumentViewer({
             kind={binaryKind}
             rawUrl={rawUrl ? rawUrl(file.path) : undefined}
             htmlContent={file.content || ''}
-            svgContent={file.content || ''}
             fileName={file.name}
           />
         </div>
