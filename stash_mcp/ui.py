@@ -4,6 +4,7 @@ import base64
 import html
 import json as _json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
@@ -222,6 +223,256 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} GB"
 
 
+_METHOD_COLORS = {
+    "get": ("#a6e3a1", "#1e1e2e"),
+    "post": ("#89b4fa", "#1e1e2e"),
+    "put": ("#fab387", "#1e1e2e"),
+    "patch": ("#cba6f7", "#1e1e2e"),
+    "delete": ("#f38ba8", "#1e1e2e"),
+    "head": ("#94e2d5", "#1e1e2e"),
+    "options": ("#7f849c", "#1e1e2e"),
+}
+
+
+def _render_openapi(spec: dict) -> tuple[str, str]:
+    """Render an OpenAPI spec as styled HTML. Returns (center_html, toc_html)."""
+    info = spec.get("info", {})
+    title = html.escape(info.get("title", "API"))
+    version = html.escape(info.get("version", ""))
+    description = html.escape(info.get("description", ""))
+    openapi_ver = html.escape(str(spec.get("openapi", "")))
+
+    parts: list[str] = []
+    toc_items: list[str] = []
+
+    parts.append(
+        f'<div class="oas-header">'
+        f'<h1>{title}</h1>'
+        f'<div class="oas-meta">'
+        f'<span class="oas-badge oas-badge-ver">OpenAPI {openapi_ver}</span>'
+        f'<span class="oas-badge oas-badge-ver">v{version}</span>'
+        f'</div>'
+    )
+    if description:
+        parts.append(f'<p class="oas-desc">{description}</p>')
+    parts.append('</div>')
+
+    paths = spec.get("paths", {})
+    if paths:
+        tag_groups: dict[str, list[tuple[str, str, dict]]] = {}
+        for route, methods in paths.items():
+            for method, op in methods.items():
+                if method.lower() in _METHOD_COLORS:
+                    tags = op.get("tags", ["default"])
+                    for tag in tags:
+                        tag_groups.setdefault(tag, []).append(
+                            (route, method.upper(), op)
+                        )
+
+        for tag, operations in tag_groups.items():
+            tag_slug = re.sub(r'[^a-z0-9_-]', '-', tag.lower()).strip('-')
+            tag_id = f"tag-{html.escape(tag_slug)}"
+            tag_esc = html.escape(tag)
+            toc_items.append(
+                f'<a href="#{tag_id}" class="toc-link">{tag_esc}'
+                f'<span class="toc-count">{len(operations)}</span></a>'
+            )
+            parts.append(
+                f'<div class="oas-tag-group" id="{tag_id}">'
+                f'<h2 class="oas-tag-title">{tag_esc}</h2>'
+            )
+
+            for route, method, op in operations:
+                bg, fg = _METHOD_COLORS.get(method.lower(), ("#7f849c", "#1e1e2e"))
+                summary = html.escape(op.get("summary", ""))
+                desc = html.escape(op.get("description", ""))
+                op_id = html.escape(op.get("operationId", ""))
+                route_esc = html.escape(route)
+
+                parts.append(
+                    f'<details class="oas-op">'
+                    f'<summary class="oas-op-summary">'
+                    f'<span class="oas-method" style="background:{bg};color:{fg}">'
+                    f'{method}</span>'
+                    f'<span class="oas-path">{route_esc}</span>'
+                    f'<span class="oas-summary">{summary}</span>'
+                    f'</summary>'
+                    f'<div class="oas-op-body">'
+                )
+
+                if desc:
+                    parts.append(f'<p class="oas-op-desc">{desc}</p>')
+                if op_id:
+                    parts.append(
+                        f'<div class="oas-op-id">'
+                        f'<span class="oas-label">operationId:</span> {op_id}</div>'
+                    )
+
+                params = op.get("parameters", [])
+                if params:
+                    parts.append(
+                        '<div class="oas-section">'
+                        '<h4 class="oas-section-title">Parameters</h4>'
+                        '<table class="oas-params">'
+                        '<thead><tr><th>Name</th><th>In</th><th>Type</th>'
+                        '<th>Required</th><th>Description</th></tr></thead><tbody>'
+                    )
+                    for p in params:
+                        pname = html.escape(p.get("name", ""))
+                        pin = html.escape(p.get("in", ""))
+                        schema = p.get("schema", {})
+                        ptype = html.escape(_oas_type_label(schema))
+                        preq = "Yes" if p.get("required") else "No"
+                        pdesc = html.escape(p.get("description", ""))
+                        req_cls = " oas-required" if p.get("required") else ""
+                        parts.append(
+                            f'<tr><td class="oas-pname{req_cls}">{pname}</td>'
+                            f'<td><span class="oas-in-badge">{pin}</span></td>'
+                            f'<td class="oas-ptype">{ptype}</td>'
+                            f'<td>{preq}</td><td>{pdesc}</td></tr>'
+                        )
+                    parts.append('</tbody></table></div>')
+
+                req_body = op.get("requestBody", {})
+                if req_body:
+                    rb_content = req_body.get("content", {})
+                    for media, media_obj in rb_content.items():
+                        schema = media_obj.get("schema", {})
+                        parts.append(
+                            f'<div class="oas-section">'
+                            f'<h4 class="oas-section-title">Request Body'
+                            f'<span class="oas-media-type">{html.escape(media)}</span></h4>'
+                            f'<div class="oas-schema-block">'
+                            f'{_oas_schema_html(schema, spec)}'
+                            f'</div></div>'
+                        )
+
+                responses = op.get("responses", {})
+                if responses:
+                    parts.append(
+                        '<div class="oas-section">'
+                        '<h4 class="oas-section-title">Responses</h4>'
+                    )
+                    for code, resp in responses.items():
+                        rdesc = html.escape(resp.get("description", ""))
+                        code_cls = "oas-code-2xx" if code.startswith("2") else (
+                            "oas-code-4xx" if code.startswith("4") else "oas-code-other"
+                        )
+                        parts.append(
+                            f'<div class="oas-response">'
+                            f'<span class="oas-resp-code {code_cls}">{html.escape(code)}</span>'
+                            f'<span class="oas-resp-desc">{rdesc}</span>'
+                            f'</div>'
+                        )
+                    parts.append('</div>')
+
+                parts.append('</div></details>')
+
+            parts.append('</div>')
+
+    schemas = spec.get("components", {}).get("schemas", {})
+    if schemas:
+        toc_items.append(
+            '<a href="#oas-schemas" class="toc-link">Schemas'
+            f'<span class="toc-count">{len(schemas)}</span></a>'
+        )
+        parts.append(
+            '<div class="oas-tag-group" id="oas-schemas">'
+            '<h2 class="oas-tag-title">Schemas</h2>'
+        )
+        for name, schema in schemas.items():
+            name_esc = html.escape(name)
+            schema_type = html.escape(_oas_type_label(schema))
+            desc = html.escape(schema.get("description", ""))
+            parts.append(
+                f'<details class="oas-op oas-schema-def">'
+                f'<summary class="oas-op-summary">'
+                f'<span class="oas-method oas-schema-badge">SCHEMA</span>'
+                f'<span class="oas-path">{name_esc}</span>'
+                f'<span class="oas-summary">{schema_type}</span>'
+                f'</summary>'
+                f'<div class="oas-op-body">'
+            )
+            if desc:
+                parts.append(f'<p class="oas-op-desc">{desc}</p>')
+            parts.append(
+                f'<div class="oas-schema-block">{_oas_schema_html(schema, spec)}'
+                f'</div></div></details>'
+            )
+        parts.append('</div>')
+
+    center_html = f'<div class="viewer-openapi">{"".join(parts)}</div>'
+
+    toc_html = ""
+    if toc_items:
+        toc_html = '<div class="toc">' + "".join(toc_items) + '</div>'
+    return center_html, toc_html
+
+
+def _oas_type_label(schema: dict) -> str:
+    """Human-readable type from a JSON Schema snippet."""
+    if "$ref" in schema:
+        return schema["$ref"].rsplit("/", 1)[-1]
+    t = schema.get("type", "")
+    if isinstance(t, list):
+        return " | ".join(t)
+    if t == "array":
+        items = schema.get("items", {})
+        return f"array[{_oas_type_label(items)}]"
+    fmt = schema.get("format")
+    if fmt:
+        return f"{t} ({fmt})"
+    any_of = schema.get("anyOf", [])
+    if any_of:
+        return " | ".join(_oas_type_label(s) for s in any_of)
+    return t or "object"
+
+
+def _oas_schema_html(schema: dict, spec: dict, depth: int = 0) -> str:
+    """Render a JSON Schema object's properties as an HTML table."""
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        resolved = _oas_resolve_ref(ref, spec)
+        if resolved and depth < 3:
+            return _oas_schema_html(resolved, spec, depth + 1)
+        name = html.escape(ref.rsplit("/", 1)[-1])
+        return f'<span class="oas-ref">{name}</span>'
+
+    props = schema.get("properties", {})
+    if not props:
+        return f'<span class="oas-ptype">{html.escape(_oas_type_label(schema))}</span>'
+
+    required_set = set(schema.get("required", []))
+    rows: list[str] = []
+    for pname, pschema in props.items():
+        pname_esc = html.escape(pname)
+        ptype = html.escape(_oas_type_label(pschema))
+        req_cls = " oas-required" if pname in required_set else ""
+        rows.append(
+            f'<tr><td class="oas-pname{req_cls}">{pname_esc}</td>'
+            f'<td class="oas-ptype">{ptype}</td></tr>'
+        )
+    return (
+        '<table class="oas-props"><tbody>'
+        + "".join(rows)
+        + '</tbody></table>'
+    )
+
+
+def _oas_resolve_ref(ref: str, spec: dict) -> dict | None:
+    """Resolve a $ref like '#/components/schemas/Foo'."""
+    if not ref.startswith("#/"):
+        return None
+    parts = ref[2:].split("/")
+    node: dict = spec
+    for p in parts:
+        if isinstance(node, dict) and p in node:
+            node = node[p]
+        else:
+            return None
+    return node if isinstance(node, dict) else None
+
+
 def _breadcrumbs(path: str) -> list[tuple[str, str]]:
     """Return list of (label, href) breadcrumb pairs."""
     crumbs: list[tuple[str, str]] = [("Home", "/ui/browse/")]
@@ -266,6 +517,37 @@ def _render_markdown(content: str) -> tuple[str, str]:
     ])
     rendered = converter.convert(content)
     return rendered, getattr(converter, "toc", "")
+
+
+_RELATIVE_URL_RE = re.compile(
+    r'(<(?:img|source|video|audio|iframe)\b[^>]*?\b(?:src)='
+    r'["\'])(?!https?://|data:|/|#)'
+    r'|'
+    r'(<a\b[^>]*?\bhref='
+    r'["\'])(?!https?://|mailto:|data:|/|#)',
+    re.IGNORECASE,
+)
+
+
+def _rewrite_relative_urls(html_str: str, base_dir: str) -> str:
+    """Rewrite relative src/href in rendered HTML to /ui/raw/ or /ui/browse/ paths."""
+    from urllib.parse import quote
+    safe_dir = quote(base_dir, safe="/")
+    if not base_dir:
+        raw_prefix = "/ui/raw/"
+        browse_prefix = "/ui/browse/"
+    else:
+        raw_prefix = f"/ui/raw/{html.escape(safe_dir)}/"
+        browse_prefix = f"/ui/browse/{html.escape(safe_dir)}/"
+
+    def _replace(m: re.Match) -> str:
+        tag_img = m.group(1)
+        tag_a = m.group(2)
+        if tag_img:
+            return tag_img + raw_prefix
+        return tag_a + browse_prefix
+
+    return _RELATIVE_URL_RE.sub(_replace, html_str)
 
 
 def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
@@ -569,8 +851,11 @@ h2{font-size:17px;color:#e0e4f0;margin-bottom:12px;font-weight:500}
 border-radius:4px;border-left:3px solid #f38ba8;margin-bottom:12px}
 
 /* mermaid diagrams */
-.markdown-body .mermaid{background:#181825;padding:1.5rem;border-radius:6px;
-margin-bottom:1.5rem;display:flex;justify-content:center}
+.markdown-body .mermaid,.viewer-mermaid .mermaid{background:#181825;
+padding:1.5rem;border-radius:6px;margin-bottom:1.5rem;display:flex;
+justify-content:center;position:relative}
+.mermaid-hint{position:absolute;top:6px;right:10px;font-size:10px;
+color:#585b70;pointer-events:none;z-index:1}
 
 /* rich content viewers */
 .viewer-image{display:flex;justify-content:center;align-items:center;flex:1;
@@ -616,6 +901,65 @@ box-shadow:0 4px 12px rgba(0,0,0,0.4)}
 .gantt-tooltip strong{color:#e0e4f0;font-size:13px}
 .gantt-tip-section{color:#94e2d5;font-size:11px}
 .gantt-tip-dur{color:#7f849c;font-size:11px}
+
+/* openapi schema viewer */
+.viewer-openapi{padding:24px 32px}
+.oas-header{margin-bottom:2rem}
+.oas-header h1{color:#e0e4f0;font-size:26px;margin:0 0 8px}
+.oas-meta{display:flex;gap:8px;margin-bottom:8px}
+.oas-badge{padding:3px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.oas-badge-ver{background:#313244;color:#94e2d5}
+.oas-desc{color:#a6adc8;font-size:14px;margin:0}
+.oas-tag-group{margin-bottom:2rem}
+.oas-tag-title{color:#e0e4f0;font-size:18px;font-weight:600;
+margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid #313244}
+.oas-op{border:1px solid #313244;border-radius:6px;margin-bottom:6px;
+background:#1e1e2e;overflow:hidden}
+.oas-op[open]{background:#181825}
+.oas-op-summary{display:flex;align-items:center;gap:10px;padding:10px 14px;
+cursor:pointer;list-style:none;font-size:13px}
+.oas-op-summary::-webkit-details-marker{display:none}
+.oas-method{padding:4px 10px;border-radius:4px;font-size:11px;
+font-weight:700;font-family:monospace;min-width:56px;text-align:center;
+flex-shrink:0}
+.oas-schema-badge{background:#585b70 !important;color:#cdd6f4 !important}
+.oas-path{color:#cdd6f4;font-family:monospace;font-size:13px}
+.oas-summary{color:#7f849c;font-size:13px;margin-left:auto;text-align:right}
+.oas-op-body{padding:14px 20px;border-top:1px solid #313244}
+.oas-op-desc{color:#a6adc8;font-size:13px;margin:0 0 12px;white-space:pre-wrap}
+.oas-op-id{font-size:11px;color:#585b70;margin-bottom:12px;font-family:monospace}
+.oas-label{color:#7f849c}
+.oas-section{margin-bottom:16px}
+.oas-section-title{color:#94e2d5;font-size:13px;font-weight:600;
+margin:0 0 8px;display:flex;align-items:center;gap:8px}
+.oas-media-type{font-size:11px;color:#7f849c;font-weight:400;font-family:monospace}
+.oas-params{width:100%;border-collapse:collapse;font-size:12px}
+.oas-params th{text-align:left;padding:6px 10px;color:#7f849c;font-weight:500;
+border-bottom:1px solid #313244;font-size:11px;text-transform:uppercase}
+.oas-params td{padding:6px 10px;border-bottom:1px solid #232334;color:#cdd6f4}
+.oas-pname{font-family:monospace;color:#89b4fa}
+.oas-pname.oas-required{color:#f38ba8}
+.oas-pname.oas-required::after{content:" *";color:#f38ba8}
+.oas-ptype{font-family:monospace;color:#94e2d5;font-size:12px}
+.oas-in-badge{padding:2px 6px;border-radius:3px;font-size:10px;
+background:#272738;color:#7f849c;font-family:monospace}
+.oas-response{display:flex;align-items:center;gap:10px;padding:6px 0;
+border-bottom:1px solid #232334}
+.oas-response:last-child{border-bottom:none}
+.oas-resp-code{font-family:monospace;font-weight:700;font-size:12px;
+padding:2px 8px;border-radius:4px;min-width:36px;text-align:center}
+.oas-code-2xx{background:rgba(166,227,161,0.15);color:#a6e3a1}
+.oas-code-4xx{background:rgba(243,139,168,0.15);color:#f38ba8}
+.oas-code-other{background:rgba(127,132,156,0.15);color:#7f849c}
+.oas-resp-desc{color:#a6adc8;font-size:13px}
+.oas-schema-block{background:#11111b;border:1px solid #232334;
+border-radius:4px;padding:10px 14px;overflow-x:auto}
+.oas-props{width:100%;border-collapse:collapse;font-size:12px}
+.oas-props td{padding:4px 10px;border-bottom:1px solid #232334;color:#cdd6f4}
+.oas-ref{font-family:monospace;color:#cba6f7;font-size:12px}
+.oas-schema-def .oas-method{min-width:66px}
+.toc-count{margin-left:auto;font-size:11px;color:#585b70;
+background:#272738;padding:1px 6px;border-radius:8px}
 """
 
 # ---------------------------------------------------------------------------
@@ -785,6 +1129,36 @@ var _unsaved=false;
   }
 })();
 
+function _initPanZoom(wrap){
+  if(!wrap.firstElementChild)return;
+  var child=wrap.firstElementChild;
+  var scale=1,tx=0,ty=0,panning=false,px=0,py=0,ptx=0,pty=0;
+  child.style.transformOrigin='0 0';
+  function apply(){child.style.transform='translate('+tx+'px,'+ty+'px) scale('+scale+')';}
+  wrap.addEventListener('wheel',function(e){
+    e.preventDefault();
+    var f=e.deltaY>0?0.9:1.1;var ns=Math.min(Math.max(scale*f,0.2),5);
+    var rect=wrap.getBoundingClientRect();
+    var mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    tx=mx-(mx-tx)*(ns/scale); ty=my-(my-ty)*(ns/scale);
+    scale=ns; apply();
+  },{passive:false});
+  wrap.addEventListener('mousedown',function(e){
+    if(e.target.closest('a'))return;
+    panning=true;px=e.clientX;py=e.clientY;ptx=tx;pty=ty;
+    wrap.style.cursor='grabbing';e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!panning)return;
+    tx=ptx+(e.clientX-px);ty=pty+(e.clientY-py);apply();
+  });
+  document.addEventListener('mouseup',function(){
+    if(panning){panning=false;wrap.style.cursor='grab';}
+  });
+  wrap.style.cursor='grab';
+  wrap.style.overflow='hidden';
+}
+
 if(typeof mermaid!=='undefined'){
   mermaid.initialize({
     startOnLoad:false,
@@ -808,7 +1182,37 @@ if(typeof mermaid!=='undefined'){
     container.textContent=block.textContent;
     pre.parentElement.replaceChild(container,pre);
   });
-  mermaid.run();
+  mermaid.run().then(function(){
+    document.querySelectorAll('.mermaid').forEach(function(el){
+      _initPanZoom(el);
+      var hint=document.createElement('span');
+      hint.className='mermaid-hint';
+      hint.textContent='Scroll to zoom · Drag to pan';
+      el.appendChild(hint);
+    });
+  });
+}
+
+// Gantt code blocks in markdown
+if(typeof StashGantt!=='undefined'){
+  document.querySelectorAll('pre code.language-gantt').forEach(function(block){
+    var yaml=block.textContent;
+    var pre=block.parentElement;
+    var container=document.createElement('div');
+    container.className='viewer-gantt';
+    container.textContent='Loading Gantt chart…';
+    pre.parentElement.replaceChild(container,pre);
+    var data=JSON.parse(container.getAttribute('data-gantt')||'null');
+    if(data){
+      container.textContent='';
+      StashGantt.render(container,data,{readOnly:true});
+    }else{
+      fetch('/ui/parse-gantt',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'yaml='+encodeURIComponent(yaml)})
+      .then(function(r){if(!r.ok)throw new Error('Server error');return r.json();})
+      .then(function(d){container.textContent='';StashGantt.render(container,d,{readOnly:true});})
+      .catch(function(e){container.textContent='Gantt parse error: '+e.message;});
+    }
+  });
 }
 
 if(typeof hljs!=='undefined'){hljs.highlightAll();}
@@ -1137,9 +1541,26 @@ def create_ui_router(
                     )
             elif path.endswith((".md", ".markdown")):
                 rendered, toc_html = _render_markdown(content)
+                base_dir = str(PurePosixPath(path).parent)
+                if base_dir == ".":
+                    base_dir = ""
+                rendered = _rewrite_relative_urls(rendered, base_dir)
                 center = (
                     f'<div class="viewer-content markdown-body">{rendered}</div>'
                 )
+            elif suffix == ".json":
+                oas_rendered = False
+                try:
+                    parsed = _json.loads(content)
+                    if isinstance(parsed, dict) and "openapi" in parsed:
+                        center, toc_html = _render_openapi(parsed)
+                        oas_rendered = True
+                except (ValueError, TypeError):
+                    pass
+                if not oas_rendered:
+                    center = (
+                        f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
+                    )
             else:
                 center = (
                     f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
@@ -1281,6 +1702,18 @@ def create_ui_router(
                     "indexing": search_engine.indexing,
                 }
             )
+
+    # --- parse gantt YAML (for markdown embeds) ---
+    @router.post("/ui/parse-gantt")
+    async def ui_parse_gantt(request: Request, yaml: str = Form(...)):
+        """Parse Gantt YAML and return JSON for the client-side renderer."""
+        from fastapi.responses import JSONResponse
+        try:
+            data = _yaml.safe_load(yaml)
+            return JSONResponse(_json.loads(_json.dumps(data, default=str)))
+        except Exception as exc:
+            logger.warning("Gantt YAML parse error: %s", exc)
+            return JSONResponse({"error": "Invalid Gantt YAML"}, status_code=400)
 
     # --- raw file serving (images, SVG, HTML) ---
     @router.get("/ui/raw/{path:path}")
