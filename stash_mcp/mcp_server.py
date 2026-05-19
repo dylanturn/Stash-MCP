@@ -71,6 +71,17 @@ MIME_TYPES: dict[str, str] = {
     ".cfg": "text/plain",
     ".rst": "text/x-rst",
     ".log": "text/plain",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".bmp": "image/bmp",
+    ".mmd": "text/x-mermaid",
+    ".mermaid": "text/x-mermaid",
+    ".gantt": "text/x-gantt",
 }
 
 # Only files matching this name are exposed as MCP resources.
@@ -1098,7 +1109,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     )
                 except TransactionError as exc:
                     raise ValueError(str(exc))
-                return txn_id
+                return (
+                    f"Transaction started: {txn_id}\n\n"
+                    "IMPORTANT: When you are finished making changes, call "
+                    "`commit_content_transaction` to save them. If you want to "
+                    "discard all changes, call `abort_content_transaction` instead."
+                )
 
             @mcp.tool(
                 annotations=ToolAnnotations(

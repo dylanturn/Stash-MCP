@@ -1,17 +1,27 @@
 """Content browser & editor UI with three-panel layout."""
 
+import base64
 import html
+import json as _json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
 import markdown as md
+import yaml as _yaml
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileSystem
 from .mcp_server import MIME_TYPES
+
+_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp"})
+_SVG_EXTENSIONS = frozenset({".svg"})
+_HTML_EXTENSIONS = frozenset({".html", ".htm"})
+_MERMAID_EXTENSIONS = frozenset({".mmd", ".mermaid"})
+_GANTT_EXTENSIONS = frozenset({".gantt"})
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +142,40 @@ _ICONS = {
         '<path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/>'
         '<path d="M10 12h4"/></svg>'
     ),
+    "image": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>'
+        '<circle cx="9" cy="9" r="2"/>'
+        '<path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>'
+    ),
+    "code": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/>'
+        '<polyline points="8 6 2 12 8 18"/></svg>'
+    ),
+    "globe": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><circle cx="12" cy="12" r="10"/>'
+        '<path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>'
+        '<path d="M2 12h20"/></svg>'
+    ),
+    "git-branch": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><line x1="6" x2="6" y1="3" y2="15"/>'
+        '<circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'
+        '<path d="M18 9a9 9 0 0 1-9 9"/></svg>'
+    ),
+    "external-link": (
+        '<svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="M15 3h6v6"/>'
+        '<path d="M10 14 21 3"/>'
+        '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>'
+    ),
     "pen-line": (
         '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
         'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
@@ -152,8 +196,17 @@ def _icon(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _file_icon(_name: str) -> str:
+def _file_icon(name: str) -> str:
     """Return a Lucide SVG icon for a file."""
+    suffix = PurePosixPath(name).suffix.lower()
+    if suffix in _IMAGE_EXTENSIONS or suffix in _SVG_EXTENSIONS:
+        return _icon("image")
+    if suffix in _HTML_EXTENSIONS:
+        return _icon("globe")
+    if suffix in _MERMAID_EXTENSIONS or suffix in _GANTT_EXTENSIONS:
+        return _icon("git-branch")
+    if suffix in {".json"}:
+        return _icon("file-json")
     return _icon("file-text")
 
 
@@ -168,6 +221,256 @@ def _human_size(size: int) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} GB"
+
+
+_METHOD_COLORS = {
+    "get": ("#a6e3a1", "#1e1e2e"),
+    "post": ("#89b4fa", "#1e1e2e"),
+    "put": ("#fab387", "#1e1e2e"),
+    "patch": ("#cba6f7", "#1e1e2e"),
+    "delete": ("#f38ba8", "#1e1e2e"),
+    "head": ("#94e2d5", "#1e1e2e"),
+    "options": ("#7f849c", "#1e1e2e"),
+}
+
+
+def _render_openapi(spec: dict) -> tuple[str, str]:
+    """Render an OpenAPI spec as styled HTML. Returns (center_html, toc_html)."""
+    info = spec.get("info", {})
+    title = html.escape(info.get("title", "API"))
+    version = html.escape(info.get("version", ""))
+    description = html.escape(info.get("description", ""))
+    openapi_ver = html.escape(str(spec.get("openapi", "")))
+
+    parts: list[str] = []
+    toc_items: list[str] = []
+
+    parts.append(
+        f'<div class="oas-header">'
+        f'<h1>{title}</h1>'
+        f'<div class="oas-meta">'
+        f'<span class="oas-badge oas-badge-ver">OpenAPI {openapi_ver}</span>'
+        f'<span class="oas-badge oas-badge-ver">v{version}</span>'
+        f'</div>'
+    )
+    if description:
+        parts.append(f'<p class="oas-desc">{description}</p>')
+    parts.append('</div>')
+
+    paths = spec.get("paths", {})
+    if paths:
+        tag_groups: dict[str, list[tuple[str, str, dict]]] = {}
+        for route, methods in paths.items():
+            for method, op in methods.items():
+                if method.lower() in _METHOD_COLORS:
+                    tags = op.get("tags", ["default"])
+                    for tag in tags:
+                        tag_groups.setdefault(tag, []).append(
+                            (route, method.upper(), op)
+                        )
+
+        for tag, operations in tag_groups.items():
+            tag_slug = re.sub(r'[^a-z0-9_-]', '-', tag.lower()).strip('-')
+            tag_id = f"tag-{html.escape(tag_slug)}"
+            tag_esc = html.escape(tag)
+            toc_items.append(
+                f'<a href="#{tag_id}" class="toc-link">{tag_esc}'
+                f'<span class="toc-count">{len(operations)}</span></a>'
+            )
+            parts.append(
+                f'<div class="oas-tag-group" id="{tag_id}">'
+                f'<h2 class="oas-tag-title">{tag_esc}</h2>'
+            )
+
+            for route, method, op in operations:
+                bg, fg = _METHOD_COLORS.get(method.lower(), ("#7f849c", "#1e1e2e"))
+                summary = html.escape(op.get("summary", ""))
+                desc = html.escape(op.get("description", ""))
+                op_id = html.escape(op.get("operationId", ""))
+                route_esc = html.escape(route)
+
+                parts.append(
+                    f'<details class="oas-op">'
+                    f'<summary class="oas-op-summary">'
+                    f'<span class="oas-method" style="background:{bg};color:{fg}">'
+                    f'{method}</span>'
+                    f'<span class="oas-path">{route_esc}</span>'
+                    f'<span class="oas-summary">{summary}</span>'
+                    f'</summary>'
+                    f'<div class="oas-op-body">'
+                )
+
+                if desc:
+                    parts.append(f'<p class="oas-op-desc">{desc}</p>')
+                if op_id:
+                    parts.append(
+                        f'<div class="oas-op-id">'
+                        f'<span class="oas-label">operationId:</span> {op_id}</div>'
+                    )
+
+                params = op.get("parameters", [])
+                if params:
+                    parts.append(
+                        '<div class="oas-section">'
+                        '<h4 class="oas-section-title">Parameters</h4>'
+                        '<table class="oas-params">'
+                        '<thead><tr><th>Name</th><th>In</th><th>Type</th>'
+                        '<th>Required</th><th>Description</th></tr></thead><tbody>'
+                    )
+                    for p in params:
+                        pname = html.escape(p.get("name", ""))
+                        pin = html.escape(p.get("in", ""))
+                        schema = p.get("schema", {})
+                        ptype = html.escape(_oas_type_label(schema))
+                        preq = "Yes" if p.get("required") else "No"
+                        pdesc = html.escape(p.get("description", ""))
+                        req_cls = " oas-required" if p.get("required") else ""
+                        parts.append(
+                            f'<tr><td class="oas-pname{req_cls}">{pname}</td>'
+                            f'<td><span class="oas-in-badge">{pin}</span></td>'
+                            f'<td class="oas-ptype">{ptype}</td>'
+                            f'<td>{preq}</td><td>{pdesc}</td></tr>'
+                        )
+                    parts.append('</tbody></table></div>')
+
+                req_body = op.get("requestBody", {})
+                if req_body:
+                    rb_content = req_body.get("content", {})
+                    for media, media_obj in rb_content.items():
+                        schema = media_obj.get("schema", {})
+                        parts.append(
+                            f'<div class="oas-section">'
+                            f'<h4 class="oas-section-title">Request Body'
+                            f'<span class="oas-media-type">{html.escape(media)}</span></h4>'
+                            f'<div class="oas-schema-block">'
+                            f'{_oas_schema_html(schema, spec)}'
+                            f'</div></div>'
+                        )
+
+                responses = op.get("responses", {})
+                if responses:
+                    parts.append(
+                        '<div class="oas-section">'
+                        '<h4 class="oas-section-title">Responses</h4>'
+                    )
+                    for code, resp in responses.items():
+                        rdesc = html.escape(resp.get("description", ""))
+                        code_cls = "oas-code-2xx" if code.startswith("2") else (
+                            "oas-code-4xx" if code.startswith("4") else "oas-code-other"
+                        )
+                        parts.append(
+                            f'<div class="oas-response">'
+                            f'<span class="oas-resp-code {code_cls}">{html.escape(code)}</span>'
+                            f'<span class="oas-resp-desc">{rdesc}</span>'
+                            f'</div>'
+                        )
+                    parts.append('</div>')
+
+                parts.append('</div></details>')
+
+            parts.append('</div>')
+
+    schemas = spec.get("components", {}).get("schemas", {})
+    if schemas:
+        toc_items.append(
+            '<a href="#oas-schemas" class="toc-link">Schemas'
+            f'<span class="toc-count">{len(schemas)}</span></a>'
+        )
+        parts.append(
+            '<div class="oas-tag-group" id="oas-schemas">'
+            '<h2 class="oas-tag-title">Schemas</h2>'
+        )
+        for name, schema in schemas.items():
+            name_esc = html.escape(name)
+            schema_type = html.escape(_oas_type_label(schema))
+            desc = html.escape(schema.get("description", ""))
+            parts.append(
+                f'<details class="oas-op oas-schema-def">'
+                f'<summary class="oas-op-summary">'
+                f'<span class="oas-method oas-schema-badge">SCHEMA</span>'
+                f'<span class="oas-path">{name_esc}</span>'
+                f'<span class="oas-summary">{schema_type}</span>'
+                f'</summary>'
+                f'<div class="oas-op-body">'
+            )
+            if desc:
+                parts.append(f'<p class="oas-op-desc">{desc}</p>')
+            parts.append(
+                f'<div class="oas-schema-block">{_oas_schema_html(schema, spec)}'
+                f'</div></div></details>'
+            )
+        parts.append('</div>')
+
+    center_html = f'<div class="viewer-openapi">{"".join(parts)}</div>'
+
+    toc_html = ""
+    if toc_items:
+        toc_html = '<div class="toc">' + "".join(toc_items) + '</div>'
+    return center_html, toc_html
+
+
+def _oas_type_label(schema: dict) -> str:
+    """Human-readable type from a JSON Schema snippet."""
+    if "$ref" in schema:
+        return schema["$ref"].rsplit("/", 1)[-1]
+    t = schema.get("type", "")
+    if isinstance(t, list):
+        return " | ".join(t)
+    if t == "array":
+        items = schema.get("items", {})
+        return f"array[{_oas_type_label(items)}]"
+    fmt = schema.get("format")
+    if fmt:
+        return f"{t} ({fmt})"
+    any_of = schema.get("anyOf", [])
+    if any_of:
+        return " | ".join(_oas_type_label(s) for s in any_of)
+    return t or "object"
+
+
+def _oas_schema_html(schema: dict, spec: dict, depth: int = 0) -> str:
+    """Render a JSON Schema object's properties as an HTML table."""
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        resolved = _oas_resolve_ref(ref, spec)
+        if resolved and depth < 3:
+            return _oas_schema_html(resolved, spec, depth + 1)
+        name = html.escape(ref.rsplit("/", 1)[-1])
+        return f'<span class="oas-ref">{name}</span>'
+
+    props = schema.get("properties", {})
+    if not props:
+        return f'<span class="oas-ptype">{html.escape(_oas_type_label(schema))}</span>'
+
+    required_set = set(schema.get("required", []))
+    rows: list[str] = []
+    for pname, pschema in props.items():
+        pname_esc = html.escape(pname)
+        ptype = html.escape(_oas_type_label(pschema))
+        req_cls = " oas-required" if pname in required_set else ""
+        rows.append(
+            f'<tr><td class="oas-pname{req_cls}">{pname_esc}</td>'
+            f'<td class="oas-ptype">{ptype}</td></tr>'
+        )
+    return (
+        '<table class="oas-props"><tbody>'
+        + "".join(rows)
+        + '</tbody></table>'
+    )
+
+
+def _oas_resolve_ref(ref: str, spec: dict) -> dict | None:
+    """Resolve a $ref like '#/components/schemas/Foo'."""
+    if not ref.startswith("#/"):
+        return None
+    parts = ref[2:].split("/")
+    node: dict = spec
+    for p in parts:
+        if isinstance(node, dict) and p in node:
+            node = node[p]
+        else:
+            return None
+    return node if isinstance(node, dict) else None
 
 
 def _breadcrumbs(path: str) -> list[tuple[str, str]]:
@@ -214,6 +517,37 @@ def _render_markdown(content: str) -> tuple[str, str]:
     ])
     rendered = converter.convert(content)
     return rendered, getattr(converter, "toc", "")
+
+
+_RELATIVE_URL_RE = re.compile(
+    r'(<(?:img|source|video|audio|iframe)\b[^>]*?\b(?:src)='
+    r'["\'])(?!https?://|data:|/|#)'
+    r'|'
+    r'(<a\b[^>]*?\bhref='
+    r'["\'])(?!https?://|mailto:|data:|/|#)',
+    re.IGNORECASE,
+)
+
+
+def _rewrite_relative_urls(html_str: str, base_dir: str) -> str:
+    """Rewrite relative src/href in rendered HTML to /ui/raw/ or /ui/browse/ paths."""
+    from urllib.parse import quote
+    safe_dir = quote(base_dir, safe="/")
+    if not base_dir:
+        raw_prefix = "/ui/raw/"
+        browse_prefix = "/ui/browse/"
+    else:
+        raw_prefix = f"/ui/raw/{html.escape(safe_dir)}/"
+        browse_prefix = f"/ui/browse/{html.escape(safe_dir)}/"
+
+    def _replace(m: re.Match) -> str:
+        tag_img = m.group(1)
+        tag_a = m.group(2)
+        if tag_img:
+            return tag_img + raw_prefix
+        return tag_a + browse_prefix
+
+    return _RELATIVE_URL_RE.sub(_replace, html_str)
 
 
 def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
@@ -517,8 +851,115 @@ h2{font-size:17px;color:#e0e4f0;margin-bottom:12px;font-weight:500}
 border-radius:4px;border-left:3px solid #f38ba8;margin-bottom:12px}
 
 /* mermaid diagrams */
-.markdown-body .mermaid{background:#181825;padding:1.5rem;border-radius:6px;
-margin-bottom:1.5rem;display:flex;justify-content:center}
+.markdown-body .mermaid,.viewer-mermaid .mermaid{background:#181825;
+padding:1.5rem;border-radius:6px;margin-bottom:1.5rem;display:flex;
+justify-content:center;position:relative}
+.mermaid-hint{position:absolute;top:6px;right:10px;font-size:10px;
+color:#585b70;pointer-events:none;z-index:1}
+
+/* rich content viewers */
+.viewer-image{display:flex;justify-content:center;align-items:center;flex:1;
+padding:2rem;min-height:300px}
+.viewer-image img{max-width:100%;max-height:80vh;object-fit:contain;
+border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3)}
+.viewer-image .image-meta{text-align:center;color:#7f849c;font-size:12px;
+margin-top:12px}
+.viewer-html-frame{flex:1;border:1px solid #313244;border-radius:6px;
+overflow:hidden;min-height:400px;background:#fff}
+.viewer-html-frame iframe{width:100%;height:100%;border:none;min-height:600px}
+.viewer-mermaid{display:flex;justify-content:center;align-items:center;flex:1;
+padding:2rem;min-height:300px}
+.viewer-mermaid .mermaid{background:#181825;padding:2rem;border-radius:6px;
+display:flex;justify-content:center;width:100%;overflow-x:auto}
+.viewer-toolbar{display:flex;align-items:center;gap:8px;padding:8px 0;
+margin-bottom:8px;flex-shrink:0}
+.viewer-toolbar .badge{display:inline-flex;align-items:center;gap:4px;
+padding:4px 10px;background:#272738;border:1px solid #313244;border-radius:4px;
+font-size:12px;color:#7f849c}
+.viewer-toolbar .badge .icon{color:#94e2d5}
+.btn-raw{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;
+background:transparent;border:1px solid #313244;border-radius:4px;
+font-size:12px;color:#94e2d5;text-decoration:none;
+transition:background 150ms ease,border-color 150ms ease}
+.btn-raw:hover{background:#2e2e42;border-color:#94e2d5;text-decoration:none}
+
+/* gantt chart */
+.viewer-gantt{flex:1;min-height:400px;position:relative}
+.gantt-scroll-wrap{overflow:hidden;border-radius:6px;border:1px solid #313244}
+.gantt-toolbar{display:flex;align-items:center;gap:12px;padding:8px 0;margin-bottom:8px}
+.gantt-title{font-size:16px;font-weight:600;color:#e0e4f0}
+.gantt-hint{font-size:11px;color:#7f849c;margin-left:auto}
+.gantt-save-btn{padding:5px 14px;background:#94e2d5;color:#1e1e2e;border:none;
+border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;
+transition:background 150ms ease,opacity 150ms ease}
+.gantt-save-btn:hover{background:#a6e3e0}
+.gantt-save-btn:disabled{opacity:0.4;cursor:default}
+.gantt-tooltip{position:absolute;background:#272738;border:1px solid #313244;
+border-radius:6px;padding:10px 14px;font-size:12px;color:#cdd6f4;
+pointer-events:none;z-index:100;max-width:260px;line-height:1.5;
+box-shadow:0 4px 12px rgba(0,0,0,0.4)}
+.gantt-tooltip strong{color:#e0e4f0;font-size:13px}
+.gantt-tip-section{color:#94e2d5;font-size:11px}
+.gantt-tip-dur{color:#7f849c;font-size:11px}
+
+/* openapi schema viewer */
+.viewer-openapi{padding:24px 32px}
+.oas-header{margin-bottom:2rem}
+.oas-header h1{color:#e0e4f0;font-size:26px;margin:0 0 8px}
+.oas-meta{display:flex;gap:8px;margin-bottom:8px}
+.oas-badge{padding:3px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.oas-badge-ver{background:#313244;color:#94e2d5}
+.oas-desc{color:#a6adc8;font-size:14px;margin:0}
+.oas-tag-group{margin-bottom:2rem}
+.oas-tag-title{color:#e0e4f0;font-size:18px;font-weight:600;
+margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid #313244}
+.oas-op{border:1px solid #313244;border-radius:6px;margin-bottom:6px;
+background:#1e1e2e;overflow:hidden}
+.oas-op[open]{background:#181825}
+.oas-op-summary{display:flex;align-items:center;gap:10px;padding:10px 14px;
+cursor:pointer;list-style:none;font-size:13px}
+.oas-op-summary::-webkit-details-marker{display:none}
+.oas-method{padding:4px 10px;border-radius:4px;font-size:11px;
+font-weight:700;font-family:monospace;min-width:56px;text-align:center;
+flex-shrink:0}
+.oas-schema-badge{background:#585b70 !important;color:#cdd6f4 !important}
+.oas-path{color:#cdd6f4;font-family:monospace;font-size:13px}
+.oas-summary{color:#7f849c;font-size:13px;margin-left:auto;text-align:right}
+.oas-op-body{padding:14px 20px;border-top:1px solid #313244}
+.oas-op-desc{color:#a6adc8;font-size:13px;margin:0 0 12px;white-space:pre-wrap}
+.oas-op-id{font-size:11px;color:#585b70;margin-bottom:12px;font-family:monospace}
+.oas-label{color:#7f849c}
+.oas-section{margin-bottom:16px}
+.oas-section-title{color:#94e2d5;font-size:13px;font-weight:600;
+margin:0 0 8px;display:flex;align-items:center;gap:8px}
+.oas-media-type{font-size:11px;color:#7f849c;font-weight:400;font-family:monospace}
+.oas-params{width:100%;border-collapse:collapse;font-size:12px}
+.oas-params th{text-align:left;padding:6px 10px;color:#7f849c;font-weight:500;
+border-bottom:1px solid #313244;font-size:11px;text-transform:uppercase}
+.oas-params td{padding:6px 10px;border-bottom:1px solid #232334;color:#cdd6f4}
+.oas-pname{font-family:monospace;color:#89b4fa}
+.oas-pname.oas-required{color:#f38ba8}
+.oas-pname.oas-required::after{content:" *";color:#f38ba8}
+.oas-ptype{font-family:monospace;color:#94e2d5;font-size:12px}
+.oas-in-badge{padding:2px 6px;border-radius:3px;font-size:10px;
+background:#272738;color:#7f849c;font-family:monospace}
+.oas-response{display:flex;align-items:center;gap:10px;padding:6px 0;
+border-bottom:1px solid #232334}
+.oas-response:last-child{border-bottom:none}
+.oas-resp-code{font-family:monospace;font-weight:700;font-size:12px;
+padding:2px 8px;border-radius:4px;min-width:36px;text-align:center}
+.oas-code-2xx{background:rgba(166,227,161,0.15);color:#a6e3a1}
+.oas-code-4xx{background:rgba(243,139,168,0.15);color:#f38ba8}
+.oas-code-other{background:rgba(127,132,156,0.15);color:#7f849c}
+.oas-resp-desc{color:#a6adc8;font-size:13px}
+.oas-schema-block{background:#11111b;border:1px solid #232334;
+border-radius:4px;padding:10px 14px;overflow-x:auto}
+.oas-props{width:100%;border-collapse:collapse;font-size:12px}
+.oas-props td{padding:4px 10px;border-bottom:1px solid #232334;color:#cdd6f4}
+.oas-ref{font-family:monospace;color:#cba6f7;font-size:12px}
+.oas-schema-def .oas-method{min-width:66px}
+.toc-count{margin-left:auto;font-size:11px;color:#585b70;
+background:#272738;padding:1px 6px;border-radius:8px}
 """
 
 # ---------------------------------------------------------------------------
@@ -678,7 +1119,45 @@ var _unsaved=false;
   });
   _restoreTreeState();
   _trackTreeToggles();
+  var _sb=document.querySelector('.sidebar');
+  if(_sb){
+    var _saved=sessionStorage.getItem('stash_sidebar_scroll');
+    if(_saved)_sb.scrollTop=parseInt(_saved,10);
+    window.addEventListener('beforeunload',function(){
+      sessionStorage.setItem('stash_sidebar_scroll',_sb.scrollTop);
+    });
+  }
 })();
+
+function _initPanZoom(wrap){
+  if(!wrap.firstElementChild)return;
+  var child=wrap.firstElementChild;
+  var scale=1,tx=0,ty=0,panning=false,px=0,py=0,ptx=0,pty=0;
+  child.style.transformOrigin='0 0';
+  function apply(){child.style.transform='translate('+tx+'px,'+ty+'px) scale('+scale+')';}
+  wrap.addEventListener('wheel',function(e){
+    e.preventDefault();
+    var f=e.deltaY>0?0.9:1.1;var ns=Math.min(Math.max(scale*f,0.2),5);
+    var rect=wrap.getBoundingClientRect();
+    var mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    tx=mx-(mx-tx)*(ns/scale); ty=my-(my-ty)*(ns/scale);
+    scale=ns; apply();
+  },{passive:false});
+  wrap.addEventListener('mousedown',function(e){
+    if(e.target.closest('a'))return;
+    panning=true;px=e.clientX;py=e.clientY;ptx=tx;pty=ty;
+    wrap.style.cursor='grabbing';e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!panning)return;
+    tx=ptx+(e.clientX-px);ty=pty+(e.clientY-py);apply();
+  });
+  document.addEventListener('mouseup',function(){
+    if(panning){panning=false;wrap.style.cursor='grab';}
+  });
+  wrap.style.cursor='grab';
+  wrap.style.overflow='hidden';
+}
 
 if(typeof mermaid!=='undefined'){
   mermaid.initialize({
@@ -703,7 +1182,37 @@ if(typeof mermaid!=='undefined'){
     container.textContent=block.textContent;
     pre.parentElement.replaceChild(container,pre);
   });
-  mermaid.run();
+  mermaid.run().then(function(){
+    document.querySelectorAll('.mermaid').forEach(function(el){
+      _initPanZoom(el);
+      var hint=document.createElement('span');
+      hint.className='mermaid-hint';
+      hint.textContent='Scroll to zoom · Drag to pan';
+      el.appendChild(hint);
+    });
+  });
+}
+
+// Gantt code blocks in markdown
+if(typeof StashGantt!=='undefined'){
+  document.querySelectorAll('pre code.language-gantt').forEach(function(block){
+    var yaml=block.textContent;
+    var pre=block.parentElement;
+    var container=document.createElement('div');
+    container.className='viewer-gantt';
+    container.textContent='Loading Gantt chart…';
+    pre.parentElement.replaceChild(container,pre);
+    var data=JSON.parse(container.getAttribute('data-gantt')||'null');
+    if(data){
+      container.textContent='';
+      StashGantt.render(container,data,{readOnly:true});
+    }else{
+      fetch('/ui/parse-gantt',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'yaml='+encodeURIComponent(yaml)})
+      .then(function(r){if(!r.ok)throw new Error('Server error');return r.json();})
+      .then(function(d){container.textContent='';StashGantt.render(container,d,{readOnly:true});})
+      .catch(function(e){container.textContent='Gantt parse error: '+e.message;});
+    }
+  });
 }
 
 if(typeof hljs!=='undefined'){hljs.highlightAll();}
@@ -748,7 +1257,7 @@ def _page(
     right: str = "",
     mode: str = "view",
     path: str = "",
-    read_only: bool = False,
+    hide_edit: bool = False,
 ) -> str:
     """Wrap content in the three-panel layout."""
     right_panel = f'<aside class="right-panel">{right}</aside>' if right else ""
@@ -758,7 +1267,7 @@ def _page(
     if path:
         view_cls = "mode-tab active" if mode == "view" else "mode-tab"
         escaped_path = html.escape(path)
-        edit_tab = "" if read_only else (
+        edit_tab = "" if hide_edit else (
             f'<a class="{"mode-tab active" if mode == "edit" else "mode-tab"}" '
             f'href="/ui/edit/{escaped_path}">'
             f'{_icon("pencil")} Edit</a>'
@@ -792,6 +1301,7 @@ def _page(
 <script src="/static/vendor/highlight.min.js"></script>
 <script src="/static/vendor/languages/terraform.min.js"></script>
 <script src="/static/vendor/mermaid.min.js"></script>
+<script src="/static/vendor/stash-gantt.js"></script>
 </head>
 <body>
 <div class="app">
@@ -948,22 +1458,109 @@ def create_ui_router(
 
         # --- file view ---
         if full.is_file():
-            try:
-                content = filesystem.read_file(path)
-            except Exception as exc:
-                center = (
-                    f'<div class="breadcrumbs">{breadcrumbs}</div>'
-                    f'<div class="error-msg">Error reading file: {html.escape(str(exc))}</div>'
-                )
-                return _page("Error", sidebar, center)
+            suffix = PurePosixPath(path).suffix.lower()
+            is_binary = suffix in _IMAGE_EXTENSIONS
+            content = ""
+            if not is_binary:
+                try:
+                    content = filesystem.read_file(path)
+                except Exception as exc:
+                    center = (
+                        f'<div class="breadcrumbs">{breadcrumbs}</div>'
+                        f'<div class="error-msg">Error reading file: {html.escape(str(exc))}</div>'
+                    )
+                    return _page("Error", sidebar, center)
 
-            escaped_content = html.escape(content)
+            escaped_content = html.escape(content) if content else ""
             toc_html = ""
-            if path.endswith((".md", ".markdown")):
+            escaped_path = html.escape(path)
+
+            if suffix in _IMAGE_EXTENSIONS:
+                raw_url = f"/ui/raw/{escaped_path}"
+                mime = _mime_type(path)
+                center = (
+                    f'<div class="viewer-toolbar">'
+                    f'<span class="badge">{_icon("image")} {html.escape(mime)}</span>'
+                    f'<a href="{raw_url}" target="_blank" class="btn-raw">'
+                    f'{_icon("external-link")} Open original</a></div>'
+                    f'<div class="viewer-image">'
+                    f'<div><img src="{raw_url}" alt="{html.escape(PurePosixPath(path).name)}">'
+                    f'</div></div>'
+                )
+            elif suffix in _SVG_EXTENSIONS:
+                raw_url = f"/ui/raw/{escaped_path}"
+                center = (
+                    f'<div class="viewer-toolbar">'
+                    f'<span class="badge">{_icon("image")} image/svg+xml</span>'
+                    f'<a href="{raw_url}" target="_blank" class="btn-raw">'
+                    f'{_icon("external-link")} Open original</a></div>'
+                    f'<div class="viewer-image">'
+                    f'<div><img src="{raw_url}" alt="{html.escape(PurePosixPath(path).name)}">'
+                    f'</div></div>'
+                )
+            elif suffix in _HTML_EXTENSIONS:
+                b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+                raw_url = f"/ui/raw/{escaped_path}"
+                center = (
+                    f'<div class="viewer-toolbar">'
+                    f'<span class="badge">{_icon("globe")} text/html</span>'
+                    f'<a href="{raw_url}" target="_blank" class="btn-raw">'
+                    f'{_icon("external-link")} Open in new tab</a></div>'
+                    f'<div class="viewer-html-frame">'
+                    f'<iframe src="data:text/html;base64,{b64}" '
+                    f'sandbox="allow-scripts" '
+                    f'title="{html.escape(PurePosixPath(path).name)}"></iframe></div>'
+                )
+            elif suffix in _MERMAID_EXTENSIONS:
+                center = (
+                    f'<div class="viewer-toolbar">'
+                    f'<span class="badge">{_icon("git-branch")} Mermaid diagram</span></div>'
+                    f'<div class="viewer-mermaid">'
+                    f'<div class="mermaid">{escaped_content}</div></div>'
+                )
+            elif suffix in _GANTT_EXTENSIONS:
+                try:
+                    gantt_data = _yaml.safe_load(content)
+                except Exception as exc:
+                    gantt_data = None
+                    center = (
+                        f'<div class="error-msg">Invalid YAML: {html.escape(str(exc))}</div>'
+                        f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
+                    )
+                if gantt_data is not None:
+                    js_data = _json.dumps(gantt_data, default=str)
+                    js_path = _json.dumps(path)
+                    ro_flag = "true" if read_only else "false"
+                    center = (
+                        f'<div class="viewer-gantt" id="gantt-root"></div>'
+                        f'<script>'
+                        f'document.addEventListener("DOMContentLoaded",function(){{'
+                        f'StashGantt.render(document.getElementById("gantt-root"),'
+                        f'{js_data},{{savePath:{js_path},readOnly:{ro_flag}}});'
+                        f'}});</script>'
+                    )
+            elif path.endswith((".md", ".markdown")):
                 rendered, toc_html = _render_markdown(content)
+                base_dir = str(PurePosixPath(path).parent)
+                if base_dir == ".":
+                    base_dir = ""
+                rendered = _rewrite_relative_urls(rendered, base_dir)
                 center = (
                     f'<div class="viewer-content markdown-body">{rendered}</div>'
                 )
+            elif suffix == ".json":
+                oas_rendered = False
+                try:
+                    parsed = _json.loads(content)
+                    if isinstance(parsed, dict) and "openapi" in parsed:
+                        center, toc_html = _render_openapi(parsed)
+                        oas_rendered = True
+                except (ValueError, TypeError):
+                    pass
+                if not oas_rendered:
+                    center = (
+                        f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
+                    )
             else:
                 center = (
                     f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
@@ -979,8 +1576,6 @@ def create_ui_router(
             except Exception:
                 size = "\u2014"
                 mtime = "\u2014"
-            words = len(content.split())
-            chars = len(content)
             _meta_body = (
                 '<div class="meta-field">'
                 '<div class="meta-field-label">File Path</div>'
@@ -998,14 +1593,19 @@ def create_ui_router(
                 '<div class="meta-field-label">Last Modified</div>'
                 f'<div class="meta-field-value">{mtime}</div>'
                 '</div>'
-                '<div class="meta-field">'
-                '<div class="meta-stats-heading">Content Stats</div>'
-                f'<div class="meta-stat-row"><span class="label">Characters:</span>'
-                f'<span class="value">{chars}</span></div>'
-                f'<div class="meta-stat-row"><span class="label">Words:</span>'
-                f'<span class="value">{words}</span></div>'
-                '</div>'
             )
+            if not is_binary:
+                words = len(content.split())
+                chars = len(content)
+                _meta_body += (
+                    '<div class="meta-field">'
+                    '<div class="meta-stats-heading">Content Stats</div>'
+                    f'<div class="meta-stat-row"><span class="label">Characters:</span>'
+                    f'<span class="value">{chars}</span></div>'
+                    f'<div class="meta-stat-row"><span class="label">Words:</span>'
+                    f'<span class="value">{words}</span></div>'
+                    '</div>'
+                )
             _action_stack = "" if read_only else (
                 '<div class="action-stack">'
                 f'<button class="btn-rename" onclick="showRename(this)">'
@@ -1057,9 +1657,10 @@ def create_ui_router(
                     '</div>'
                     f'<div class="right-bottom">{_action_stack}</div>'
                 )
+            hide_edit = read_only or is_binary
             return _page(
                 PurePosixPath(path).name, sidebar, center, right, mode="view", path=path,
-                read_only=read_only,
+                hide_edit=hide_edit,
             )
 
         # path exists but is neither dir nor file
@@ -1102,6 +1703,36 @@ def create_ui_router(
                 }
             )
 
+    # --- parse gantt YAML (for markdown embeds) ---
+    @router.post("/ui/parse-gantt")
+    async def ui_parse_gantt(request: Request, yaml: str = Form(...)):
+        """Parse Gantt YAML and return JSON for the client-side renderer."""
+        from fastapi.responses import JSONResponse
+        try:
+            data = _yaml.safe_load(yaml)
+            return JSONResponse(_json.loads(_json.dumps(data, default=str)))
+        except Exception as exc:
+            logger.warning("Gantt YAML parse error: %s", exc)
+            return JSONResponse({"error": "Invalid Gantt YAML"}, status_code=400)
+
+    # --- raw file serving (images, SVG, HTML) ---
+    @router.get("/ui/raw/{path:path}")
+    async def ui_raw(path: str):
+        """Serve a raw file with its native MIME type."""
+        path = path.strip("/")
+        try:
+            full = filesystem._resolve_path(path)
+        except Exception:
+            return Response(content="Invalid path", status_code=400)
+        if not full.is_file():
+            return Response(content="Not found", status_code=404)
+        mime = _mime_type(path)
+        try:
+            data = full.read_bytes()
+        except Exception as exc:
+            return Response(content=f"Error: {exc}", status_code=500)
+        return Response(content=data, media_type=mime)
+
     # --- edit ---
     @router.get("/ui/edit/{path:path}", response_class=HTMLResponse)
     async def ui_edit(path: str) -> str:
@@ -1109,6 +1740,9 @@ def create_ui_router(
         if read_only:
             return Response(content="This Stash-MCP instance is read-only. Set STASH_READ_ONLY=false to enable editing.", status_code=403)
         path = path.strip("/")
+        suffix = PurePosixPath(path).suffix.lower()
+        if suffix in _IMAGE_EXTENSIONS:
+            return RedirectResponse(url=f"/ui/browse/{path}", status_code=302)
         sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled, read_only=read_only)
         breadcrumbs = _breadcrumbs_html(path)
 
@@ -1205,7 +1839,7 @@ def create_ui_router(
         )
         return _page(
             f"Edit {path}", sidebar, center, right, mode="edit", path=path,
-            read_only=read_only,
+            hide_edit=read_only,
         )
 
     # --- new file ---
