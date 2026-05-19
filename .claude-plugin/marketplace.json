@@ -1,5 +1,6 @@
 {
-  "name": "Stash-MCP Marketplace",
+  "name": "stash-mcp-marketplace",
+  "description": "Plugins for connecting to and working with Stash-MCP content stores",
   "owner": {
     "name": "Dylan Turnbull",
     "email": "dylanturn@gmail.com"
