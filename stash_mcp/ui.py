@@ -573,9 +573,6 @@ border-radius:4px;border-left:3px solid #f38ba8;margin-bottom:12px}
 margin-bottom:1.5rem;display:flex;justify-content:center}
 
 /* rich content viewers */
-.viewer-svg{display:flex;justify-content:center;align-items:center;flex:1;
-padding:2rem;min-height:300px}
-.viewer-svg svg{max-width:100%;height:auto}
 .viewer-image{display:flex;justify-content:center;align-items:center;flex:1;
 padding:2rem;min-height:300px}
 .viewer-image img{max-width:100%;max-height:80vh;object-fit:contain;
@@ -856,7 +853,7 @@ def _page(
     right: str = "",
     mode: str = "view",
     path: str = "",
-    read_only: bool = False,
+    hide_edit: bool = False,
 ) -> str:
     """Wrap content in the three-panel layout."""
     right_panel = f'<aside class="right-panel">{right}</aside>' if right else ""
@@ -866,7 +863,7 @@ def _page(
     if path:
         view_cls = "mode-tab active" if mode == "view" else "mode-tab"
         escaped_path = html.escape(path)
-        edit_tab = "" if read_only else (
+        edit_tab = "" if hide_edit else (
             f'<a class="{"mode-tab active" if mode == "edit" else "mode-tab"}" '
             f'href="/ui/edit/{escaped_path}">'
             f'{_icon("pencil")} Edit</a>'
@@ -1093,7 +1090,9 @@ def create_ui_router(
                     f'<span class="badge">{_icon("image")} image/svg+xml</span>'
                     f'<a href="{raw_url}" target="_blank" class="btn-raw">'
                     f'{_icon("external-link")} Open original</a></div>'
-                    f'<div class="viewer-svg">{content}</div>'
+                    f'<div class="viewer-image">'
+                    f'<div><img src="{raw_url}" alt="{html.escape(PurePosixPath(path).name)}">'
+                    f'</div></div>'
                 )
             elif suffix in _HTML_EXTENSIONS:
                 b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
@@ -1105,7 +1104,7 @@ def create_ui_router(
                     f'{_icon("external-link")} Open in new tab</a></div>'
                     f'<div class="viewer-html-frame">'
                     f'<iframe src="data:text/html;base64,{b64}" '
-                    f'sandbox="allow-scripts allow-same-origin" '
+                    f'sandbox="allow-scripts" '
                     f'title="{html.escape(PurePosixPath(path).name)}"></iframe></div>'
                 )
             elif suffix in _MERMAID_EXTENSIONS:
@@ -1240,7 +1239,7 @@ def create_ui_router(
             hide_edit = read_only or is_binary
             return _page(
                 PurePosixPath(path).name, sidebar, center, right, mode="view", path=path,
-                read_only=hide_edit,
+                hide_edit=hide_edit,
             )
 
         # path exists but is neither dir nor file
@@ -1407,7 +1406,7 @@ def create_ui_router(
         )
         return _page(
             f"Edit {path}", sidebar, center, right, mode="edit", path=path,
-            read_only=read_only,
+            hide_edit=read_only,
         )
 
     # --- new file ---
