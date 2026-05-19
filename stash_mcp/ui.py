@@ -2,11 +2,13 @@
 
 import base64
 import html
+import json as _json
 import logging
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
 import markdown as md
+import yaml as _yaml
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
@@ -18,6 +20,7 @@ _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
 _SVG_EXTENSIONS = frozenset({".svg"})
 _HTML_EXTENSIONS = frozenset({".html", ".htm"})
 _MERMAID_EXTENSIONS = frozenset({".mmd", ".mermaid"})
+_GANTT_EXTENSIONS = frozenset({".gantt"})
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +202,7 @@ def _file_icon(name: str) -> str:
         return _icon("image")
     if suffix in _HTML_EXTENSIONS:
         return _icon("globe")
-    if suffix in _MERMAID_EXTENSIONS:
+    if suffix in _MERMAID_EXTENSIONS or suffix in _GANTT_EXTENSIONS:
         return _icon("git-branch")
     if suffix in {".json"}:
         return _icon("file-json")
@@ -585,7 +588,7 @@ overflow:hidden;min-height:400px;background:#fff}
 .viewer-mermaid{display:flex;justify-content:center;align-items:center;flex:1;
 padding:2rem;min-height:300px}
 .viewer-mermaid .mermaid{background:#181825;padding:2rem;border-radius:6px;
-display:flex;justify-content:center;width:100%}
+display:flex;justify-content:center;width:100%;overflow-x:auto}
 .viewer-toolbar{display:flex;align-items:center;gap:8px;padding:8px 0;
 margin-bottom:8px;flex-shrink:0}
 .viewer-toolbar .badge{display:inline-flex;align-items:center;gap:4px;
@@ -597,6 +600,25 @@ background:transparent;border:1px solid #313244;border-radius:4px;
 font-size:12px;color:#94e2d5;text-decoration:none;
 transition:background 150ms ease,border-color 150ms ease}
 .btn-raw:hover{background:#2e2e42;border-color:#94e2d5;text-decoration:none}
+
+/* gantt chart */
+.viewer-gantt{flex:1;min-height:400px;position:relative}
+.gantt-scroll-wrap{overflow:hidden;border-radius:6px;border:1px solid #313244}
+.gantt-toolbar{display:flex;align-items:center;gap:12px;padding:8px 0;margin-bottom:8px}
+.gantt-title{font-size:16px;font-weight:600;color:#e0e4f0}
+.gantt-hint{font-size:11px;color:#7f849c;margin-left:auto}
+.gantt-save-btn{padding:5px 14px;background:#94e2d5;color:#1e1e2e;border:none;
+border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;
+transition:background 150ms ease,opacity 150ms ease}
+.gantt-save-btn:hover{background:#a6e3e0}
+.gantt-save-btn:disabled{opacity:0.4;cursor:default}
+.gantt-tooltip{position:absolute;background:#272738;border:1px solid #313244;
+border-radius:6px;padding:10px 14px;font-size:12px;color:#cdd6f4;
+pointer-events:none;z-index:100;max-width:260px;line-height:1.5;
+box-shadow:0 4px 12px rgba(0,0,0,0.4)}
+.gantt-tooltip strong{color:#e0e4f0;font-size:13px}
+.gantt-tip-section{color:#94e2d5;font-size:11px}
+.gantt-tip-dur{color:#7f849c;font-size:11px}
 """
 
 # ---------------------------------------------------------------------------
@@ -878,6 +900,7 @@ def _page(
 <script src="/static/vendor/highlight.min.js"></script>
 <script src="/static/vendor/languages/terraform.min.js"></script>
 <script src="/static/vendor/mermaid.min.js"></script>
+<script src="/static/vendor/stash-gantt.js"></script>
 </head>
 <body>
 <div class="app">
@@ -1092,6 +1115,27 @@ def create_ui_router(
                     f'<div class="viewer-mermaid">'
                     f'<div class="mermaid">{escaped_content}</div></div>'
                 )
+            elif suffix in _GANTT_EXTENSIONS:
+                try:
+                    gantt_data = _yaml.safe_load(content)
+                except Exception as exc:
+                    gantt_data = None
+                    center = (
+                        f'<div class="error-msg">Invalid YAML: {html.escape(str(exc))}</div>'
+                        f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
+                    )
+                if gantt_data is not None:
+                    js_data = _json.dumps(gantt_data, default=str)
+                    js_path = _json.dumps(path)
+                    ro_flag = "true" if read_only else "false"
+                    center = (
+                        f'<div class="viewer-gantt" id="gantt-root"></div>'
+                        f'<script>'
+                        f'document.addEventListener("DOMContentLoaded",function(){{'
+                        f'StashGantt.render(document.getElementById("gantt-root"),'
+                        f'{js_data},{{savePath:{js_path},readOnly:{ro_flag}}});'
+                        f'}});</script>'
+                    )
             elif path.endswith((".md", ".markdown")):
                 rendered, toc_html = _render_markdown(content)
                 center = (

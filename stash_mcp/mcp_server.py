@@ -81,6 +81,7 @@ MIME_TYPES: dict[str, str] = {
     ".bmp": "image/bmp",
     ".mmd": "text/x-mermaid",
     ".mermaid": "text/x-mermaid",
+    ".gantt": "text/x-gantt",
 }
 
 # Only files matching this name are exposed as MCP resources.
