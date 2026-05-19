@@ -4,6 +4,7 @@ import base64
 import html
 import json as _json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
@@ -515,6 +516,35 @@ def _render_markdown(content: str) -> tuple[str, str]:
     ])
     rendered = converter.convert(content)
     return rendered, getattr(converter, "toc", "")
+
+
+_RELATIVE_URL_RE = re.compile(
+    r'(<(?:img|source|video|audio|iframe)\b[^>]*?\b(?:src)='
+    r'["\'])(?!https?://|data:|/|#)'
+    r'|'
+    r'(<a\b[^>]*?\bhref='
+    r'["\'])(?!https?://|mailto:|data:|/|#)',
+    re.IGNORECASE,
+)
+
+
+def _rewrite_relative_urls(html_str: str, base_dir: str) -> str:
+    """Rewrite relative src/href in rendered HTML to /ui/raw/ or /ui/browse/ paths."""
+    if not base_dir:
+        raw_prefix = "/ui/raw/"
+        browse_prefix = "/ui/browse/"
+    else:
+        raw_prefix = f"/ui/raw/{base_dir}/"
+        browse_prefix = f"/ui/browse/{base_dir}/"
+
+    def _replace(m: re.Match) -> str:
+        tag_img = m.group(1)
+        tag_a = m.group(2)
+        if tag_img:
+            return tag_img + raw_prefix
+        return tag_a + browse_prefix
+
+    return _RELATIVE_URL_RE.sub(_replace, html_str)
 
 
 def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
@@ -1508,6 +1538,10 @@ def create_ui_router(
                     )
             elif path.endswith((".md", ".markdown")):
                 rendered, toc_html = _render_markdown(content)
+                base_dir = str(PurePosixPath(path).parent)
+                if base_dir == ".":
+                    base_dir = ""
+                rendered = _rewrite_relative_urls(rendered, base_dir)
                 center = (
                     f'<div class="viewer-content markdown-body">{rendered}</div>'
                 )
