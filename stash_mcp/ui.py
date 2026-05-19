@@ -569,8 +569,11 @@ h2{font-size:17px;color:#e0e4f0;margin-bottom:12px;font-weight:500}
 border-radius:4px;border-left:3px solid #f38ba8;margin-bottom:12px}
 
 /* mermaid diagrams */
-.markdown-body .mermaid{background:#181825;padding:1.5rem;border-radius:6px;
-margin-bottom:1.5rem;display:flex;justify-content:center}
+.markdown-body .mermaid,.viewer-mermaid .mermaid{background:#181825;
+padding:1.5rem;border-radius:6px;margin-bottom:1.5rem;display:flex;
+justify-content:center;position:relative}
+.mermaid-hint{position:absolute;top:6px;right:10px;font-size:10px;
+color:#585b70;pointer-events:none;z-index:1}
 
 /* rich content viewers */
 .viewer-svg{display:flex;justify-content:center;align-items:center;flex:1;
@@ -788,6 +791,34 @@ var _unsaved=false;
   }
 })();
 
+function _initPanZoom(wrap){
+  var scale=1,tx=0,ty=0,panning=false,px=0,py=0,ptx=0,pty=0;
+  function apply(){wrap.firstElementChild.style.transform='translate('+tx+'px,'+ty+'px) scale('+scale+')';}
+  wrap.addEventListener('wheel',function(e){
+    e.preventDefault();
+    var f=e.deltaY>0?0.9:1.1;var ns=Math.min(Math.max(scale*f,0.2),5);
+    var rect=wrap.getBoundingClientRect();
+    var mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    tx=mx-(mx-tx)*(ns/scale); ty=my-(my-ty)*(ns/scale);
+    scale=ns; apply();
+  },{passive:false});
+  wrap.addEventListener('mousedown',function(e){
+    if(e.target.closest('a'))return;
+    panning=true;px=e.clientX;py=e.clientY;ptx=tx;pty=ty;
+    wrap.style.cursor='grabbing';e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!panning)return;
+    tx=ptx+(e.clientX-px);ty=pty+(e.clientY-py);apply();
+  });
+  document.addEventListener('mouseup',function(){
+    if(panning){panning=false;wrap.style.cursor='grab';}
+  });
+  wrap.style.cursor='grab';
+  wrap.style.overflow='hidden';
+  if(wrap.firstElementChild)wrap.firstElementChild.style.transformOrigin='0 0';
+}
+
 if(typeof mermaid!=='undefined'){
   mermaid.initialize({
     startOnLoad:false,
@@ -811,7 +842,38 @@ if(typeof mermaid!=='undefined'){
     container.textContent=block.textContent;
     pre.parentElement.replaceChild(container,pre);
   });
-  mermaid.run();
+  mermaid.run().then(function(){
+    document.querySelectorAll('.mermaid').forEach(function(el){
+      _initPanZoom(el);
+      var hint=document.createElement('span');
+      hint.className='mermaid-hint';
+      hint.textContent='Scroll to zoom · Drag to pan';
+      el.appendChild(hint);
+    });
+  });
+}
+
+// Gantt code blocks in markdown
+if(typeof StashGantt!=='undefined'){
+  document.querySelectorAll('pre code.language-gantt').forEach(function(block){
+    var yaml=block.textContent;
+    var pre=block.parentElement;
+    var container=document.createElement('div');
+    container.className='viewer-gantt';
+    pre.parentElement.replaceChild(container,pre);
+    try{
+      var data=JSON.parse(container.getAttribute('data-gantt')||'null');
+      if(!data){
+        // Post YAML to a parse endpoint; fall back to displaying raw
+        var x=new XMLHttpRequest();
+        x.open('POST','/ui/parse-gantt',false);
+        x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+        x.send('yaml='+encodeURIComponent(yaml));
+        if(x.status===200) data=JSON.parse(x.responseText);
+      }
+      if(data) StashGantt.render(container,data,{readOnly:true});
+    }catch(e){container.textContent='Gantt parse error: '+e.message;}
+  });
 }
 
 if(typeof hljs!=='undefined'){hljs.highlightAll();}
@@ -1282,6 +1344,17 @@ def create_ui_router(
                     "indexing": search_engine.indexing,
                 }
             )
+
+    # --- parse gantt YAML (for markdown embeds) ---
+    @router.post("/ui/parse-gantt")
+    async def ui_parse_gantt(request: Request, yaml: str = Form(...)):
+        """Parse Gantt YAML and return JSON for the client-side renderer."""
+        from fastapi.responses import JSONResponse
+        try:
+            data = _yaml.safe_load(yaml)
+            return JSONResponse(_json.loads(_json.dumps(data, default=str)))
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     # --- raw file serving (images, SVG, HTML) ---
     @router.get("/ui/raw/{path:path}")
