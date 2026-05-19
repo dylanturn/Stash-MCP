@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 
-export type BinaryKind = 'image' | 'pdf' | 'html';
+export type BinaryKind = 'image' | 'pdf' | 'html' | 'svg';
 
 const IMAGE_EXTS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp', 'avif',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'avif',
 ]);
 
 /** Map extension → MIME type for the file kinds the binary viewer
@@ -31,14 +31,18 @@ export function mimeTypeForBinary(extension: string | undefined): string | undef
   return BINARY_MIME_BY_EXT[extension.toLowerCase()];
 }
 
-/** Classify a file as image / pdf / html / null based on extension.
+/** Classify a file as image / pdf / html / svg / null based on extension.
  *
- * SVG renders inline as an image rather than via an HTML iframe so the
- * file's `<script>` tags (if any) don't execute against the same origin
- * as the rest of the app. */
+ * SVG is split out from raster images because it round-trips through
+ * the JSON content endpoint as text — that lets the viewer render the
+ * in-memory document (so unsaved edits preview live) and lets the
+ * caller swap into an edit textarea. The rendered preview still goes
+ * through an `<img>` element with a blob URL so any embedded
+ * `<script>` tags stay inert. */
 export function classifyBinary(extension: string | undefined): BinaryKind | null {
   if (!extension) return null;
   const ext = extension.toLowerCase();
+  if (ext === 'svg') return 'svg';
   if (IMAGE_EXTS.has(ext)) return 'image';
   if (ext === 'pdf') return 'pdf';
   if (ext === 'html' || ext === 'htm') return 'html';
@@ -57,6 +61,10 @@ interface BinaryFileViewerProps {
    * sandboxed iframe so it can't reach the parent origin's cookies or
    * APIs. */
   htmlContent?: string;
+  /** Inline SVG text (for `kind === 'svg'`). Rendered via a blob URL
+   * in an `<img>` element so unsaved edits preview live without
+   * letting the SVG's `<script>` tags run against the parent origin. */
+  svgContent?: string;
   fileName: string;
 }
 
@@ -66,7 +74,10 @@ interface BinaryFileViewerProps {
  * iframe with a strict ``sandbox`` so the artifact runs in a null
  * origin — blob URLs replace the legacy ``srcDoc`` approach to avoid
  * its length cap and per-keystroke re-render. */
-export function BinaryFileViewer({ kind, rawUrl, htmlContent, fileName }: BinaryFileViewerProps) {
+export function BinaryFileViewer({ kind, rawUrl, htmlContent, svgContent, fileName }: BinaryFileViewerProps) {
+  if (kind === 'svg') {
+    return <SvgPreview content={svgContent ?? ''} rawUrl={rawUrl} fileName={fileName} />;
+  }
   if (kind === 'image') {
     if (!rawUrl) return <UnavailableState reason="image" />;
     return (
@@ -134,6 +145,53 @@ function UnavailableState({ reason }: { reason: 'image' | 'pdf' }) {
           The API client cannot construct a raw URL for this file.
         </div>
       </div>
+    </div>
+  );
+}
+
+function SvgPreview({
+  content,
+  rawUrl,
+  fileName,
+}: {
+  content: string;
+  rawUrl?: string;
+  fileName: string;
+}) {
+  // Prefer rendering from the in-memory document so unsaved edits
+  // preview live. Fall back to the raw URL only when the editor
+  // hasn't yet provided content (e.g. file is still loading).
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    if (!content) {
+      setSrc(null);
+      return;
+    }
+    const blob = new Blob([content], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [content]);
+
+  const imgSrc = src ?? rawUrl;
+  if (!imgSrc) return <UnavailableState reason="image" />;
+
+  return (
+    <div
+      className="h-full w-full flex items-center justify-center overflow-auto p-8"
+      style={{ backgroundColor: 'var(--stash-bg-base)' }}
+    >
+      <img
+        src={imgSrc}
+        alt={fileName}
+        style={{
+          maxWidth: '100%',
+          maxHeight: '100%',
+          objectFit: 'contain',
+          boxShadow: '0 4px 24px rgba(0, 0, 0, 0.4)',
+          backgroundColor: 'var(--stash-bg-surface)',
+        }}
+      />
     </div>
   );
 }

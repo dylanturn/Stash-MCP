@@ -334,13 +334,12 @@ export function DocumentViewer({
   const isComponentContract = isComponentContractSpec();
   const isArazzo = isArazzoSpec();
   const binaryKind = classifyBinary(file.extension);
+  const isMermaidFile =
+    file.extension === 'mmd' || file.extension === 'mermaid';
 
-  // Images and PDFs can't round-trip through the JSON content endpoint,
-  // so view mode renders them directly from the raw bytes URL. HTML
-  // artifacts render in a sandboxed iframe but keep their text content
-  // editable.
-  const isEditable = binaryKind === 'html';
-  if (binaryKind !== null && (mode === 'view' || !isEditable)) {
+  // Standalone Mermaid documents render as a diagram in view mode and
+  // fall back to the text editor when the user switches to edit.
+  if (isMermaidFile && mode === 'view') {
     return (
       <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--stash-bg-base)' }}>
         <div className="flex items-center border-b" style={{ borderColor: 'var(--stash-border)' }}>
@@ -353,11 +352,59 @@ export function DocumentViewer({
             }}
           >
             <Eye className="w-4 h-4" />
-            <span className="text-sm">
-              {binaryKind === 'image' ? 'Image'
-                : binaryKind === 'pdf' ? 'PDF'
-                : 'HTML Preview'}
-            </span>
+            <span className="text-sm">Diagram</span>
+          </button>
+          <button
+            onClick={() => setMode('edit')}
+            className="flex items-center gap-2 px-6 py-3 transition-all duration-150 relative"
+            style={{
+              color: 'var(--stash-text-secondary)',
+              borderBottom: '2px solid transparent',
+            }}
+          >
+            <Edit className="w-4 h-4" />
+            <span className="text-sm">Edit</span>
+            {hasChanges && (
+              <div
+                className="w-2 h-2 rounded-full"
+                style={{ backgroundColor: 'var(--stash-accent)' }}
+              />
+            )}
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-[900px] mx-auto px-8 py-8">
+            <MermaidDiagram chart={file.content || ''} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Images and PDFs can't round-trip through the JSON content endpoint,
+  // so view mode renders them directly from the raw bytes URL. HTML
+  // and SVG artifacts are text — they render in a preview pane but
+  // keep their source editable in a textarea.
+  const isEditable = binaryKind === 'html' || binaryKind === 'svg';
+  if (binaryKind !== null && (mode === 'view' || !isEditable)) {
+    const previewLabel =
+      binaryKind === 'image' ? 'Image'
+        : binaryKind === 'pdf' ? 'PDF'
+        : binaryKind === 'svg' ? 'SVG Preview'
+        : 'HTML Preview';
+    return (
+      <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--stash-bg-base)' }}>
+        <div className="flex items-center border-b" style={{ borderColor: 'var(--stash-border)' }}>
+          <button
+            onClick={() => setMode('view')}
+            className="flex items-center gap-2 px-6 py-3 transition-all duration-150 relative"
+            style={{
+              color: 'var(--stash-text-bright)',
+              borderBottom: '2px solid var(--stash-accent)',
+            }}
+          >
+            <Eye className="w-4 h-4" />
+            <span className="text-sm">{previewLabel}</span>
           </button>
           {isEditable && (
             <button
@@ -384,6 +431,7 @@ export function DocumentViewer({
             kind={binaryKind}
             rawUrl={rawUrl ? rawUrl(file.path) : undefined}
             htmlContent={file.content || ''}
+            svgContent={file.content || ''}
             fileName={file.name}
           />
         </div>
