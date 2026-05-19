@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "stash-mcp",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "stash_mcp.main"],
+      "port": 8765,
+      "env": {
+        "STASH_CONTENT_DIR": "./content",
+        "STASH_PORT": "8765"
+      }
+    }
+  ]
+}
