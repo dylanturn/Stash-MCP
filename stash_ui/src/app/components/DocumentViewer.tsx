@@ -333,6 +333,8 @@ export function DocumentViewer({
   const isDesignTokens = isDesignTokensSpec();
   const isComponentContract = isComponentContractSpec();
   const isArazzo = isArazzoSpec();
+  const isMermaidFile =
+    file.extension === 'mmd' || file.extension === 'mermaid';
   const binaryKind = classifyBinary(file.extension);
 
   // Images and PDFs can't round-trip through the JSON content endpoint,
@@ -562,6 +564,50 @@ export function DocumentViewer({
 
         <div className="flex-1 overflow-hidden">
           <ArazzoViewer content={file.content || ''} onSectionsChange={handleArazzoSectionsChange} />
+        </div>
+      </div>
+    );
+  }
+
+  // Standalone mermaid files (.mmd / .mermaid) render as a diagram in
+  // view mode. Edit mode falls through to the normal text editor below
+  // so the source stays editable.
+  if (isMermaidFile && mode === 'view') {
+    return (
+      <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--stash-bg-base)' }}>
+        <div className="flex items-center border-b" style={{ borderColor: 'var(--stash-border)' }}>
+          <button
+            onClick={() => setMode('view')}
+            className="flex items-center gap-2 px-6 py-3 transition-all duration-150 relative"
+            style={{
+              color: 'var(--stash-text-bright)',
+              borderBottom: '2px solid var(--stash-accent)',
+            }}
+          >
+            <Eye className="w-4 h-4" />
+            <span className="text-sm">Diagram</span>
+          </button>
+          <button
+            onClick={() => setMode('edit')}
+            className="flex items-center gap-2 px-6 py-3 transition-all duration-150 relative"
+            style={{
+              color: 'var(--stash-text-secondary)',
+              borderBottom: '2px solid transparent',
+            }}
+          >
+            <Edit className="w-4 h-4" />
+            <span className="text-sm">Edit</span>
+            {hasChanges && (
+              <div
+                className="w-2 h-2 rounded-full"
+                style={{ backgroundColor: 'var(--stash-accent)' }}
+              />
+            )}
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto p-6">
+          <MermaidDiagram chart={file.content || ''} />
         </div>
       </div>
     );
@@ -851,6 +897,32 @@ export function DocumentViewer({
                         style={{ marginBottom: '1.5rem' }}
                       />
                     ),
+                    img: ({ src, alt, title }: any) => {
+                      // Resolve embedded image references against the
+                      // current file so ``![](./diagram.png)`` works.
+                      // External URLs and data URIs pass through
+                      // unchanged.
+                      let resolved = src || '';
+                      if (resolved && !isExternalLink(resolved) && !resolved.startsWith('data:')) {
+                        const internal = resolveInternalPath(resolved, file.path);
+                        if (internal && rawUrl) {
+                          resolved = rawUrl(internal);
+                        }
+                      }
+                      return (
+                        <img
+                          src={resolved}
+                          alt={alt || ''}
+                          title={title}
+                          style={{
+                            maxWidth: '100%',
+                            height: 'auto',
+                            borderRadius: '4px',
+                            margin: '1rem 0',
+                          }}
+                        />
+                      );
+                    },
                   }}
                 >
                   {file.content || ''}

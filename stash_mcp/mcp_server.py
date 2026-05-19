@@ -71,6 +71,8 @@ MIME_TYPES: dict[str, str] = {
     ".cfg": "text/plain",
     ".rst": "text/x-rst",
     ".log": "text/plain",
+    ".mmd": "text/vnd.mermaid",
+    ".mermaid": "text/vnd.mermaid",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
