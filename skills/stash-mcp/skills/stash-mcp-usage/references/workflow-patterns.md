@@ -54,7 +54,9 @@ edit_content(path, sha, edits=[
 
 ## Pattern: Transactional Write
 
-**When:** Every write, whenever git tracking is enabled — single edits, multi-file reorganizations, template-based creation, anything that calls `create_content` / `edit_content` / `delete_content` / `move_content`. Write tools without an active transaction will fail with `TransactionError: No active transaction`.
+**When:** Every write, whenever git tracking is enabled — single edits, multi-file reorganizations, template-based creation, or any call to a mutating tool. The gated set is `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. Any of these without an active transaction fails with:
+
+> `TransactionError: No active transaction. Call start_content_transaction first.`
 
 ```
 list_content_transactions()
@@ -65,7 +67,7 @@ list_content_transactions()
 start_content_transaction()
   → acquire the global write lock
 
-[... one or more create/edit/delete/move operations ...]
+[... one or more write operations (create/overwrite/edit/delete/move, including batch variants) ...]
 
 commit_content_transaction(message="descriptive message about what changed and why")
   → atomic commit of all changes

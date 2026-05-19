@@ -102,7 +102,11 @@ Rename or relocate files and directories.
 
 ## Transactions
 
-When git tracking is enabled and the server is not in read-only mode, **every write tool requires an active transaction owned by the calling session**. This applies to single-file edits as well as multi-file changes — calling `create_content`, `edit_content`, `delete_content`, or `move_content` (and their batch variants) without one raises `TransactionError: No active transaction`. Transactions provide a global write lock and atomic commit semantics.
+When git tracking is enabled and the server is not in read-only mode, **every write tool requires an active transaction owned by the calling session**. The gated set is `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. This applies equally to single-file edits and multi-file changes — any of these without an active transaction raises:
+
+> `TransactionError: No active transaction. Call start_content_transaction first.`
+
+Transactions provide a global write lock and atomic commit semantics.
 
 When git tracking is **off**, writes go directly to disk and these transaction tools are not registered.
 

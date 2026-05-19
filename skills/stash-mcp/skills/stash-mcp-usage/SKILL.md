@@ -66,12 +66,16 @@ Use `overwrite_content` only when regenerating an entire file from scratch.
 
 ### 3. Transactions Wrap Every Write (when git tracking is on)
 
-When the server has git tracking enabled, every write tool — even a single `create_content` or `edit_content` — requires an active transaction owned by your session. Calling a write tool without one raises `TransactionError: No active transaction`. The choreography is the same whether you're touching one file or twenty:
+When the server has git tracking enabled, every write tool requires an active transaction owned by your session — `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory` are all gated. Calling any of them without an active transaction raises:
+
+> `TransactionError: No active transaction. Call start_content_transaction first.`
+
+The choreography is the same whether you're touching one file or twenty:
 
 ```
 list_content_transactions()    → check for orphans first
 start_content_transaction()    → acquire the global lock
-[... one or more create, edit, delete, move operations ...]
+[... one or more write operations (create/overwrite/edit/delete/move, including batch variants) ...]
 commit_content_transaction(message="descriptive commit message")
 ```
 
@@ -100,7 +104,7 @@ See `references/search-strategy.md` for detailed guidance.
 
 - **Reading entire files when you only need structure** — use `inspect_content_structure`
 - **Overwriting when you can edit** — `edit_content` is almost always safer
-- **Calling write tools without an active transaction** (when git tracking is on) — every write requires one, even single-file edits; you'll get `TransactionError: No active transaction`
+- **Calling write tools without an active transaction** (when git tracking is on) — every write requires one, even single-file edits; you'll get `TransactionError: No active transaction. Call start_content_transaction first.`
 - **Ignoring SHA mismatches** — they mean the file changed; re-read before retrying
 - **Searching with single keywords** — semantic search needs natural language
 - **Assuming tool availability** — check the tool list before planning workflows that depend on git history or search
