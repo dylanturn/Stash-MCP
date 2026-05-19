@@ -23,7 +23,7 @@ Think of Stash-MCP as a filesystem with guardrails:
 
 - **Files on disk** — markdown, code, any text format
 - **SHA-256 concurrency** — every read returns a hash; every write requires it. If the hash doesn't match, someone changed the file since you read it. Re-read, reassess, retry.
-- **Transactions** — optional global write lock for atomic multi-file changes. One transaction at a time across all sessions.
+- **Transactions** — when git tracking is enabled, *every* write requires an active transaction. The lock is global; one transaction at a time across all sessions.
 - **Semantic search** — natural language queries against embedded content chunks. Not keyword search.
 
 ## Tool Categories at a Glance
@@ -64,18 +64,20 @@ read_content(path)                  → read only what you actually need
 
 Use `overwrite_content` only when regenerating an entire file from scratch.
 
-### 3. Transactions for Multi-File Changes
+### 3. Transactions Wrap Every Write (when git tracking is on)
 
-Any operation touching more than one file should use a transaction:
+When the server has git tracking enabled, every write tool — even a single `create_content` or `edit_content` — requires an active transaction owned by your session. Calling a write tool without one raises `TransactionError: No active transaction`. The choreography is the same whether you're touching one file or twenty:
 
 ```
 list_content_transactions()    → check for orphans first
 start_content_transaction()    → acquire the global lock
-[... create, edit, delete, move operations ...]
+[... one or more create, edit, delete, move operations ...]
 commit_content_transaction(message="descriptive commit message")
 ```
 
-If something goes wrong mid-transaction, call `abort_content_transaction()` to roll back all changes. Without transactions, a failure mid-way leaves the store in an inconsistent state.
+Multi-file changes are simply the case where the transaction spans more than one operation — same mechanism, same atomicity guarantee. If something goes wrong mid-transaction, call `abort_content_transaction()` to roll back all staged changes.
+
+When git tracking is **off**, writes go straight to disk and the transaction tools aren't registered. Check the tool list to know which mode you're in.
 
 ### 4. SHA Means "I've Seen This Version"
 
@@ -98,7 +100,7 @@ See `references/search-strategy.md` for detailed guidance.
 
 - **Reading entire files when you only need structure** — use `inspect_content_structure`
 - **Overwriting when you can edit** — `edit_content` is almost always safer
-- **Skipping transactions for multi-file changes** — partial failures corrupt state
+- **Calling write tools without an active transaction** (when git tracking is on) — every write requires one, even single-file edits; you'll get `TransactionError: No active transaction`
 - **Ignoring SHA mismatches** — they mean the file changed; re-read before retrying
 - **Searching with single keywords** — semantic search needs natural language
 - **Assuming tool availability** — check the tool list before planning workflows that depend on git history or search
