@@ -1,0 +1,18 @@
+{
+  "name": "Stash-MCP Marketplace",
+  "owner": {
+    "name": "Dylan Turnbull",
+    "email": "dylanturn@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "stash-mcp",
+      "source": "./plugins/stash-mcp",
+      "description": "Connect to a Stash-MCP content store with smart workflows, transaction safety, and auto-bootstrapped usage patterns",
+      "version": "0.1.3",
+      "author": {
+        "name": "Dylan Turnbull"
+      }
+    }
+  ]
+}

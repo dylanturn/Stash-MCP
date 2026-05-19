@@ -66,6 +66,7 @@ MIME_TYPES: dict[str, str] = {
     ".ts": "application/typescript",
     ".py": "text/x-python",
     ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
     ".toml": "application/toml",
     ".ini": "text/plain",
     ".cfg": "text/plain",

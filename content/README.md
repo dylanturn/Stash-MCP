@@ -20,6 +20,7 @@ Examples:
 You have 5 tools for managing content:
 
 **`create_content`** — Create a new file.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | yes | File path relative to content root |
@@ -28,6 +29,7 @@ You have 5 tools for managing content:
 Creates parent directories automatically. Errors if the file already exists — use `update_content` to modify existing files.
 
 **`update_content`** — Update an existing file (or create one).
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | yes | File path relative to content root |
@@ -36,6 +38,7 @@ Creates parent directories automatically. Errors if the file already exists — 
 This is a full replacement, not a patch. Always write the complete file content.
 
 **`delete_content`** — Delete a file.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | yes | File path to delete |
@@ -43,6 +46,7 @@ This is a full replacement, not a patch. Always write the complete file content.
 Errors if the file doesn't exist.
 
 **`move_content`** — Move or rename a file.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `source_path` | string | yes | Current file path |
@@ -51,6 +55,7 @@ Errors if the file doesn't exist.
 Creates parent directories at the destination automatically. Errors if the destination already exists.
 
 **`list_content`** — List files and directories.
+
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `path` | string | no | `""` (root) | Directory to list |
