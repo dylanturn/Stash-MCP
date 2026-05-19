@@ -387,6 +387,7 @@ export function DocumentViewer({
             rawUrl={rawUrl ? rawUrl(file.path) : undefined}
             htmlContent={file.content || ''}
             fileName={file.name}
+            extension={file.extension}
           />
         </div>
       </div>
