@@ -8,7 +8,7 @@ description: >
   edit_content, search_content, list_content, move_content, etc.).
   Teaches efficient navigation, surgical editing, transaction safety,
   and semantic search strategy.
-version: 0.1.0
+version: 0.1.1
 ---
 
 # Stash-MCP Usage Guide
@@ -25,6 +25,39 @@ Think of Stash-MCP as a filesystem with guardrails:
 - **SHA-256 concurrency** — every read returns a hash; every write requires it. If the hash doesn't match, someone changed the file since you read it. Re-read, reassess, retry.
 - **Transactions** — when git tracking is enabled, *every* write requires an active transaction. The lock is global; one transaction at a time across all sessions.
 - **Semantic search** — natural language queries against embedded content chunks. Not keyword search.
+
+## Content Types
+
+Stash stores files as-is on disk. Anything text-based round-trips losslessly through the tools; binary types (images, etc.) are stored and served as assets but should not be opened with `read_content` — you'll get raw bytes.
+
+### Document types
+
+| Class | Extensions | Notes |
+|-------|------------|-------|
+| **Markdown** (primary) | `.md`, `.markdown` | First-class. Heading hierarchy parsed by `inspect_content_structure`. Only `README.md` surfaces as an MCP resource — everything else is tool-only. |
+| **Diagrams** | `.mmd`, `.mermaid`, `.gantt` | Rendered as diagrams in the UI viewer. Plain text under the hood — edit like any text file. `.gantt` is YAML-based. |
+| **API specs** | `.json` with an `openapi` root key | Rendered as an OpenAPI viewer in the UI. Stored as plain JSON. |
+| **Tabular** | `.csv`, `.tsv` | Rendered as HTML tables in the UI. |
+| **Web** | `.html`, `.htm` | Rendered in a sandboxed iframe. |
+| **Structured text** | `.json`, `.yaml`, `.yml`, `.toml`, `.xml`, `.ini`, `.cfg` | Stored as text, no special rendering. |
+| **Code** | `.py`, `.js`, `.ts`, `.css`, `.rst`, `.txt`, `.log`, plus any other text extension | Stored as text. Searchable. |
+| **Image assets** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.bmp` | Served via `/ui/raw/<path>` for embedding. Do **not** `read_content` these — store and link instead. |
+
+There is no extension allowlist for storage. Files with unknown extensions are accepted and served as `text/plain`.
+
+### Embedding in markdown
+
+Markdown is the host format — several other types can be embedded inline so a single document renders as a richer view:
+
+- **Images** — standard markdown syntax: `![alt text](relative/path.png)`. Relative paths are rewritten to `/ui/raw/` URLs at render time, so the image just needs to live in the content store. Absolute URLs and `data:` URIs also pass through.
+- **Mermaid diagrams** — fenced code block tagged ` ```mermaid ` renders inline. Use this for one-off diagrams; reserve standalone `.mmd` files for diagrams you want to reuse or link to.
+- **Gantt charts** — fenced code block tagged ` ```gantt ` (YAML body) renders inline. Standalone `.gantt` files work the same way. **The YAML schema is Stash-specific** (not Mermaid gantt syntax) — see `references/gantt-format.md` before authoring.
+- **CSV / TSV tables** — fenced code block tagged ` ```csv ` or ` ```tsv ` renders as an HTML table inline. Good for small, document-scoped tables; use standalone `.csv` files when the data is the artifact.
+- **Raw HTML** — passes through the markdown renderer by design. `<details>`, `<img>`, `<video>`, `<iframe>`, `<div>` all work. Use sparingly; markdown syntax is preferable when it covers the case.
+
+**Cannot be embedded inline:** PDFs, Office documents (`.docx`, `.xlsx`, `.pptx`), Jupyter notebooks (`.ipynb`), and other binary formats. Link to them as assets if needed, but Stash has no native renderer for these — `read_content` will return unreadable bytes.
+
+**Rule of thumb:** if the asset is referenced from one document, embed it as a fenced block. If multiple documents reference it, store it as a standalone file and link.
 
 ## Tool Categories at a Glance
 
@@ -117,3 +150,4 @@ For in-depth coverage beyond this overview:
 - **`references/tool-reference.md`** — behavioral guide for every tool, organized by category
 - **`references/workflow-patterns.md`** — complete choreography patterns with rationale
 - **`references/search-strategy.md`** — embedding model characteristics, score interpretation, query techniques
+- **`references/gantt-format.md`** — schema and examples for `.gantt` files and ` ```gantt ` blocks (Stash-specific, not Mermaid)
