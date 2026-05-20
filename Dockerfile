@@ -1,10 +1,14 @@
-FROM python:3.12-slim
+# Use the official uv image as the base so `uv` is already present and
+# matches the target platform automatically when building with buildx.
+# Previously this Dockerfile did `FROM python:3.12-slim` and then
+# `COPY --from=ghcr.io/astral-sh/uv:latest /uv ...`, which resolved the
+# uv binary against the *builder's* platform rather than the target,
+# producing `exec format error` on mismatched architectures (e.g. an
+# arm64 build run on amd64 nodes).
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 # Set working directory
 WORKDIR /app
-
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
