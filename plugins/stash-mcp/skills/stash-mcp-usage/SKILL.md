@@ -8,7 +8,7 @@ description: >
   edit_content, search_content, list_content, move_content, etc.).
   Teaches efficient navigation, surgical editing, transaction safety,
   and semantic search strategy.
-version: 0.1.1
+version: 0.1.4
 ---
 
 # Stash-MCP Usage Guide
