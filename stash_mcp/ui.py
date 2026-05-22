@@ -8,7 +8,7 @@ import json as _json
 import logging
 import re
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import markdown as md
 import yaml as _yaml
@@ -16,8 +16,26 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
+from .filesystem import FileNotFoundError as FSFileNotFoundError
 from .filesystem import FileSystem
 from .mcp_server import MIME_TYPES
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _static_url(rel_path: str) -> str:
+    """Return a `/static/...` URL with an mtime-based cache buster.
+
+    Browsers cache `/static/*` aggressively. Appending the file's mtime as a
+    query string means any edit to a shipped asset invalidates the cache on
+    next page load — no hard-refresh required.
+    """
+    try:
+        mtime = int((_STATIC_DIR / rel_path).stat().st_mtime)
+    except OSError:
+        mtime = 0
+    return f"/static/{rel_path}?v={mtime}"
+
 
 _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp"})
 _SVG_EXTENSIONS = frozenset({".svg"})
@@ -528,7 +546,323 @@ def _csv_fence_replace(m: re.Match) -> str:
         return m.group(0)
 
 
-def _render_markdown(content: str) -> tuple[str, str]:
+_EMBED_FENCE_RE = re.compile(
+    r"^```stash-embed\s*\n(?P<body>.*?)^```\s*$",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _embed_error(message: str) -> str:
+    return f'<div class="error-msg">Embed error: {html.escape(message)}</div>'
+
+
+def _resolve_embed_src(src: str, base_dir: str) -> str:
+    """Resolve an embed `src` to a content-store-relative path.
+
+    Absolute (`/specs/api.json`) is rooted at the content store; otherwise the
+    src is interpreted relative to the embedding document's directory.
+    """
+    if src.startswith("/"):
+        return src.lstrip("/")
+    if base_dir:
+        return str(PurePosixPath(base_dir) / src)
+    return src
+
+
+def _filter_openapi_spec(
+    spec: dict,
+    *,
+    tag: str | None = None,
+    path_filter: str | None = None,
+    operation_id: str | None = None,
+) -> dict:
+    """Return a copy of `spec` containing only paths/operations matching the filters.
+
+    With no filters set, returns the spec unchanged. When filters are applied,
+    `components.schemas` is dropped from the embedded view — embeds are meant
+    to show a focused slice, and the schemas block doubles the rendered height.
+    """
+    if not (tag or path_filter or operation_id):
+        return spec
+
+    filtered_paths: dict = {}
+    for route, methods in spec.get("paths", {}).items():
+        if path_filter and route != path_filter:
+            continue
+        if not isinstance(methods, dict):
+            continue
+        kept: dict = {}
+        for method, op in methods.items():
+            if not isinstance(op, dict) or method.lower() not in _METHOD_COLORS:
+                continue
+            if tag and tag not in op.get("tags", []):
+                continue
+            if operation_id and op.get("operationId") != operation_id:
+                continue
+            kept[method] = op
+        if kept:
+            filtered_paths[route] = kept
+
+    new_spec = dict(spec)
+    new_spec["paths"] = filtered_paths
+    components = new_spec.get("components")
+    if isinstance(components, dict) and "schemas" in components:
+        trimmed = dict(components)
+        trimmed.pop("schemas", None)
+        new_spec["components"] = trimmed
+    return new_spec
+
+
+_OPENAPI_EXTS = frozenset({".json", ".yaml", ".yml"})
+_HTML_EMBED_EXTS = frozenset({".html", ".htm"})
+
+
+def _infer_embed_type(src: str, raw: str, suffix: str) -> str | None:
+    """Infer embed type from extension + content. Returns None if ambiguous."""
+    if suffix in _HTML_EMBED_EXTS:
+        return "html"
+    if suffix in _OPENAPI_EXTS:
+        # JSON/YAML could be anything; sniff for openapi key.
+        try:
+            if suffix in (".yaml", ".yml"):
+                parsed = _yaml.safe_load(raw)
+            else:
+                parsed = _json.loads(raw)
+        except (ValueError, _yaml.YAMLError):
+            return None
+        if isinstance(parsed, dict) and "openapi" in parsed:
+            return "openapi"
+    return None
+
+
+def _render_openapi_embed(raw: str, src: str, suffix: str, config: dict) -> str:
+    """Render an OpenAPI fragment for inline embedding."""
+    try:
+        if suffix in (".yaml", ".yml"):
+            spec = _yaml.safe_load(raw)
+        else:
+            spec = _json.loads(raw)
+    except (ValueError, _yaml.YAMLError) as exc:
+        return _embed_error(f"failed to parse '{src}': {exc}")
+    if not isinstance(spec, dict) or "openapi" not in spec:
+        return _embed_error(f"'{src}' is not an OpenAPI spec")
+
+    tag = config.get("tag")
+    path_filter = config.get("path")
+    operation_id = config.get("operationId")
+    for name, value in (("tag", tag), ("path", path_filter), ("operationId", operation_id)):
+        if value is not None and not isinstance(value, str):
+            return _embed_error(f"'{name}' must be a string")
+
+    filtered = _filter_openapi_spec(
+        spec, tag=tag, path_filter=path_filter, operation_id=operation_id,
+    )
+    if (tag or path_filter or operation_id) and not filtered.get("paths"):
+        selectors = ", ".join(
+            f"{k}={v}" for k, v in [
+                ("tag", tag), ("path", path_filter), ("operationId", operation_id)
+            ] if v
+        )
+        return _embed_error(f"no operations in '{src}' matched {selectors}")
+
+    try:
+        center_html, _ = _render_openapi(filtered)
+    except Exception as exc:
+        return _embed_error(f"render failed: {exc}")
+    return f'<div class="embedded-openapi">{center_html}</div>'
+
+
+# Matches `body`, `html`, or `:root` when they appear at the start of a CSS
+# selector (start of file, after `}`, or after `,`) and are followed by a token
+# that ends a selector or starts a compound (whitespace, `{`, `,`, `.`, `#`,
+# `:`, `[`, `>`, `~`, `+`). Captures the preceding boundary and any whitespace
+# so they can be re-emitted unchanged.
+_ROOT_SELECTOR_RE = re.compile(
+    r"(^|[\},])(\s*)(?:body|html|:root)(?=[\s\.\#\:\[\>\~\+\,\{]|$)"
+)
+
+# Matches a non-@-rule selector list that ends in `{`. The boundary captures
+# either start-of-file or the closing of the previous block, so we can prepend
+# `:scope ` to every selector inside an `@scope` block. The `[^@\}\{]+?`
+# excludes `@` so we don't try to rewrite `@media` / `@supports` / etc. preludes
+# — their inner rules are matched in subsequent iterations.
+_RULE_HEAD_RE = re.compile(r"(^|[\}\{])([^@\}\{]+?)\{", re.MULTILINE)
+
+
+def _scope_css_selectors(css: str) -> str:
+    """Rewrite every non-@-rule selector in `css` so it gains class-level
+    specificity inside the embed's `@scope (.embed-xxx)` block.
+
+    1. Leading `body` / `html` / `:root` tokens are rewritten to `:scope`.
+    2. Other selectors are prefixed with `:scope ` (descendant combinator) so
+       e.g. `h2 { ... }` becomes `:scope h2 { ... }`. Without this boost the
+       host's `.markdown-body h2 { color: ... }` (specificity 0,1,1) beats the
+       source's naked `h2 { ... }` (0,0,1) and headings render in the host's
+       color instead of the source's.
+    """
+    def _rewrite(match: re.Match) -> str:
+        boundary = match.group(1)
+        selectors = match.group(2)
+        if not selectors.strip():
+            return match.group(0)
+        parts: list[str] = []
+        for raw in selectors.split(","):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            stripped = _ROOT_SELECTOR_RE.sub(r":scope", stripped)
+            if not stripped.startswith(":scope"):
+                stripped = f":scope {stripped}"
+            parts.append(stripped)
+        return f"{boundary}{', '.join(parts)} {{"
+
+    return _RULE_HEAD_RE.sub(_rewrite, css)
+
+
+# Defensive reset injected into every styled HTML embed. Each `:scope <el>`
+# selector has specificity (0,1,1) — ties with host rules like
+# `.markdown-body th { background: #272738 }` and wins by source order, so
+# host CSS doesn't leak into elements the source didn't explicitly style.
+#
+# `all: revert` resets every property of the matched elements to what the
+# user-agent stylesheet would set, ignoring all author styles from earlier in
+# the cascade (i.e., the host). Source rules with the same selector come
+# *after* this reset in the same author origin, so they win on source order
+# and the source's intended styling lands on top. Source class/id rules
+# (specificity 0,2,0+) beat the reset outright. Anything the source doesn't
+# style falls back to UA defaults (transparent bg, browser-default fonts and
+# borders) — i.e., the embed renders like a standalone HTML page.
+_EMBED_HOST_STYLE_RESET = (
+    ":scope h1, :scope h2, :scope h3, :scope h4, :scope h5, :scope h6, "
+    ":scope p, :scope a, :scope li, :scope ul, :scope ol, :scope dl, "
+    ":scope dt, :scope dd, :scope table, :scope thead, :scope tbody, "
+    ":scope tr, :scope th, :scope td, :scope caption, "
+    ":scope blockquote, :scope figure, :scope figcaption, "
+    ":scope code, :scope pre, :scope kbd, :scope samp, :scope var, "
+    ":scope strong, :scope em, :scope b, :scope i, :scope u, :scope s, "
+    ":scope small, :scope mark, :scope label, :scope hr "
+    "{ all: revert; }\n"
+)
+
+
+def _render_html_embed(raw: str, src: str, config: dict) -> str:
+    """Render an HTML fragment for inline embedding.
+
+    With `selector:`, returns the matched subtree(s). Without, returns the
+    document `<body>` (or the whole tree if no body element).
+
+    `<style>` blocks from the source are extracted and re-emitted scoped to a
+    per-embed CSS `@scope` rule, so the source's styling applies to its own
+    fragment without leaking into the host document. A short hash of
+    (src, selector) keys the scope class so multiple embeds from different
+    sources don't collide on shared selectors like `section { ... }`.
+    """
+    import hashlib
+
+    from bs4 import BeautifulSoup
+
+    selector = config.get("selector")
+    if selector is not None and not isinstance(selector, str):
+        return _embed_error("'selector' must be a string")
+
+    try:
+        soup = BeautifulSoup(raw, "html.parser")
+    except Exception as exc:
+        return _embed_error(f"failed to parse '{src}': {exc}")
+
+    style_blocks = soup.find_all("style")
+    combined_css = "\n".join(str(s.string or "") for s in style_blocks).strip()
+    for s in style_blocks:
+        s.decompose()
+
+    # Always emit the reset — even when the source has no <style> block at
+    # all. Without this, sources like a bare `<div>...<code>...</code></div>`
+    # would still have host markdown rules (e.g. `.markdown-body code
+    # { background: #181825 }`) leak through. Source CSS, if present, gets
+    # the `:scope ` specificity boost so it beats host rules too. See
+    # _scope_css_selectors() for the why.
+    if combined_css:
+        combined_css = _scope_css_selectors(combined_css)
+    combined_css = _EMBED_HOST_STYLE_RESET + combined_css
+
+    if selector:
+        try:
+            matches = soup.select(selector)
+        except Exception as exc:
+            return _embed_error(f"invalid selector '{selector}': {exc}")
+        if not matches:
+            return _embed_error(f"no elements in '{src}' matched selector '{selector}'")
+        fragment = "".join(str(m) for m in matches)
+    else:
+        body = soup.body
+        fragment = body.decode_contents() if body else str(soup)
+
+    digest = hashlib.sha256(f"{src}|{selector or ''}".encode()).hexdigest()[:10]
+    scope_class = f"embed-{digest}"
+
+    style_html = ""
+    if combined_css:
+        style_html = f"<style>@scope (.{scope_class}) {{\n{combined_css}\n}}</style>"
+
+    return f'{style_html}<div class="embedded-html {scope_class}">{fragment}</div>'
+
+
+def _make_embed_replacer(filesystem: "FileSystem | None", base_dir: str):
+    """Build a fenced-block replacer that resolves ```stash-embed blocks.
+
+    Dispatches by `type:` (if set) or by `src` extension + content sniffing.
+    Supported types: openapi, html.
+    """
+
+    def _replace(m: re.Match) -> str:
+        body = m.group("body")
+        try:
+            config = _yaml.safe_load(body) or {}
+        except _yaml.YAMLError as exc:
+            return _embed_error(f"invalid YAML: {exc}")
+        if not isinstance(config, dict):
+            return _embed_error("embed config must be a YAML mapping")
+
+        src = config.get("src")
+        if not isinstance(src, str) or not src:
+            return _embed_error("embed requires a 'src' field")
+        if filesystem is None:
+            return _embed_error(f"cannot resolve '{src}': no filesystem in context")
+
+        resolved = _resolve_embed_src(src, base_dir)
+        try:
+            raw = filesystem.read_file(resolved)
+        except (FileNotFoundError, FSFileNotFoundError):
+            return _embed_error(f"source not found: {src}")
+        except Exception as exc:
+            return _embed_error(f"failed to read '{src}': {exc}")
+
+        suffix = PurePosixPath(resolved).suffix.lower()
+        explicit_type = config.get("type")
+        if explicit_type is not None and not isinstance(explicit_type, str):
+            return _embed_error("'type' must be a string")
+
+        embed_type = explicit_type or _infer_embed_type(src, raw, suffix)
+        if embed_type is None:
+            return _embed_error(
+                f"could not determine embed type for '{src}'; "
+                f"set 'type:' explicitly (openapi, html)"
+            )
+
+        if embed_type == "openapi":
+            return _render_openapi_embed(raw, src, suffix, config)
+        if embed_type == "html":
+            return _render_html_embed(raw, src, config)
+        return _embed_error(f"unknown embed type '{embed_type}' (supported: openapi, html)")
+
+    return _replace
+
+
+def _render_markdown(
+    content: str,
+    filesystem: "FileSystem | None" = None,
+    base_dir: str = "",
+) -> tuple[str, str]:
     """Render markdown to HTML with extensions. Returns (html, toc_html).
 
     Raw HTML in markdown is passed through by design — Stash-MCP stores
@@ -536,6 +870,8 @@ def _render_markdown(content: str) -> tuple[str, str]:
     <details>, <img>, and <div> in markdown files are intentionally supported.
     Do not expose the UI to untrusted third-party content.
     """
+    if filesystem is not None:
+        content = _EMBED_FENCE_RE.sub(_make_embed_replacer(filesystem, base_dir), content)
     content = _CSV_FENCE_RE.sub(_csv_fence_replace, content)
     converter = md.Markdown(extensions=[
         "fenced_code",
@@ -989,6 +1325,32 @@ padding-right:16px !important;border-right:1px solid #313244}
 .viewer-csv-inline .csv-table{font-size:12px}
 .viewer-csv-inline .csv-stats{padding:6px 12px;border-top:1px solid #313244;background:#1e1e2e}
 
+/* embedded openapi block inside markdown */
+.embedded-openapi{margin:1.5rem 0;border:1px solid #313244;border-radius:8px;
+background:#181825;overflow:hidden}
+.embedded-openapi .viewer-openapi{padding:18px 22px}
+.embedded-openapi .oas-header{margin-bottom:1rem}
+.embedded-openapi .oas-header h1{font-size:18px}
+/* Defaults match a standalone browser render — light background + dark text.
+   The source's own body styles (via @scope) override these when set, so dark-
+   themed source HTML still renders dark. The point is that neutral source HTML
+   (no body bg/color) doesn't disappear into Stash's dark theme. */
+.embedded-html{margin:1.5rem 0;padding:18px 22px;border:1px solid #313244;
+border-radius:8px;background:#fff;color:#1e1e2e;color-scheme:light;overflow:auto}
+/* Trim outside margins along the last-child chain so neither the source's
+   own stacking margins (e.g. `section { margin-bottom: 2rem }`) nor UA
+   defaults on deep-nested last children (e.g. `<ol>` inside the final
+   section) create dead space at the bottom of the wrapper. Same for the
+   first-child chain at the top. Specificity (0,2,0) and higher beats the
+   source's `:scope <el>` rules (0,1,1). Three levels covers the typical
+   nesting: wrapper > section > ol > li. */
+.embedded-html > *:first-child,
+.embedded-html > *:first-child > *:first-child,
+.embedded-html > *:first-child > *:first-child > *:first-child{margin-top:0}
+.embedded-html > *:last-child,
+.embedded-html > *:last-child > *:last-child,
+.embedded-html > *:last-child > *:last-child > *:last-child{margin-bottom:0}
+
 /* openapi schema viewer */
 .viewer-openapi{padding:24px 32px}
 .oas-header{margin-bottom:2rem}
@@ -1220,16 +1582,43 @@ function _initPanZoom(wrap){
   if(!wrap.firstElementChild)return;
   var child=wrap.firstElementChild;
   var scale=1,tx=0,ty=0,panning=false,px=0,py=0,ptx=0,pty=0;
+  var MIN=0.2,MAX=5;
   child.style.transformOrigin='0 0';
   function apply(){child.style.transform='translate('+tx+'px,'+ty+'px) scale('+scale+')';}
-  wrap.addEventListener('wheel',function(e){
-    e.preventDefault();
-    var f=e.deltaY>0?0.9:1.1;var ns=Math.min(Math.max(scale*f,0.2),5);
+  function zoomAt(cx,cy,factor){
+    var ns=Math.min(Math.max(scale*factor,MIN),MAX);
     var rect=wrap.getBoundingClientRect();
-    var mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    var mx=cx-rect.left, my=cy-rect.top;
     tx=mx-(mx-tx)*(ns/scale); ty=my-(my-ty)*(ns/scale);
     scale=ns; apply();
+  }
+  // Wheel handler:
+  //  - ctrlKey set → trackpad pinch (browser convention) or ctrl+wheel: zoom.
+  //    Uses an exponential curve so pinch tracks the gesture smoothly instead
+  //    of stepping in fixed 10% increments.
+  //  - Otherwise → if we're zoomed in, pan the embed using deltaX/deltaY
+  //    (handles two-finger trackpad pan). At scale=1 we let the wheel pass
+  //    through so the page can scroll normally past the diagram.
+  wrap.addEventListener('wheel',function(e){
+    if(e.ctrlKey){
+      e.preventDefault();
+      zoomAt(e.clientX,e.clientY,Math.exp(-e.deltaY*0.01));
+      return;
+    }
+    if(scale>1.001){
+      e.preventDefault();
+      tx-=e.deltaX; ty-=e.deltaY; apply();
+    }
   },{passive:false});
+  // Safari trackpad gesture events — same logic, different API.
+  var gestureScale=1;
+  wrap.addEventListener('gesturestart',function(e){e.preventDefault();gestureScale=scale;});
+  wrap.addEventListener('gesturechange',function(e){
+    e.preventDefault();
+    var ns=Math.min(Math.max(gestureScale*e.scale,MIN),MAX);
+    zoomAt(e.clientX,e.clientY,ns/scale);
+  });
+  wrap.addEventListener('gestureend',function(e){e.preventDefault();});
   wrap.addEventListener('mousedown',function(e){
     if(e.target.closest('a'))return;
     panning=true;px=e.clientX;py=e.clientY;ptx=tx;pty=ty;
@@ -1241,6 +1630,37 @@ function _initPanZoom(wrap){
   });
   document.addEventListener('mouseup',function(){
     if(panning){panning=false;wrap.style.cursor='grab';}
+  });
+  // Touch handlers for actual touchscreens (iPad, hybrid laptops). One finger
+  // pans; two fingers pinch-zoom around the midpoint.
+  var t1=null,t2=null,touchStartDist=0,touchStartScale=1,touchStartMid=null;
+  function dist(a,b){var dx=a.clientX-b.clientX,dy=a.clientY-b.clientY;return Math.hypot(dx,dy);}
+  function mid(a,b){return{x:(a.clientX+b.clientX)/2,y:(a.clientY+b.clientY)/2};}
+  wrap.addEventListener('touchstart',function(e){
+    if(e.touches.length===1){
+      t1=e.touches[0];t2=null;
+      px=t1.clientX;py=t1.clientY;ptx=tx;pty=ty;panning=true;
+    }else if(e.touches.length===2){
+      panning=false;
+      t1=e.touches[0];t2=e.touches[1];
+      touchStartDist=dist(t1,t2);touchStartScale=scale;touchStartMid=mid(t1,t2);
+    }
+    if(e.touches.length>0)e.preventDefault();
+  },{passive:false});
+  wrap.addEventListener('touchmove',function(e){
+    if(e.touches.length===1&&panning){
+      e.preventDefault();
+      tx=ptx+(e.touches[0].clientX-px);ty=pty+(e.touches[0].clientY-py);apply();
+    }else if(e.touches.length===2&&touchStartDist>0){
+      e.preventDefault();
+      var d=dist(e.touches[0],e.touches[1]);
+      var ns=Math.min(Math.max(touchStartScale*(d/touchStartDist),MIN),MAX);
+      zoomAt(touchStartMid.x,touchStartMid.y,ns/scale);
+    }
+  },{passive:false});
+  wrap.addEventListener('touchend',function(e){
+    if(e.touches.length<2){touchStartDist=0;}
+    if(e.touches.length===0){panning=false;}
   });
   wrap.style.cursor='grab';
   wrap.style.overflow='hidden';
@@ -1274,7 +1694,7 @@ if(typeof mermaid!=='undefined'){
       _initPanZoom(el);
       var hint=document.createElement('span');
       hint.className='mermaid-hint';
-      hint.textContent='Scroll to zoom · Drag to pan';
+      hint.textContent='Pinch or ⌃scroll to zoom · Drag to pan';
       el.appendChild(hint);
     });
   });
@@ -1378,11 +1798,11 @@ def _page(
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)} – Stash-MCP</title>
 <style>{_CSS}</style>
-<link rel="stylesheet" href="/static/vendor/github-dark.min.css">
-<script src="/static/vendor/highlight.min.js"></script>
-<script src="/static/vendor/languages/terraform.min.js"></script>
-<script src="/static/vendor/mermaid.min.js"></script>
-<script src="/static/vendor/stash-gantt.js"></script>
+<link rel="stylesheet" href="{_static_url("vendor/github-dark.min.css")}">
+<script src="{_static_url("vendor/highlight.min.js")}"></script>
+<script src="{_static_url("vendor/languages/terraform.min.js")}"></script>
+<script src="{_static_url("vendor/mermaid.min.js")}"></script>
+<script src="{_static_url("vendor/stash-gantt.js")}"></script>
 </head>
 <body>
 <div class="app">
@@ -1627,10 +2047,10 @@ def create_ui_router(
                         f'<div class="viewer-content"><pre>{escaped_content}</pre></div>'
                     )
             elif path.endswith((".md", ".markdown")):
-                rendered, toc_html = _render_markdown(content)
                 base_dir = str(PurePosixPath(path).parent)
                 if base_dir == ".":
                     base_dir = ""
+                rendered, toc_html = _render_markdown(content, filesystem, base_dir)
                 rendered = _rewrite_relative_urls(rendered, base_dir)
                 center = (
                     f'<div class="viewer-content markdown-body">{rendered}</div>'

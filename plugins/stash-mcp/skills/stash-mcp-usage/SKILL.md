@@ -8,7 +8,7 @@ description: >
   edit_content, search_content, list_content, move_content, etc.).
   Teaches efficient navigation, surgical editing, transaction safety,
   and semantic search strategy.
-version: 0.1.4
+version: 0.1.7
 ---
 
 # Stash-MCP Usage Guide
@@ -36,9 +36,9 @@ Stash stores files as-is on disk. Anything text-based round-trips losslessly thr
 |-------|------------|-------|
 | **Markdown** (primary) | `.md`, `.markdown` | First-class. Heading hierarchy parsed by `inspect_content_structure`. Only `README.md` surfaces as an MCP resource — everything else is tool-only. |
 | **Diagrams** | `.mmd`, `.mermaid`, `.gantt` | Rendered as diagrams in the UI viewer. Plain text under the hood — edit like any text file. `.gantt` is YAML-based. |
-| **API specs** | `.json` with an `openapi` root key | Rendered as an OpenAPI viewer in the UI. Stored as plain JSON. |
+| **API specs** | `.json` with an `openapi` root key | Rendered as an OpenAPI viewer in the UI. Stored as plain JSON. Slices can be embedded into markdown via ` ```stash-embed ` — see below. |
 | **Tabular** | `.csv`, `.tsv` | Rendered as HTML tables in the UI. |
-| **Web** | `.html`, `.htm` | Rendered in a sandboxed iframe. |
+| **Web** | `.html`, `.htm` | Rendered in a sandboxed iframe. Fragments can also be embedded into markdown via ` ```stash-embed ` (CSS selector). |
 | **Structured text** | `.json`, `.yaml`, `.yml`, `.toml`, `.xml`, `.ini`, `.cfg` | Stored as text, no special rendering. |
 | **Code** | `.py`, `.js`, `.ts`, `.css`, `.rst`, `.txt`, `.log`, plus any other text extension | Stored as text. Searchable. |
 | **Image assets** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.bmp` | Served via `/ui/raw/<path>` for embedding. Do **not** `read_content` these — store and link instead. |
@@ -53,6 +53,38 @@ Markdown is the host format — several other types can be embedded inline so a 
 - **Mermaid diagrams** — fenced code block tagged ` ```mermaid ` renders inline. Use this for one-off diagrams; reserve standalone `.mmd` files for diagrams you want to reuse or link to.
 - **Gantt charts** — fenced code block tagged ` ```gantt ` (YAML body) renders inline. Standalone `.gantt` files work the same way. **The YAML schema is Stash-specific** (not Mermaid gantt syntax) — see `references/gantt-format.md` before authoring.
 - **CSV / TSV tables** — fenced code block tagged ` ```csv ` or ` ```tsv ` renders as an HTML table inline. Good for small, document-scoped tables; use standalone `.csv` files when the data is the artifact.
+- **Embed-by-reference** — fenced code block tagged ` ```stash-embed ` (YAML body) renders a slice of another document inline. The source stays the single source of truth; edits there propagate to every embed.
+
+  **Shared fields:**
+  - `src:` (required) — path to the source file. Absolute paths (`/specs/orders.json`) are rooted at the content store; relative paths resolve against the embedding document's directory.
+  - `type:` (optional) — override auto-detection. Supported values: `openapi`, `html`. Auto-detection uses the `src` extension plus content sniffing; set `type:` explicitly when the extension is ambiguous (e.g. an HTML snippet stored as `.txt`).
+
+  **OpenAPI sources** (`.json` / `.yaml` / `.yml` with a top-level `openapi` key):
+  - `tag:` — keep only operations tagged with this value.
+  - `path:` — keep only this exact path (e.g. `/orders/{order_id}`).
+  - `operationId:` — keep only this single operation.
+
+  Filters combine with AND. With no filters, the full spec renders. Filtered embeds drop the `components.schemas` block since the point is a focused slice.
+
+  **HTML sources** (`.html` / `.htm`):
+  - `selector:` — any CSS selector (id, class, tag, attribute, combinators all work). Returns the matched subtree(s). With no selector, returns the document `<body>` contents.
+
+  `<style>` blocks from the source are preserved and re-emitted wrapped in a CSS `@scope` rule keyed to a per-embed class, so the source's styling applies only to its own fragment and doesn't leak into the host doc. Multiple embeds from different sources can use the same generic selectors (e.g. `section { ... }`) without colliding. Requires a browser with `@scope` support (Chrome/Edge 118+, Safari 17.4+, Firefox 128+).
+
+  **Examples:**
+  ````markdown
+  ```stash-embed
+  src: /specs/orders.json
+  tag: orders
+  ```
+
+  ```stash-embed
+  src: /reports/q2.html
+  selector: "#risks"
+  ```
+  ````
+
+  **Errors** render inline (missing `src`, source not found, no selector match, ambiguous type, etc.) — they never silently drop content. If you see a red error box in a rendered doc, fix the embed reference.
 - **Raw HTML** — passes through the markdown renderer by design. `<details>`, `<img>`, `<video>`, `<iframe>`, `<div>` all work. Use sparingly; markdown syntax is preferable when it covers the case.
 
 **Cannot be embedded inline:** PDFs, Office documents (`.docx`, `.xlsx`, `.pptx`), Jupyter notebooks (`.ipynb`), and other binary formats. Link to them as assets if needed, but Stash has no native renderer for these — `read_content` will return unreadable bytes.
