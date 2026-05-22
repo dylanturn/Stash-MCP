@@ -8,7 +8,7 @@ description: >
   edit_content, search_content, list_content, move_content, etc.).
   Teaches efficient navigation, surgical editing, transaction safety,
   and semantic search strategy.
-version: 0.1.7
+version: 0.1.8
 ---
 
 # Stash-MCP Usage Guide
@@ -59,17 +59,21 @@ Markdown is the host format — several other types can be embedded inline so a 
   - `src:` (required) — path to the source file. Absolute paths (`/specs/orders.json`) are rooted at the content store; relative paths resolve against the embedding document's directory.
   - `type:` (optional) — override auto-detection. Supported values: `openapi`, `html`. Auto-detection uses the `src` extension plus content sniffing; set `type:` explicitly when the extension is ambiguous (e.g. an HTML snippet stored as `.txt`).
 
-  **OpenAPI sources** (`.json` / `.yaml` / `.yml` with a top-level `openapi` key):
+  **OpenAPI sources** (`.json` / `.yaml` / `.yml` with a top-level `openapi` key, or any extension with `type: openapi`):
   - `tag:` — keep only operations tagged with this value.
   - `path:` — keep only this exact path (e.g. `/orders/{order_id}`).
   - `operationId:` — keep only this single operation.
 
-  Filters combine with AND. With no filters, the full spec renders. Filtered embeds drop the `components.schemas` block since the point is a focused slice.
+  Filters combine with AND. With no filters, the full spec renders. Filtered embeds drop the `components.schemas` block since the point is a focused slice. Parsing is YAML-based, which is a superset of JSON — both formats work regardless of file extension when `type: openapi` is set explicitly.
 
   **HTML sources** (`.html` / `.htm`):
   - `selector:` — any CSS selector (id, class, tag, attribute, combinators all work). Returns the matched subtree(s). With no selector, returns the document `<body>` contents.
 
-  `<style>` blocks from the source are preserved and re-emitted wrapped in a CSS `@scope` rule keyed to a per-embed class, so the source's styling applies only to its own fragment and doesn't leak into the host doc. Multiple embeds from different sources can use the same generic selectors (e.g. `section { ... }`) without colliding. Requires a browser with `@scope` support (Chrome/Edge 118+, Safari 17.4+, Firefox 128+).
+  `<style>` blocks from the source are preserved and re-emitted wrapped in a CSS `@scope` rule keyed to a per-embed class, so the source's styling applies only to its own fragment and doesn't leak into the host doc. `@keyframes` animations pass through unchanged. Multiple embeds from different sources can use the same generic selectors (e.g. `section { ... }`) without colliding. Requires a browser with `@scope` support (Chrome/Edge 118+, Safari 17.4+, Firefox 128+).
+
+  Relative `src` / `href` attributes inside the embedded fragment resolve relative to the **source file's** directory, not the embedding markdown's. So a `reports/q2.html` containing `<img src="images/foo.png">` renders the image from `reports/images/foo.png` regardless of where the embed is included from.
+
+  **Embedded HTML is not sandboxed.** Standalone `.html` files render inside a sandboxed iframe, but `stash-embed` fragments inject directly into the host document. To prevent script execution in the host's origin, embedded fragments have `<script>` elements, `on*` event-handler attributes (`onclick`, `onmouseover`, etc.), and `javascript:` URL schemes stripped at render time. Styles, `<svg>`, `<canvas>`, and structural markup still work; interactive JS does not. Use a standalone `.html` file if you need scripts.
 
   **Examples:**
   ````markdown
