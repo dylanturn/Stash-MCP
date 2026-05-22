@@ -124,7 +124,7 @@ window.StashGantt={
     toolbar.className='gantt-toolbar';
     toolbar.innerHTML=
       '<span class="gantt-title">'+(data.title||'Gantt Chart')+'</span>'+
-      '<span class="gantt-hint">Scroll to zoom • Drag background to pan'+(readOnly?'':'  • Drag bars to reschedule')+'</span>'+
+      '<span class="gantt-hint">Pinch to zoom • Drag to pan'+(readOnly?'':' • Shift-drag a bar to reschedule')+'</span>'+
       (!readOnly&&savePath?'<button class="gantt-save-btn" disabled>Save changes</button>':'');
     container.appendChild(toolbar);
 
@@ -162,6 +162,17 @@ window.StashGantt={
       /* background */
       var bg=el('rect',{x:0,y:0,width:chartW,height:chartH,fill:C.mantle,rx:6});
       svg.appendChild(bg);
+
+      /* clip path keeping bars/arrows out of the label column.
+         A fresh id per draw avoids stale refs across redraws. */
+      var defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
+      var clipId='gantt-clip-'+Math.random().toString(36).slice(2,10);
+      var clipPath=document.createElementNS('http://www.w3.org/2000/svg','clipPath');
+      clipPath.setAttribute('id',clipId);
+      clipPath.appendChild(el('rect',{x:LABEL_W,y:HEADER_H,width:chartW-LABEL_W,height:chartH-HEADER_H}));
+      defs.appendChild(clipPath);
+      svg.appendChild(defs);
+      var chartArea=elG({'clip-path':'url(#'+clipId+')'});
 
       /* time axis */
       var daySpan=diffDays(state.viewMin,state.viewMax);
@@ -229,7 +240,7 @@ window.StashGantt={
             barG.appendChild(elText(dStr,x2-8,barY+barH/2+4,{fill:C.crust,'font-size':'10px','text-anchor':'end',opacity:0.7}));
           }
 
-          svg.appendChild(barG);
+          chartArea.appendChild(barG);
           y+=ROW_H;
         });
       });
@@ -254,14 +265,19 @@ window.StashGantt={
         if(fromY&&toY){
           var midX=fromX+(toX-fromX)/2;
           var path='M'+fromX+' '+fromY+' C'+midX+' '+fromY+' '+midX+' '+toY+' '+toX+' '+toY;
-          svg.appendChild(el('path',{d:path,fill:'none',stroke:C.overlay0,'stroke-width':1.5,'marker-end':'url(#arrow)'}));
+          chartArea.appendChild(el('path',{d:path,fill:'none',stroke:C.overlay0,'stroke-width':1.5,'marker-end':'url(#arrow)'}));
         }
       });
 
       /* arrow marker def */
-      var defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
-      defs.innerHTML='<marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="'+C.overlay0+'"/></marker>';
-      svg.appendChild(defs);
+      var markerDefs=document.createElementNS('http://www.w3.org/2000/svg','defs');
+      markerDefs.innerHTML='<marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="'+C.overlay0+'"/></marker>';
+      svg.appendChild(markerDefs);
+
+      /* Append the clipped chart-area group last so its content (bars + dep
+         arrows) renders above the row stripes and section bands, while the
+         clip path keeps every bar pixel out of the left-hand label column. */
+      svg.appendChild(chartArea);
     }
 
     /* ── events ── */
@@ -297,40 +313,37 @@ window.StashGantt={
       draw();
     });
 
-    /* drag to reschedule */
-    if(!readOnly){
-      svg.addEventListener('mousedown',function(e){
-        var bar=e.target.closest('.gantt-bar');
-        if(bar){
-          e.preventDefault();
-          var id=bar.getAttribute('data-id');
-          var task=state.resolved.taskMap[id];
-          if(!task)return;
-          state.dragging=id;
-          state.dragStartX=e.clientX;
-          state.dragOrigStart=new Date(task._start);
-          state.dragOrigEnd=new Date(task._end);
-          state.selected=id;
-          svg.style.cursor='grabbing';
-          draw();
-          return;
-        }
-        /* pan on background */
-        state.panning=true;
-        state.panStartX=e.clientX;
-        state.panViewMin=new Date(state.viewMin);
-        state.panViewMax=new Date(state.viewMax);
-        svg.style.cursor='move';
-      });
-    }else{
-      svg.addEventListener('mousedown',function(e){
-        state.panning=true;
-        state.panStartX=e.clientX;
-        state.panViewMin=new Date(state.viewMin);
-        state.panViewMax=new Date(state.viewMax);
-        svg.style.cursor='move';
-      });
-    }
+    /* default cursor signals draggability, matching mermaid's grab/grabbing UX. */
+    wrap.style.cursor='grab';
+
+    /* mousedown:
+     *   default → pan anywhere on the chart (matches mermaid pan UX).
+     *   shift+mousedown on a bar (non-readonly) → reschedule that bar.
+     *   click without drag still selects the bar (handled by the click listener
+     *   above; mousedown that doesn't move beyond a few pixels stays a click). */
+    svg.addEventListener('mousedown',function(e){
+      var bar=e.target.closest('.gantt-bar');
+      if(!readOnly && bar && e.shiftKey){
+        e.preventDefault();
+        var id=bar.getAttribute('data-id');
+        var task=state.resolved.taskMap[id];
+        if(!task)return;
+        state.dragging=id;
+        state.dragStartX=e.clientX;
+        state.dragOrigStart=new Date(task._start);
+        state.dragOrigEnd=new Date(task._end);
+        state.selected=id;
+        svg.style.cursor='grabbing';
+        draw();
+        return;
+      }
+      state.panning=true;
+      state.panStartX=e.clientX;
+      state.panViewMin=new Date(state.viewMin);
+      state.panViewMax=new Date(state.viewMax);
+      svg.style.cursor='grabbing';
+      e.preventDefault();
+    });
 
     document.addEventListener('mousemove',function(e){
       if(state.dragging){
@@ -359,34 +372,60 @@ window.StashGantt={
         state.dirty=true;
         if(saveBtn)saveBtn.disabled=false;
         state.dragging=null;
-        svg.style.cursor='';
+        svg.style.cursor='grab';
       }
       if(state.panning){
         state.panning=false;
-        svg.style.cursor='';
+        svg.style.cursor='grab';
       }
     });
 
-    /* scroll to zoom */
+    /* wheel handler:
+     *   ctrlKey set → trackpad pinch (browser convention) or ctrl+wheel: zoom
+     *     the time range around the cursor using a smooth exponential curve.
+     *   otherwise → do nothing; let the wheel scroll the surrounding page.
+     *     Panning is mouse-drag only, matching mermaid's wheel UX. */
     wrap.addEventListener('wheel',function(e){
+      if(!e.ctrlKey)return;
       e.preventDefault();
-      var zoomFactor=e.deltaY>0?1.15:0.87;
       var rect=wrap.getBoundingClientRect();
+      var span=state.viewMax-state.viewMin;
+      var minSpan=7*864e5,maxSpan=365*3*864e5;
+      var zoomFactor=Math.exp(e.deltaY*0.01);
       var mouseX=e.clientX-rect.left;
       var ratio=(mouseX-LABEL_W)/state._timeW;
       if(ratio<0)ratio=0;if(ratio>1)ratio=1;
-
-      var span=state.viewMax-state.viewMin;
       var newSpan=span*zoomFactor;
-      var minSpan=7*864e5;var maxSpan=365*3*864e5;
       if(newSpan<minSpan)newSpan=minSpan;
       if(newSpan>maxSpan)newSpan=maxSpan;
-
       var pivot=state.viewMin.getTime()+span*ratio;
       state.viewMin=new Date(pivot-newSpan*ratio);
       state.viewMax=new Date(pivot+newSpan*(1-ratio));
       draw();
     },{passive:false});
+
+    /* Safari trackpad pinch */
+    var gestureSpan=0,gestureRatio=0,gestureViewMin=null;
+    wrap.addEventListener('gesturestart',function(e){
+      e.preventDefault();
+      gestureSpan=state.viewMax-state.viewMin;
+      var rect=wrap.getBoundingClientRect();
+      var mouseX=e.clientX-rect.left;
+      gestureRatio=Math.min(Math.max((mouseX-LABEL_W)/state._timeW,0),1);
+      gestureViewMin=new Date(state.viewMin);
+    });
+    wrap.addEventListener('gesturechange',function(e){
+      e.preventDefault();
+      var minSpan=7*864e5,maxSpan=365*3*864e5;
+      var newSpan=gestureSpan/e.scale;
+      if(newSpan<minSpan)newSpan=minSpan;
+      if(newSpan>maxSpan)newSpan=maxSpan;
+      var pivot=gestureViewMin.getTime()+gestureSpan*gestureRatio;
+      state.viewMin=new Date(pivot-newSpan*gestureRatio);
+      state.viewMax=new Date(pivot+newSpan*(1-gestureRatio));
+      draw();
+    });
+    wrap.addEventListener('gestureend',function(e){e.preventDefault();});
 
     /* save button */
     if(saveBtn&&savePath){
