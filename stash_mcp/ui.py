@@ -2,10 +2,12 @@
 
 import base64
 import csv
+import functools
 import html
 import io
 import json as _json
 import logging
+import posixpath
 import re
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -23,12 +25,19 @@ from .mcp_server import MIME_TYPES
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+@functools.lru_cache(maxsize=128)
 def _static_url(rel_path: str) -> str:
     """Return a `/static/...` URL with an mtime-based cache buster.
 
     Browsers cache `/static/*` aggressively. Appending the file's mtime as a
     query string means any edit to a shipped asset invalidates the cache on
     next page load — no hard-refresh required.
+
+    The mtime is read once per asset per process via `lru_cache` — the shipped
+    static files don't change at runtime (they're packaged with the install),
+    so a single `stat()` at first reference is enough. Editing an asset
+    requires a process restart to be reflected, which matches deployment
+    expectations and keeps page renders off the filesystem.
     """
     try:
         mtime = int((_STATIC_DIR / rel_path).stat().st_mtime)
@@ -561,12 +570,25 @@ def _resolve_embed_src(src: str, base_dir: str) -> str:
 
     Absolute (`/specs/api.json`) is rooted at the content store; otherwise the
     src is interpreted relative to the embedding document's directory.
+
+    The result is normalized (`.`/`..` segments collapsed) so downstream
+    consumers — `filesystem.read_file`, embed-error messages, and the URL
+    rewriter that uses the parent dir to anchor relative `<img>`/`<a>`
+    targets — get a clean path. A `src` that escapes the content root with
+    leading `..` segments still yields a path starting with `..`, which the
+    filesystem layer rejects with `InvalidPathError`; the caller catches that
+    and produces a dedicated embed error.
     """
     if src.startswith("/"):
-        return src.lstrip("/")
-    if base_dir:
-        return str(PurePosixPath(base_dir) / src)
-    return src
+        joined = src.lstrip("/")
+    elif base_dir:
+        joined = str(PurePosixPath(base_dir) / src)
+    else:
+        joined = src
+    normalized = posixpath.normpath(joined) if joined else ""
+    # normpath("") -> "." — collapse that to "" so callers see "no path"
+    # consistently when the input was empty.
+    return "" if normalized == "." else normalized
 
 
 def _filter_openapi_spec(

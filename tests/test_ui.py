@@ -398,6 +398,47 @@ class TestUIEmbed:
         assert "Embed error" in body
         assert "src" in body and "field" in body
 
+    def test_embed_src_with_dotdot_segments_is_normalized(self):
+        """A `src` with `..` segments that stays inside the content root should
+        normalize cleanly — no `/ui/raw/plans/../reports/...`-style URLs end
+        up in the rendered output (brittle for caches and path-based
+        middleware)."""
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file(
+                "reports/q2.html",
+                "<body><div id=\"a\"><img src=\"images/foo.png\"></div></body>",
+            )
+            fs.write_file(
+                "plans/draft.md",
+                # `../reports/q2.html` from plans/ resolves to reports/q2.html
+                # — the `..` should be collapsed before any URL is emitted.
+                "```stash-embed\nsrc: ../reports/q2.html\nselector: \"#a\"\n```\n",
+            )
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs))
+            body = TestClient(app).get("/ui/browse/plans/draft.md").text
+
+        # Resolved URL is clean — no `..` segment leaks through.
+        assert 'src="/ui/raw/reports/images/foo.png"' in body
+        assert ".." not in body.split("embedded-html")[1].split("</div>")[0]
+
+    def test_static_url_caches_mtime(self):
+        """`_static_url` should stat each asset at most once per process —
+        otherwise every page render does N filesystem hits for the vendor JS."""
+        import stash_mcp.ui as ui_mod
+        # Clear cache so we start from a known state.
+        ui_mod._static_url.cache_clear()
+        url1 = ui_mod._static_url("vendor/stash-gantt.js")
+        info1 = ui_mod._static_url.cache_info()
+        # Second call must be a cache hit (no new miss).
+        url2 = ui_mod._static_url("vendor/stash-gantt.js")
+        info2 = ui_mod._static_url.cache_info()
+        assert url1 == url2
+        assert info1.misses == 1
+        assert info2.misses == 1
+        assert info2.hits >= 1
+
     def test_embed_src_escaping_content_root_shows_dedicated_error(self):
         """A `src` containing `..` segments that escape the content root must
         produce a clean embed error, not leak the raw `InvalidPathError`
