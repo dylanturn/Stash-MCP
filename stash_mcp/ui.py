@@ -742,6 +742,64 @@ def _extract_keyframes(css: str) -> tuple[str, dict[str, str]]:
     return "".join(out), placeholders
 
 
+def _split_top_level_commas(s: str) -> list[str]:
+    """Split `s` on commas that sit at the top level — outside parentheses,
+    square brackets, and quoted strings.
+
+    Needed for CSS selector lists: `:is(h1, h2, h3) { ... }` is a single
+    selector, but a naive `s.split(",")` would shred it into three nonsense
+    fragments (`:is(h1`, `h2`, `h3)`). Functional pseudo-classes like
+    `:is()`, `:not()`, `:where()`, `:has()`, and `:nth-child(2n+1 of ...)`
+    all rely on this behavior, and attribute selectors like `[data-x=","]`
+    can carry a literal comma inside brackets/strings too.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    paren = 0
+    bracket = 0
+    in_string: str | None = None
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if in_string is not None:
+            buf.append(ch)
+            if ch == "\\" and i + 1 < len(s):
+                # Pass through escape sequence atomically so an escaped quote
+                # doesn't end the string.
+                buf.append(s[i + 1])
+                i += 2
+                continue
+            if ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_string = ch
+            buf.append(ch)
+        elif ch == "(":
+            paren += 1
+            buf.append(ch)
+        elif ch == ")":
+            if paren > 0:
+                paren -= 1
+            buf.append(ch)
+        elif ch == "[":
+            bracket += 1
+            buf.append(ch)
+        elif ch == "]":
+            if bracket > 0:
+                bracket -= 1
+            buf.append(ch)
+        elif ch == "," and paren == 0 and bracket == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
 def _scope_css_selectors(css: str) -> str:
     """Rewrite every non-@-rule selector in `css` so it gains class-level
     specificity inside the embed's `@scope (.embed-xxx)` block.
@@ -755,6 +813,9 @@ def _scope_css_selectors(css: str) -> str:
 
     `@keyframes` blocks are extracted first and spliced back unchanged so we
     don't try to rewrite their step lists (`0%`, `from`, `to`) as selectors.
+    Selector lists are split with `_split_top_level_commas` so commas inside
+    `:is(...)` / `:not(...)` / attribute selectors don't shred a functional
+    pseudo-class into garbage.
     """
     css, keyframes = _extract_keyframes(css)
 
@@ -764,7 +825,7 @@ def _scope_css_selectors(css: str) -> str:
         if not selectors.strip():
             return match.group(0)
         parts: list[str] = []
-        for raw in selectors.split(","):
+        for raw in _split_top_level_commas(selectors):
             stripped = raw.strip()
             if not stripped:
                 continue

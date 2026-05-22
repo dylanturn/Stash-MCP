@@ -664,6 +664,42 @@ class TestUIEmbedHTML:
         scope_class = scope_match.group(1)
         assert f'class="embedded-html {scope_class}"' in body
 
+    def test_embed_html_preserves_functional_pseudo_classes(self):
+        """Selector lists inside `:is(...)`, `:not(...)`, `:where(...)`,
+        `[attr="a,b"]` etc. must NOT be split on their inner commas. A naive
+        `s.split(",")` would shred `:is(h1, h2)` into `:is(h1` and `h2)`,
+        producing invalid CSS."""
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file(
+                "src.html",
+                "<head><style>"
+                ":is(h1, h2, h3) { color: green; }"
+                ":not(.x, .y) { padding: 0; }"
+                ":where(article, section) p { line-height: 1.5; }"
+                "[data-tag=\"a,b\"] { display: none; }"
+                "li:nth-child(2n+1 of .ok, .also-ok) { background: blue; }"
+                "</style></head>"
+                "<body><section id=\"a\">hi</section></body>",
+            )
+            fs.write_file(
+                "host.md",
+                "```stash-embed\nsrc: /src.html\nselector: \"#a\"\n```\n",
+            )
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs))
+            body = TestClient(app).get("/ui/browse/host.md").text
+
+        # Inner commas preserved; functional pseudo-classes not fractured.
+        assert ":scope :is(h1, h2, h3) { color: green; }" in body
+        assert ":scope :not(.x, .y) { padding: 0; }" in body
+        assert ":scope :where(article, section) p { line-height: 1.5; }" in body
+        assert ':scope [data-tag="a,b"] { display: none; }' in body
+        assert ":scope li:nth-child(2n+1 of .ok, .also-ok) { background: blue; }" in body
+        # Negative checks: no fragments from a bad comma split.
+        assert ":scope h2, h3)" not in body
+        assert ":scope .y)" not in body
+
     def test_embed_html_preserves_keyframes(self):
         """`@keyframes` step lists (`0%`, `from`, `to`) are NOT CSS selectors —
         they must not be prefixed with `:scope` or the animation breaks."""
