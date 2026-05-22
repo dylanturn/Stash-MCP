@@ -636,12 +636,16 @@ def _infer_embed_type(src: str, raw: str, suffix: str) -> str | None:
 
 
 def _render_openapi_embed(raw: str, src: str, suffix: str, config: dict) -> str:
-    """Render an OpenAPI fragment for inline embedding."""
+    """Render an OpenAPI fragment for inline embedding.
+
+    YAML 1.1 is a superset of JSON, so a single `yaml.safe_load` parses both —
+    important because `type: openapi` overrides let users embed YAML specs
+    stored under ambiguous extensions (e.g. `.txt`) where suffix-based parser
+    selection would have wrongly defaulted to JSON.
+    """
+    del suffix  # parser is now extension-agnostic
     try:
-        if suffix in (".yaml", ".yml"):
-            spec = _yaml.safe_load(raw)
-        else:
-            spec = _json.loads(raw)
+        spec = _yaml.safe_load(raw)
     except (ValueError, _yaml.YAMLError) as exc:
         return _embed_error(f"failed to parse '{src}': {exc}")
     if not isinstance(spec, dict) or "openapi" not in spec:
@@ -688,6 +692,55 @@ _ROOT_SELECTOR_RE = re.compile(
 # — their inner rules are matched in subsequent iterations.
 _RULE_HEAD_RE = re.compile(r"(^|[\}\{])([^@\}\{]+?)\{", re.MULTILINE)
 
+# Matches the `@keyframes <name>` (or vendor-prefixed) start of a keyframes
+# at-rule. Keyframes step lists (`0% { ... }`, `from { ... }`, `to { ... }`)
+# are NOT selectors and must not be prefixed with `:scope` — doing so produces
+# invalid CSS and silently breaks animations. We extract the whole keyframes
+# block by tracking brace depth, then splice it back unchanged after scoping.
+_KEYFRAMES_START_RE = re.compile(
+    r"@(?:-webkit-|-moz-|-o-|-ms-)?keyframes\b", re.IGNORECASE,
+)
+
+
+def _extract_keyframes(css: str) -> tuple[str, dict[str, str]]:
+    """Replace each `@keyframes` block with a placeholder. Returns the
+    placeholder-substituted CSS and a mapping of placeholders to original
+    block text.
+
+    The placeholder is itself an empty at-rule (`@stash-kf-N{}`) so that the
+    later selector-rewriting pass ignores it (`_RULE_HEAD_RE` skips selector
+    portions that contain `@`) and treats the trailing `}` as a clean boundary
+    before the next real rule.
+    """
+    placeholders: dict[str, str] = {}
+    out: list[str] = []
+    i = 0
+    while i < len(css):
+        m = _KEYFRAMES_START_RE.search(css, i)
+        if not m:
+            out.append(css[i:])
+            break
+        out.append(css[i:m.start()])
+        # Find the opening brace; if none, give up and emit verbatim.
+        brace = css.find("{", m.end())
+        if brace < 0:
+            out.append(css[m.start():])
+            break
+        depth = 1
+        j = brace + 1
+        while j < len(css) and depth > 0:
+            ch = css[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            j += 1
+        token = f"@stash-kf-{len(placeholders)}{{}}"
+        placeholders[token] = css[m.start():j]
+        out.append(token)
+        i = j
+    return "".join(out), placeholders
+
 
 def _scope_css_selectors(css: str) -> str:
     """Rewrite every non-@-rule selector in `css` so it gains class-level
@@ -699,7 +752,12 @@ def _scope_css_selectors(css: str) -> str:
        host's `.markdown-body h2 { color: ... }` (specificity 0,1,1) beats the
        source's naked `h2 { ... }` (0,0,1) and headings render in the host's
        color instead of the source's.
+
+    `@keyframes` blocks are extracted first and spliced back unchanged so we
+    don't try to rewrite their step lists (`0%`, `from`, `to`) as selectors.
     """
+    css, keyframes = _extract_keyframes(css)
+
     def _rewrite(match: re.Match) -> str:
         boundary = match.group(1)
         selectors = match.group(2)
@@ -716,7 +774,10 @@ def _scope_css_selectors(css: str) -> str:
             parts.append(stripped)
         return f"{boundary}{', '.join(parts)} {{"
 
-    return _RULE_HEAD_RE.sub(_rewrite, css)
+    rewritten = _RULE_HEAD_RE.sub(_rewrite, css)
+    for token, block in keyframes.items():
+        rewritten = rewritten.replace(token, block)
+    return rewritten
 
 
 # Defensive reset injected into every styled HTML embed. Each `:scope <el>`
@@ -745,7 +806,57 @@ _EMBED_HOST_STYLE_RESET = (
 )
 
 
-def _render_html_embed(raw: str, src: str, config: dict) -> str:
+def _sanitize_embed_dom(soup) -> None:
+    """In-place: strip scripts and inline event handlers from an embed tree.
+
+    Standalone `.html` files render in a sandboxed iframe (see the
+    `serve_browse` route). Embedded fragments, however, are injected directly
+    into the host document — they share the UI page's origin and have access
+    to its DOM. To keep embed semantics closer to the sandboxed view (and to
+    defend against accidentally executing scripts from un-vetted HTML in the
+    content store), we remove:
+
+      - `<script>` elements
+      - Any `on*` event-handler attribute (onclick, onerror, etc.)
+      - `href`/`src`/`xlink:href`/`action` values that use the `javascript:`
+        scheme
+
+    Styles are intentionally kept — they're already isolated via `@scope`.
+    """
+    for tag in list(soup.find_all("script")):
+        tag.decompose()
+    for tag in soup.find_all(True):
+        # Iterate over a snapshot of attr keys; we mutate the dict in-place.
+        for attr in list(tag.attrs.keys()):
+            if attr.lower().startswith("on"):
+                del tag.attrs[attr]
+            elif attr.lower() in ("href", "src", "xlink:href", "action", "formaction"):
+                value = tag.attrs[attr]
+                if isinstance(value, list):
+                    value = " ".join(value)
+                if isinstance(value, str) and value.strip().lower().startswith("javascript:"):
+                    del tag.attrs[attr]
+
+
+def _rewrite_embed_relative_urls(html_str: str, embed_dir: str) -> str:
+    """Rewrite relative `src`/`href` in an embed fragment to absolute
+    `/ui/raw/...` paths anchored at the embed source's directory.
+
+    The host markdown's `_rewrite_relative_urls` runs once over the final
+    rendered document, but it uses the *embedding markdown's* base_dir — so
+    relative URLs inside an embed (e.g. `images/foo.png` inside
+    `reports/q2.html`) would resolve under the markdown's folder instead of
+    the HTML source's folder. Rewriting here, before insertion, turns them
+    into absolute paths that the later pass leaves alone.
+    """
+    if not embed_dir or embed_dir == ".":
+        # Source sits at the content root; relatives already resolve correctly
+        # via the later pass with base_dir="".
+        return _rewrite_relative_urls(html_str, "")
+    return _rewrite_relative_urls(html_str, embed_dir)
+
+
+def _render_html_embed(raw: str, src: str, embed_dir: str, config: dict) -> str:
     """Render an HTML fragment for inline embedding.
 
     With `selector:`, returns the matched subtree(s). Without, returns the
@@ -756,6 +867,10 @@ def _render_html_embed(raw: str, src: str, config: dict) -> str:
     fragment without leaking into the host document. A short hash of
     (src, selector) keys the scope class so multiple embeds from different
     sources don't collide on shared selectors like `section { ... }`.
+
+    Scripts and event-handler attributes are stripped (see
+    `_sanitize_embed_dom`), and relative URLs are rewritten relative to the
+    source's directory (`embed_dir`).
     """
     import hashlib
 
@@ -774,6 +889,8 @@ def _render_html_embed(raw: str, src: str, config: dict) -> str:
     combined_css = "\n".join(str(s.string or "") for s in style_blocks).strip()
     for s in style_blocks:
         s.decompose()
+
+    _sanitize_embed_dom(soup)
 
     # Always emit the reset — even when the source has no <style> block at
     # all. Without this, sources like a bare `<div>...<code>...</code></div>`
@@ -796,6 +913,8 @@ def _render_html_embed(raw: str, src: str, config: dict) -> str:
     else:
         body = soup.body
         fragment = body.decode_contents() if body else str(soup)
+
+    fragment = _rewrite_embed_relative_urls(fragment, embed_dir)
 
     digest = hashlib.sha256(f"{src}|{selector or ''}".encode()).hexdigest()[:10]
     scope_class = f"embed-{digest}"
@@ -852,7 +971,13 @@ def _make_embed_replacer(filesystem: "FileSystem | None", base_dir: str):
         if embed_type == "openapi":
             return _render_openapi_embed(raw, src, suffix, config)
         if embed_type == "html":
-            return _render_html_embed(raw, src, config)
+            # The embed source's parent dir — used to resolve relative URLs
+            # inside the fragment so e.g. `<img src="images/foo.png">` in
+            # `reports/q2.html` resolves under `reports/`, not the embedding
+            # markdown's folder.
+            parent = PurePosixPath(resolved).parent
+            embed_dir = "" if str(parent) in ("", ".") else str(parent)
+            return _render_html_embed(raw, src, embed_dir, config)
         return _embed_error(f"unknown embed type '{embed_type}' (supported: openapi, html)")
 
     return _replace

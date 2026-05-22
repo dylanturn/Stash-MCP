@@ -664,6 +664,153 @@ class TestUIEmbedHTML:
         scope_class = scope_match.group(1)
         assert f'class="embedded-html {scope_class}"' in body
 
+    def test_embed_html_preserves_keyframes(self):
+        """`@keyframes` step lists (`0%`, `from`, `to`) are NOT CSS selectors —
+        they must not be prefixed with `:scope` or the animation breaks."""
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file(
+                "src.html",
+                "<head><style>"
+                "@keyframes fade { 0% { opacity: 0; } 100% { opacity: 1; } }"
+                "@-webkit-keyframes slide { from { left: 0; } to { left: 10px; } }"
+                ".box { animation: fade 1s; }"
+                "</style></head>"
+                "<body><section id=\"a\"><div class=\"box\">hi</div></section></body>",
+            )
+            fs.write_file(
+                "host.md",
+                "```stash-embed\nsrc: /src.html\nselector: \"#a\"\n```\n",
+            )
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs))
+            body = TestClient(app).get("/ui/browse/host.md").text
+
+        # Keyframe step lists pass through unchanged — no `:scope` prefix
+        # injected into `0%`, `100%`, `from`, `to`.
+        assert "0% { opacity: 0; }" in body
+        assert "100% { opacity: 1; }" in body
+        assert "from { left: 0; }" in body
+        assert "to { left: 10px; }" in body
+        assert ":scope 0%" not in body
+        assert ":scope from " not in body
+        assert ":scope to " not in body
+        # The keyframes at-rule prelude itself is also intact.
+        assert "@keyframes fade" in body
+        assert "@-webkit-keyframes slide" in body
+        # Non-keyframe selectors still get scoped.
+        assert ":scope .box" in body
+
+    def test_embed_html_strips_scripts(self):
+        """`<script>` elements and `on*` event handlers from embedded HTML are
+        stripped so they can't execute in the host document's origin (standalone
+        `.html` views run in a sandboxed iframe; embeds inject directly)."""
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file(
+                "src.html",
+                "<body>"
+                "<script>window.pwned = 1;</script>"
+                "<div id=\"a\" onclick=\"alert(1)\" onmouseover=\"x()\">"
+                "<a href=\"javascript:alert(2)\">bad</a>"
+                "<a href=\"/safe\">good</a>"
+                "</div></body>",
+            )
+            fs.write_file(
+                "host.md",
+                "```stash-embed\nsrc: /src.html\nselector: \"#a\"\n```\n",
+            )
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs))
+            body = TestClient(app).get("/ui/browse/host.md").text
+
+        # Isolate the embed wrapper — the host UI has its own onclick handlers
+        # on sidebar buttons, so we can't assert against the whole page.
+        import re as _re
+        m = _re.search(r'<div class="embedded-html[^"]*">(.*?)</div>', body, _re.DOTALL)
+        assert m, "embedded-html wrapper not found"
+        embed = m.group(1)
+
+        # No <script>, no event handler attrs, no javascript: URL.
+        assert "window.pwned" not in body
+        assert "<script" not in embed
+        assert "onclick" not in embed
+        assert "onmouseover" not in embed
+        assert "javascript:alert" not in embed
+        # But the safe link and surrounding content are kept.
+        assert 'href="/safe"' in embed
+        assert ">good<" in embed
+
+    def test_embed_html_rewrites_relative_urls_to_source_dir(self):
+        """Relative `src`/`href` inside an embedded fragment must resolve
+        relative to the *source HTML's* directory, not the embedding markdown's
+        directory. Otherwise `<img src="images/foo.png">` in `reports/q2.html`
+        embedded from `plans/draft.md` points at `/ui/raw/plans/images/foo.png`."""
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file(
+                "reports/q2.html",
+                "<body><div id=\"a\">"
+                "<img src=\"images/foo.png\">"
+                "<a href=\"sibling.html\">sib</a>"
+                "</div></body>",
+            )
+            fs.write_file(
+                "plans/draft.md",
+                "```stash-embed\nsrc: /reports/q2.html\nselector: \"#a\"\n```\n",
+            )
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs))
+            body = TestClient(app).get("/ui/browse/plans/draft.md").text
+
+        # img src rewritten under reports/, not plans/.
+        assert 'src="/ui/raw/reports/images/foo.png"' in body
+        assert "/ui/raw/plans/images/" not in body
+        # anchor href rewritten under reports/ via /ui/browse/.
+        assert 'href="/ui/browse/reports/sibling.html"' in body
+
+
+class TestUIEmbedOpenAPIYamlOverride:
+    """Edge case: `type: openapi` with a YAML spec under a non-yaml extension."""
+
+    def test_openapi_yaml_under_txt_with_explicit_type(self):
+        """YAML 1.1 parses JSON as a subset, so a single `yaml.safe_load` should
+        handle openapi specs regardless of file extension when the user sets
+        `type: openapi` explicitly."""
+        yaml_spec = (
+            "openapi: 3.0.0\n"
+            "info:\n"
+            "  title: X\n"
+            "  version: '1.0'\n"
+            "paths:\n"
+            "  /things:\n"
+            "    get:\n"
+            "      operationId: listThings\n"
+            "      responses:\n"
+            "        '200':\n"
+            "          description: OK\n"
+        )
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            # Stored under .txt — `_infer_embed_type` would not pick this up
+            # automatically; the user must override with `type: openapi`.
+            fs.write_file("specs/things.txt", yaml_spec)
+            fs.write_file(
+                "plans/use.md",
+                "```stash-embed\n"
+                "src: /specs/things.txt\n"
+                "type: openapi\n"
+                "```\n",
+            )
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs))
+            body = TestClient(app).get("/ui/browse/plans/use.md").text
+
+        # Parsed correctly: operation appears in the embed.
+        assert "Embed error" not in body
+        assert "listThings" in body
+        assert "embedded-openapi" in body
+
 
 class TestUISearch:
     """Tests for sidebar search functionality."""
