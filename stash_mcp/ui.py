@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError as FSFileNotFoundError
-from .filesystem import FileSystem
+from .filesystem import FileSystem, InvalidPathError
 from .mcp_server import MIME_TYPES
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -1014,6 +1014,11 @@ def _make_embed_replacer(filesystem: "FileSystem | None", base_dir: str):
             raw = filesystem.read_file(resolved)
         except (FileNotFoundError, FSFileNotFoundError):
             return _embed_error(f"source not found: {src}")
+        except InvalidPathError:
+            # `..` escapes or absolute paths that resolve outside the content
+            # root reach here. Surface a dedicated message rather than leaking
+            # the raw exception text via the generic handler below.
+            return _embed_error(f"invalid src '{src}': resolves outside content directory")
         except Exception as exc:
             return _embed_error(f"failed to read '{src}': {exc}")
 

@@ -398,6 +398,25 @@ class TestUIEmbed:
         assert "Embed error" in body
         assert "src" in body and "field" in body
 
+    def test_embed_src_escaping_content_root_shows_dedicated_error(self):
+        """A `src` containing `..` segments that escape the content root must
+        produce a clean embed error, not leak the raw `InvalidPathError`
+        message through the generic exception handler."""
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file(
+                "plans/escape.md",
+                "```stash-embed\nsrc: ../../etc/passwd\n```\n",
+            )
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs))
+            body = TestClient(app).get("/ui/browse/plans/escape.md").text
+
+        assert "Embed error" in body
+        assert "outside content directory" in body
+        # The generic handler's phrasing must NOT surface here.
+        assert "failed to read" not in body
+
 
 _SAMPLE_HTML = """<!DOCTYPE html>
 <html>
