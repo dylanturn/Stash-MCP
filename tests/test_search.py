@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from stash_mcp.search import (
+    BM25Store,
     IndexMeta,
     SearchEngine,
     SearchResult,
@@ -14,6 +15,7 @@ from stash_mcp.search import (
     _chunk_text_sliding_window,
     _content_hash,
     _normalize_path,
+    _rrf_fuse,
 )
 
 # --- Mock embedding function (deterministic, no API calls) ---
@@ -1244,3 +1246,280 @@ class TestSearchEngineMMRConfig:
         # No cap when MMR is off — all results may come from the one file.
         assert all(r.file_path == "auth.md" for r in results)
         assert len(results) > 2
+
+
+# --- BM25Store unit tests ---
+
+
+class TestBM25Store:
+    """BM25Store mirrors VectorStore shape and persists to disk."""
+
+    def test_bm25_search_finds_literal_term(self, tmp_path):
+        store = BM25Store(tmp_path / "bm25")
+        store.rebuild([
+            {"file_path": "a.md", "chunk_index": 0,
+             "content": "the transaction manager handles rollback"},
+            {"file_path": "b.md", "chunk_index": 0,
+             "content": "search engine indexes embeddings nightly"},
+        ])
+        results = store.search("transaction", top_n=2)
+        assert results
+        assert results[0][0] == "a.md"
+
+    def test_bm25_empty_query_returns_empty(self, tmp_path):
+        store = BM25Store(tmp_path / "bm25")
+        store.rebuild([
+            {"file_path": "a.md", "chunk_index": 0, "content": "anything"},
+        ])
+        assert store.search("", top_n=5) == []
+
+    def test_bm25_persists_across_instances(self, tmp_path):
+        store_a = BM25Store(tmp_path / "bm25")
+        store_a.rebuild([
+            {"file_path": "a.md", "chunk_index": 0,
+             "content": "authentication and oauth flows"},
+        ])
+        store_a.save()
+        store_b = BM25Store(tmp_path / "bm25")
+        assert store_b.count == 1
+        assert store_b.search("authentication", top_n=1)
+
+    def test_bm25_clear_wipes_disk(self, tmp_path):
+        store = BM25Store(tmp_path / "bm25")
+        store.rebuild([
+            {"file_path": "a.md", "chunk_index": 0, "content": "alpha"},
+        ])
+        store.save()
+        assert (tmp_path / "bm25" / BM25Store.IDS_FILE).exists()
+        store.clear()
+        assert not (tmp_path / "bm25" / BM25Store.IDS_FILE).exists()
+        reloaded = BM25Store(tmp_path / "bm25")
+        assert reloaded.count == 0
+
+    def test_bm25_dirty_flag_resets_on_rebuild(self, tmp_path):
+        store = BM25Store(tmp_path / "bm25")
+        store.mark_dirty()
+        assert store.dirty
+        store.rebuild([
+            {"file_path": "a.md", "chunk_index": 0, "content": "alpha"},
+        ])
+        assert not store.dirty
+
+
+# --- RRF fusion tests ---
+
+
+class TestRRFFuse:
+    """_rrf_fuse combines dense and sparse rankings."""
+
+    def test_rrf_disjoint_lists(self):
+        dense = [{"file_path": "a.md", "chunk_index": 0, "content": "A"}]
+        sparse = [("b.md", 0, 5.0)]
+        fused = _rrf_fuse(dense, sparse, k=60)
+        keys = [(r["file_path"], r["chunk_index"]) for r in fused]
+        assert ("a.md", 0) in keys
+        assert ("b.md", 0) in keys
+        # Both at rank 0 in their lists → identical fused score
+        assert fused[0]["score"] == pytest.approx(fused[1]["score"])
+
+    def test_rrf_overlap_boosts_shared_item(self):
+        """An item ranked in both lists outscores items in only one."""
+        dense = [
+            {"file_path": "shared.md", "chunk_index": 0, "content": "S"},
+            {"file_path": "dense.md", "chunk_index": 0, "content": "D"},
+        ]
+        sparse = [
+            ("shared.md", 0, 9.0),
+            ("sparse.md", 0, 4.0),
+        ]
+        fused = _rrf_fuse(dense, sparse, k=60)
+        # shared appears in both lists at rank 0 → should be #1
+        assert fused[0]["file_path"] == "shared.md"
+        # And it carries the dense metadata (content "S")
+        assert fused[0].get("content") == "S"
+
+    def test_rrf_preserves_dense_metadata_when_present(self):
+        """When an item is in dense, RRF preserves the dense dict's keys."""
+        dense = [{
+            "file_path": "a.md",
+            "chunk_index": 0,
+            "content": "full text",
+            "context": "section header",
+        }]
+        sparse = [("a.md", 0, 3.0)]
+        fused = _rrf_fuse(dense, sparse, k=60)
+        assert fused[0]["context"] == "section header"
+        assert fused[0]["content"] == "full text"
+
+    def test_rrf_sparse_only_returns_stub(self):
+        """Sparse-only items get a minimal stub the caller must hydrate."""
+        fused = _rrf_fuse([], [("only.md", 7, 2.0)], k=60)
+        assert len(fused) == 1
+        assert fused[0]["file_path"] == "only.md"
+        assert fused[0]["chunk_index"] == 7
+        # No 'content' key — caller is expected to look it up
+        assert "content" not in fused[0]
+
+
+# --- Hybrid SearchEngine integration tests ---
+
+
+class TestHybridSearchEngine:
+    """End-to-end hybrid search behavior."""
+
+    @pytest.fixture
+    def hybrid_engine(self, tmp_path):
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        index_dir.mkdir()
+        (content_dir / "auth.md").write_text(
+            "OAuth2 authentication flow and tokens"
+        )
+        (content_dir / "db.md").write_text(
+            "Database transaction handling and rollback"
+        )
+        (content_dir / "search.md").write_text(
+            "Search engine config STASH_SEARCH_CHUNK_SIZE"
+        )
+        return SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            hybrid_enabled=True,
+            mmr_enabled=True,
+        )
+
+    async def test_hybrid_returns_results(self, hybrid_engine):
+        engine = hybrid_engine
+        await engine.build_index(["auth.md", "db.md", "search.md"])
+        results = await engine.search("authentication", max_results=2)
+        assert results
+        assert all(isinstance(r, SearchResult) for r in results)
+
+    async def test_hybrid_finds_literal_token_dense_misses(self, hybrid_engine):
+        """A literal token only the BM25 side knows about still surfaces."""
+        engine = hybrid_engine
+        # mock_embed doesn't know "STASH_SEARCH_CHUNK_SIZE" — but BM25 does.
+        await engine.build_index(["auth.md", "db.md", "search.md"])
+        results = await engine.search(
+            "STASH_SEARCH_CHUNK_SIZE", max_results=3
+        )
+        paths = [r.file_path for r in results]
+        assert "search.md" in paths
+
+    async def test_hybrid_disabled_is_dense_only(self, tmp_path):
+        """hybrid_enabled=False bypasses BM25 entirely."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        index_dir.mkdir()
+        (content_dir / "a.md").write_text("authentication content")
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            hybrid_enabled=False,
+        )
+        await engine.build_index(["a.md"])
+        # BM25 index should never have been built
+        assert engine.bm25_store.count == 0
+        results = await engine.search("authentication", max_results=1)
+        assert results
+
+    async def test_hybrid_dep_missing_at_init_raises(
+        self, tmp_path, monkeypatch
+    ):
+        """Init fails fast when hybrid_enabled but bm25s import fails."""
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *a, **k):
+            if name == "bm25s":
+                raise ImportError("not installed")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        with pytest.raises(RuntimeError, match="bm25s is required"):
+            SearchEngine(
+                content_dir=tmp_path / "c",
+                index_dir=tmp_path / "i",
+                embed_fn=mock_embed,
+                hybrid_enabled=True,
+            )
+
+    async def test_hybrid_lifecycle_remove_keeps_indexes_consistent(
+        self, hybrid_engine
+    ):
+        """Removing a file drops it from both vector and BM25 indexes."""
+        engine = hybrid_engine
+        await engine.build_index(["auth.md", "db.md"])
+        bm25_before = engine.bm25_store.count
+        await engine.remove_file("auth.md")
+        # Both indexes shrink — vector store directly, BM25 via rebuild
+        assert engine.indexed_chunks < bm25_before
+        assert engine.bm25_store.count == engine.indexed_chunks
+        # BM25 should no longer return auth content
+        sparse = engine.bm25_store.search("authentication", top_n=5)
+        paths = [s[0] for s in sparse]
+        assert "auth.md" not in paths
+
+    async def test_hybrid_upgrade_path_rebuilds_bm25_from_vectors(
+        self, tmp_path
+    ):
+        """Pre-existing vectors.pkl without BM25 → BM25 rebuilt on init."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        index_dir.mkdir()
+        (content_dir / "a.md").write_text("authentication content")
+        # First engine: hybrid OFF so BM25 is never built/saved.
+        engine_legacy = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            hybrid_enabled=False,
+        )
+        await engine_legacy.build_index(["a.md"])
+        assert engine_legacy.bm25_store.count == 0  # never built
+
+        # Second engine: hybrid ON, no bm25 index on disk yet → rebuild.
+        engine_hybrid = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            hybrid_enabled=True,
+        )
+        assert engine_hybrid.bm25_store.count == engine_hybrid.indexed_chunks
+        assert engine_hybrid.bm25_store.count > 0
+
+    async def test_hybrid_embedder_change_clears_both_indexes(self, tmp_path):
+        """Changing embedder_model wipes vector AND bm25 indexes."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        index_dir.mkdir()
+        (content_dir / "a.md").write_text("authentication content")
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embedder_model="model-A",
+            embed_fn=mock_embed,
+            hybrid_enabled=True,
+        )
+        await engine.build_index(["a.md"])
+        assert engine.indexed_chunks > 0
+        assert engine.bm25_store.count > 0
+
+        # New engine with different model — both indexes should be cleared.
+        engine2 = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embedder_model="model-B",
+            embed_fn=mock_embed,
+            hybrid_enabled=True,
+        )
+        assert engine2.indexed_chunks == 0
+        assert engine2.bm25_store.count == 0

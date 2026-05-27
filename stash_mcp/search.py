@@ -289,6 +289,101 @@ class VectorStore:
             results.append(result)
         return results
 
+    def mmr_rerank(
+        self,
+        query_embedding: list[float],
+        candidates: list[dict],
+        *,
+        top_n: int,
+        mmr_lambda: float = 0.7,
+        max_per_file: int | None = 2,
+    ) -> list[dict]:
+        """MMR over a pre-selected candidate set (used after hybrid fusion).
+
+        Each candidate dict must carry ``file_path`` and ``chunk_index``;
+        we look the vector up in the store by that key and run the same
+        relevance-vs-diversity MMR loop as ``search_mmr``. Candidates
+        whose vector can't be found are skipped.
+        """
+        if not candidates or self._vectors is None or len(self._vectors) == 0:
+            return []
+        if top_n <= 0:
+            return []
+
+        import numpy as np
+
+        key_to_idx = {
+            (m.get("file_path", ""), int(m.get("chunk_index", 0))): i
+            for i, m in enumerate(self._metadata)
+        }
+
+        cand_vec_idx: list[int] = []
+        cand_meta: list[dict] = []
+        for c in candidates:
+            key = (c.get("file_path", ""), int(c.get("chunk_index", 0)))
+            idx = key_to_idx.get(key)
+            if idx is not None:
+                cand_vec_idx.append(idx)
+                cand_meta.append(c)
+        if not cand_vec_idx:
+            return []
+
+        query = np.array(query_embedding, dtype=np.float32)
+        qn = np.linalg.norm(query)
+        if qn == 0:
+            return []
+        query = query / qn
+
+        norms = np.linalg.norm(self._vectors, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-10)
+        normed = self._vectors / norms
+
+        similarities = normed @ query
+
+        pool = list(range(len(cand_vec_idx)))
+        selected: list[int] = []
+        per_file: dict[str, int] = {}
+
+        while pool and len(selected) < top_n:
+            if not selected:
+                best_pos = 0
+            else:
+                sel_vec = normed[[cand_vec_idx[p] for p in selected]]
+                pool_vec = normed[[cand_vec_idx[p] for p in pool]]
+                cross = pool_vec @ sel_vec.T
+                max_sim = cross.max(axis=1)
+                rel = np.array(
+                    [similarities[cand_vec_idx[p]] for p in pool]
+                )
+                mmr_scores = mmr_lambda * rel - (1 - mmr_lambda) * max_sim
+                best_pos = int(np.argmax(mmr_scores))
+
+            candidate_pos = pool[best_pos]
+            fp = cand_meta[candidate_pos].get("file_path", "")
+            if (
+                max_per_file is not None
+                and per_file.get(fp, 0) >= max_per_file
+            ):
+                pool.pop(best_pos)
+                continue
+            selected.append(candidate_pos)
+            per_file[fp] = per_file.get(fp, 0) + 1
+            pool.pop(best_pos)
+
+        return [cand_meta[p] for p in selected]
+
+    def get_by_key(self, file_path: str, chunk_index: int) -> dict | None:
+        """Return the metadata dict for a (file_path, chunk_index) pair."""
+        target_fp = file_path
+        target_ci = int(chunk_index)
+        for m in self._metadata:
+            if (
+                m.get("file_path", "") == target_fp
+                and int(m.get("chunk_index", 0)) == target_ci
+            ):
+                return m
+        return None
+
     def clear(self) -> None:
         """Remove all vectors and metadata."""
         self._vectors = None
@@ -299,6 +394,193 @@ class VectorStore:
     def count(self) -> int:
         """Number of stored vectors."""
         return len(self._metadata)
+
+
+class BM25Store:
+    """Lightweight BM25 index backed by `bm25s`.
+
+    Indexes the same chunks as VectorStore. The persisted on-disk layout
+    is a directory containing the bm25s scores plus a JSON sidecar
+    mapping the bm25s integer doc IDs back to (file_path, chunk_index)
+    tuples in the SearchEngine's metadata.
+
+    Incremental updates aren't supported by BM25 cleanly — instead we
+    expose a `mark_dirty` flag and the engine rebuilds from
+    `VectorStore._metadata` at every save batch. This trades a small
+    O(n) rebuild cost for much simpler lifecycle code.
+    """
+
+    INDEX_SUBDIR = "bm25_index"
+    IDS_FILE = "chunk_ids.json"
+
+    def __init__(self, store_path: Path):
+        """Initialize the store; load from disk if available.
+
+        Args:
+            store_path: Directory under which the index subdir and ID
+                sidecar live (typically the engine's index_dir).
+        """
+        self.store_path = store_path
+        self._retriever = None
+        self._chunk_ids: list[tuple[str, int]] = []
+        self._dirty = False
+        self._load()
+
+    def _index_dir(self) -> Path:
+        return self.store_path / self.INDEX_SUBDIR
+
+    def _ids_path(self) -> Path:
+        return self.store_path / self.IDS_FILE
+
+    def _load(self) -> None:
+        """Load the persisted BM25 index, or start empty."""
+        index_dir = self._index_dir()
+        ids_path = self._ids_path()
+        if not index_dir.exists() or not ids_path.exists():
+            return
+        try:
+            import bm25s
+            self._retriever = bm25s.BM25.load(str(index_dir), load_corpus=False)
+            with open(ids_path) as f:
+                raw = json.load(f)
+            self._chunk_ids = [(fp, ci) for fp, ci in raw]
+            logger.info(
+                "Loaded BM25 index with %d chunks from %s",
+                len(self._chunk_ids),
+                index_dir,
+            )
+        except Exception as e:
+            logger.warning("Failed to load BM25 index: %s", e)
+            self._retriever = None
+            self._chunk_ids = []
+
+    def rebuild(self, chunks: list[dict]) -> None:
+        """Rebuild the BM25 index from a list of chunk metadata.
+
+        The chunks list is the full VectorStore metadata. Each entry must
+        carry 'content', 'file_path', and 'chunk_index'. Order of chunks
+        defines the integer doc IDs the retriever returns.
+        """
+        try:
+            import bm25s
+        except ImportError as e:
+            raise RuntimeError(
+                "bm25s is required for hybrid search. "
+                "Install with: pip install 'stash-mcp[search-hybrid]'"
+            ) from e
+
+        if not chunks:
+            self._retriever = None
+            self._chunk_ids = []
+            self._dirty = False
+            return
+
+        corpus = [m.get("content", "") for m in chunks]
+        self._chunk_ids = [
+            (m.get("file_path", ""), int(m.get("chunk_index", 0)))
+            for m in chunks
+        ]
+        tokens = bm25s.tokenize(corpus, stopwords="en", show_progress=False)
+        retriever = bm25s.BM25()
+        retriever.index(tokens, show_progress=False)
+        self._retriever = retriever
+        self._dirty = False
+
+    def mark_dirty(self) -> None:
+        self._dirty = True
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    def search(
+        self, query: str, top_n: int = 30
+    ) -> list[tuple[str, int, float]]:
+        """Return (file_path, chunk_index, score) tuples, sorted descending."""
+        if self._retriever is None or not self._chunk_ids:
+            return []
+        try:
+            import bm25s
+        except ImportError:
+            return []
+        if not query.strip():
+            return []
+        query_tokens = bm25s.tokenize([query], stopwords="en", show_progress=False)
+        k = min(top_n, len(self._chunk_ids))
+        if k <= 0:
+            return []
+        results, scores = self._retriever.retrieve(
+            query_tokens, k=k, show_progress=False
+        )
+        out: list[tuple[str, int, float]] = []
+        for doc_id, score in zip(results[0], scores[0]):
+            score = float(score)
+            if score <= 0:
+                continue
+            fp, ci = self._chunk_ids[int(doc_id)]
+            out.append((fp, ci, score))
+        return out
+
+    def save(self) -> None:
+        """Persist the BM25 index and ID sidecar to disk."""
+        self.store_path.mkdir(parents=True, exist_ok=True)
+        if self._retriever is None or not self._chunk_ids:
+            # Empty state — remove any stale on-disk files.
+            ids_path = self._ids_path()
+            if ids_path.exists():
+                ids_path.unlink()
+            index_dir = self._index_dir()
+            if index_dir.exists():
+                import shutil
+                shutil.rmtree(index_dir)
+            return
+        self._retriever.save(str(self._index_dir()), corpus=None)
+        with open(self._ids_path(), "w") as f:
+            json.dump(self._chunk_ids, f)
+
+    async def save_async(self) -> None:
+        await asyncio.to_thread(self.save)
+
+    def clear(self) -> None:
+        self._retriever = None
+        self._chunk_ids = []
+        self._dirty = False
+        self.save()
+
+    @property
+    def count(self) -> int:
+        return len(self._chunk_ids)
+
+
+def _rrf_fuse(
+    dense_results: list[dict],
+    sparse_results: list[tuple[str, int, float]],
+    *,
+    k: int = 60,
+) -> list[dict]:
+    """Combine dense and sparse rankings via Reciprocal Rank Fusion.
+
+    Score per item = sum(1 / (k + rank_in_each_list)). Items appearing
+    in only one list still get a partial score from that list. The
+    returned items carry metadata from the dense side when present;
+    sparse-only items get a stub (file_path, chunk_index, score) that
+    the caller must hydrate before display.
+    """
+    scores: dict[tuple[str, int], float] = {}
+    meta_by_id: dict[tuple[str, int], dict] = {}
+
+    for rank, r in enumerate(dense_results):
+        key = (r.get("file_path", ""), int(r.get("chunk_index", 0)))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        meta_by_id[key] = r
+
+    for rank, (fp, ci, _score) in enumerate(sparse_results):
+        key = (fp, int(ci))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        meta_by_id.setdefault(key, {"file_path": fp, "chunk_index": ci})
+
+    fused = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    return [{**meta_by_id[key], "score": s} for key, s in fused]
 
 
 def _chunk_text_sliding_window(
@@ -477,6 +759,9 @@ class SearchEngine:
         candidate_pool_multiplier: int = 6,
         recency_weight: float = 0.0,
         recency_half_life_days: float = 180.0,
+        hybrid_enabled: bool = False,
+        rrf_k: int = 60,
+        bm25_candidate_pool: int = 30,
     ):
         """Initialize the search engine.
 
@@ -505,6 +790,13 @@ class SearchEngine:
                 (0.0 = ignore recency, 1.0 = recency only). Off by default.
             recency_half_life_days: Days for the recency boost to decay
                 from 1.0 to 0.5. Default 180 (6 months).
+            hybrid_enabled: Run BM25 alongside dense retrieval and fuse
+                via Reciprocal Rank Fusion before MMR. Requires the
+                bm25s dependency. Off by default.
+            rrf_k: RRF smoothing constant. 60 is the standard value
+                from the original paper.
+            bm25_candidate_pool: How many sparse candidates to fetch
+                per query before fusion.
         """
         self.content_dir = content_dir
         self.index_dir = index_dir
@@ -524,6 +816,9 @@ class SearchEngine:
         self.candidate_pool_multiplier = max(1, candidate_pool_multiplier)
         self.recency_weight = recency_weight
         self.recency_half_life_days = recency_half_life_days
+        self.hybrid_enabled = hybrid_enabled
+        self.rrf_k = rrf_k
+        self.bm25_candidate_pool = bm25_candidate_pool
 
         # Validate numpy dependency at init time so we fail fast
         # rather than crashing on first file operation.
@@ -536,19 +831,45 @@ class SearchEngine:
                     "Install with: pip install 'stash-mcp[search]'"
                 )
 
+        # Fail fast if hybrid is on but the sparse backend isn't installed.
+        if self.hybrid_enabled:
+            try:
+                import bm25s  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "bm25s is required for hybrid search. "
+                    "Install with: pip install 'stash-mcp[search-hybrid]'"
+                )
+
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.store = VectorStore(index_dir / "vectors.pkl")
         self.meta = IndexMeta.load(index_dir / "index_meta.json")
+        self.bm25_store = BM25Store(index_dir)
 
-        # If embedder model changed, clear stale index for rebuild
+        # If embedder model changed, clear stale index for rebuild —
+        # the BM25 store must be wiped in the same block so the two
+        # indexes don't drift.
         if self.meta.embedder_model and self.meta.embedder_model != embedder_model:
             logger.warning(
                 f"Embedder model changed from '{self.meta.embedder_model}' "
                 f"to '{embedder_model}'. Clearing stale index for rebuild."
             )
             self.store.clear()
+            self.bm25_store.clear()
             self.meta = IndexMeta()
             self.meta.save(self.index_dir / "index_meta.json")
+
+        # Upgrade path: vectors.pkl exists from a pre-hybrid deployment
+        # but no BM25 index yet — rebuild it now so the first query
+        # doesn't need to wait.
+        if (
+            self.hybrid_enabled
+            and self.store.count > 0
+            and self.bm25_store.count == 0
+        ):
+            logger.info("Building BM25 index from existing vector metadata")
+            self.bm25_store.rebuild(self.store._metadata)
+            self.bm25_store.save()
 
         self._ready = self.store.count > 0
         self._indexing = False
@@ -705,6 +1026,7 @@ class SearchEngine:
                 if files_since_save >= _SAVE_BATCH_SIZE:
                     await self.store.save_async()
                     await self.meta.save_async(self.index_dir / "index_meta.json")
+                    await self._rebuild_bm25_if_dirty()
                     files_since_save = 0
 
                 # Yield to the event loop between files
@@ -714,10 +1036,35 @@ class SearchEngine:
             self.meta.embedder_model = self.embedder_model
             await self.store.save_async()
             await self.meta.save_async(self.index_dir / "index_meta.json")
+            await self._rebuild_bm25_if_dirty()
             self._ready = True
             return total_chunks
         finally:
             self._indexing = False
+
+    async def _rebuild_bm25_if_dirty(self) -> None:
+        """Rebuild and persist the BM25 index from current metadata if dirty.
+
+        No-op unless hybrid retrieval is enabled — the BM25 store may
+        still mark itself dirty (e.g. during indexing), but we avoid the
+        rebuild cost when nothing will query it.
+
+        Holds ``self._lock`` for the whole rebuild + save: serializing
+        against concurrent ``search()`` (which also takes the lock) and
+        against other mutators ensures BM25 is never observed in a
+        partially-swapped state. The metadata list is snapshotted to a
+        local before being passed to the worker thread so the worker
+        doesn't iterate the live ``_metadata`` reference.
+        """
+        if not self.hybrid_enabled or not self.bm25_store.dirty:
+            return
+        async with self._lock:
+            # Re-check dirty: another waiter may have already rebuilt.
+            if not self.bm25_store.dirty:
+                return
+            snapshot = list(self.store._metadata)
+            await asyncio.to_thread(self.bm25_store.rebuild, snapshot)
+            await self.bm25_store.save_async()
 
     async def _index_file_locked(
         self, relative_path: str, *, content: str | None = None
@@ -736,7 +1083,9 @@ class SearchEngine:
         """
         # Remove old chunks for this file
         normalized_path = _normalize_path(relative_path)
-        self.store.remove_by_file(normalized_path)
+        removed = self.store.remove_by_file(normalized_path)
+        if removed:
+            self.bm25_store.mark_dirty()
 
         if content is None:
             full_path = self.content_dir / normalized_path
@@ -777,6 +1126,7 @@ class SearchEngine:
 
         embeddings = await self._embed(texts_to_embed)
         self.store.add(embeddings, metadata_list)
+        self.bm25_store.mark_dirty()
 
         self.meta.file_hashes[normalized_path] = content_h
         self.meta.chunk_counts[normalized_path] = len(chunks)
@@ -802,6 +1152,7 @@ class SearchEngine:
             chunks = await self._index_file_locked(relative_path, content=content)
         await self.store.save_async()
         await self.meta.save_async(self.index_dir / "index_meta.json")
+        await self._rebuild_bm25_if_dirty()
         return chunks
 
     async def remove_file(self, relative_path: str) -> None:
@@ -813,10 +1164,13 @@ class SearchEngine:
         normalized_path = _normalize_path(relative_path)
         async with self._lock:
             removed = self.store.remove_by_file(normalized_path)
+            if removed:
+                self.bm25_store.mark_dirty()
             self.meta.file_hashes.pop(normalized_path, None)
             self.meta.chunk_counts.pop(normalized_path, None)
         await self.store.save_async()
         await self.meta.save_async(self.index_dir / "index_meta.json")
+        await self._rebuild_bm25_if_dirty()
         if removed:
             logger.info(f"Removed {removed} chunks for {normalized_path}")
 
@@ -833,6 +1187,8 @@ class SearchEngine:
         old_normalized = _normalize_path(old_path)
         async with self._lock:
             removed = self.store.remove_by_file(old_normalized)
+            if removed:
+                self.bm25_store.mark_dirty()
             self.meta.file_hashes.pop(old_normalized, None)
             self.meta.chunk_counts.pop(old_normalized, None)
             if removed:
@@ -840,6 +1196,7 @@ class SearchEngine:
             await self._index_file_locked(new_path)
         await self.store.save_async()
         await self.meta.save_async(self.index_dir / "index_meta.json")
+        await self._rebuild_bm25_if_dirty()
 
     async def search(
         self,
@@ -873,7 +1230,40 @@ class SearchEngine:
         fetch_n = candidate_pool * 3 if file_types else candidate_pool
 
         async with self._lock:
-            if self.mmr_enabled:
+            if self.hybrid_enabled and self.bm25_store.count > 0:
+                # Hybrid: run both retrievers, fuse via RRF, then MMR
+                # over the fused candidate set.
+                dense = self.store.search(query_embedding, top_n=fetch_n)
+                sparse = self.bm25_store.search(
+                    query, top_n=self.bm25_candidate_pool
+                )
+                fused = _rrf_fuse(dense, sparse, k=self.rrf_k)
+                # Hydrate sparse-only entries (which lack content/context)
+                # by looking up the full metadata from the vector store.
+                hydrated: list[dict] = []
+                for r in fused:
+                    if r.get("content"):
+                        hydrated.append(r)
+                        continue
+                    meta = self.store.get_by_key(
+                        r.get("file_path", ""), int(r.get("chunk_index", 0))
+                    )
+                    if meta is None:
+                        continue
+                    merged = dict(meta)
+                    merged["score"] = r.get("score", 0.0)
+                    hydrated.append(merged)
+                if self.mmr_enabled:
+                    raw_results = self.store.mmr_rerank(
+                        query_embedding,
+                        hydrated,
+                        top_n=fetch_n,
+                        mmr_lambda=self.mmr_lambda,
+                        max_per_file=self.max_per_file,
+                    )
+                else:
+                    raw_results = hydrated[:fetch_n]
+            elif self.mmr_enabled:
                 raw_results = self.store.search_mmr(
                     query_embedding,
                     top_n=fetch_n,

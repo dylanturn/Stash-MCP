@@ -134,6 +134,9 @@ def _create_search_engine():
             candidate_pool_multiplier=Config.SEARCH_CANDIDATE_POOL_MULTIPLIER,
             recency_weight=Config.SEARCH_RECENCY_WEIGHT,
             recency_half_life_days=Config.SEARCH_RECENCY_HALF_LIFE_DAYS,
+            hybrid_enabled=Config.SEARCH_HYBRID_ENABLED,
+            rrf_k=Config.SEARCH_RRF_K,
+            bm25_candidate_pool=Config.SEARCH_BM25_CANDIDATE_POOL,
         )
         logger.info(
             f"Search engine initialised (model={Config.SEARCH_EMBEDDER_MODEL}, "

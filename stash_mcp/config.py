@@ -87,6 +87,15 @@ class Config:
         os.getenv("STASH_SEARCH_RECENCY_HALF_LIFE_DAYS", "180")
     )
 
+    # Search retrieval — hybrid BM25 + dense via Reciprocal Rank Fusion
+    SEARCH_HYBRID_ENABLED: bool = (
+        os.getenv("STASH_SEARCH_HYBRID_ENABLED", "false").lower() == "true"
+    )
+    SEARCH_RRF_K: int = int(os.getenv("STASH_SEARCH_RRF_K", "60"))
+    SEARCH_BM25_CANDIDATE_POOL: int = int(
+        os.getenv("STASH_SEARCH_BM25_CANDIDATE_POOL", "30")
+    )
+
     # Model cache directory (for HuggingFace/sentence-transformers weights)
     MODEL_CACHE_DIR: Path = Path(
         os.getenv("STASH_MODEL_CACHE_DIR", "/data/models")
