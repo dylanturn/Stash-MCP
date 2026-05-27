@@ -127,7 +127,12 @@ _SEARCHABLE_MIMES: frozenset[str] = frozenset({
 
 
 def _is_searchable(path: str) -> bool:
-    return _get_mime_type(path) in _SEARCHABLE_MIMES
+    # Require a known extension. Falling back through _get_mime_type would
+    # treat unknown suffixes (.pdf, .bin, no extension at all) as
+    # "text/plain" and let them through the allowlist.
+    suffix = PurePosixPath(path).suffix.lower()
+    mime = MIME_TYPES.get(suffix)
+    return mime is not None and mime in _SEARCHABLE_MIMES
 
 
 def _get_description(fs: FileSystem, path: str) -> str:
@@ -847,7 +852,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             try:
                 compiled = re.compile(pattern, flags)
             except re.error as e:
-                raise ValueError(f"Invalid regex: {e}")
+                raise ValueError(f"Invalid regex: {e}") from e
         else:
             compiled = re.compile(re.escape(pattern), flags)
 
@@ -860,7 +865,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 filesystem.list_all_files, path_prefix or ""
             )
         except InvalidPathError as exc:
-            raise ValueError(str(exc))
+            raise ValueError(str(exc)) from exc
 
         matches: list[dict] = []
         files_scanned = 0
@@ -871,10 +876,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 continue
             if types_list and not any(fp.endswith(ext) for ext in types_list):
                 continue
-            try:
-                content = await asyncio.to_thread(filesystem.read_file, fp)
-            except Exception as exc:
-                logger.debug("find_content skipping %s: %s", fp, exc)
+            content = await asyncio.to_thread(filesystem.try_read_text, fp)
+            if content is None:
                 continue
             files_scanned += 1
             lines = content.splitlines()
