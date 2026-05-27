@@ -386,7 +386,15 @@ class VectorStore:
 
         while pool and len(selected) < top_n:
             if not selected:
-                best_pos = 0
+                # Seed with the highest-cosine candidate, not whatever
+                # came first in the caller's pool. In the hybrid path
+                # the input is RRF-ranked, not similarity-ranked, so
+                # picking pool[0] would let RRF order leak into the
+                # MMR seed and skew downstream diversity decisions.
+                rel = np.array(
+                    [similarities[cand_vec_idx[p]] for p in pool]
+                )
+                best_pos = int(np.argmax(rel))
             else:
                 sel_vec = normed[[cand_vec_idx[p] for p in selected]]
                 pool_vec = normed[[cand_vec_idx[p] for p in pool]]

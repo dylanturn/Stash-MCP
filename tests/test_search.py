@@ -1082,6 +1082,35 @@ class TestVectorStoreMMR:
             store = self._store(tmpdir)
             assert store.search_mmr([0.0, 0.0, 0.0], top_n=2) == []
 
+    def test_mmr_rerank_seeds_by_cosine_not_input_order(self):
+        """mmr_rerank's first pick must be the highest-cosine candidate,
+        not whatever the caller put at index 0 of the candidate list.
+
+        Regression guard for the hybrid path, where the input is
+        RRF-ranked rather than similarity-ranked.
+        """
+        with TemporaryDirectory() as tmpdir:
+            store = self._store(tmpdir)
+            # Pass candidates in *reverse* similarity order (c, b, a).
+            # If MMR seeded from input order it would pick c.md first;
+            # the cosine-correct seed is a.md.
+            candidates = [
+                {"file_path": "c.md", "chunk_index": 0,
+                 "content": "C", "score": 999.0},
+                {"file_path": "b.md", "chunk_index": 0,
+                 "content": "B", "score": 100.0},
+                {"file_path": "a.md", "chunk_index": 0,
+                 "content": "A", "score": 1.0},
+            ]
+            picked = store.mmr_rerank(
+                [1.0, 0.0, 0.0],
+                candidates,
+                top_n=1,
+                mmr_lambda=1.0,
+                max_per_file=None,
+            )
+            assert picked[0]["file_path"] == "a.md"
+
 
 # --- SearchEngine recency reranking tests ---
 
