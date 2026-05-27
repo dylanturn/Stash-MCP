@@ -921,7 +921,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         @mcp.tool(
             annotations=ToolAnnotations(
-                title="Search content",
+                title="Search content by meaning",
                 readOnlyHint=True,
                 openWorldHint=False,
             )
@@ -932,6 +932,16 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             file_types: str | None = None,
         ) -> str:
             """Search for content by meaning using semantic similarity.
+
+            Best for conceptual or open-ended queries where the most relevant
+            chunks matter even if the exact wording differs — e.g. "how does
+            the transaction system handle rollback", "what's the indexing
+            strategy for embeddings". Returns the top-k ranked results.
+
+            For literal substring or regex matching with exhaustive results
+            (every file mentioning STASH_FOO, every reference to an old
+            symbol, every occurrence of an error string), use find_content
+            instead — it does not rank and does not cap at top-k.
 
             Args:
                 query: Natural language search query
