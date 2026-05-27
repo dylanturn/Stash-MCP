@@ -128,6 +128,12 @@ def _create_search_engine():
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
             chunk_size=Config.SEARCH_CHUNK_SIZE,
             chunk_overlap=Config.SEARCH_CHUNK_OVERLAP,
+            mmr_enabled=Config.SEARCH_MMR_ENABLED,
+            mmr_lambda=Config.SEARCH_MMR_LAMBDA,
+            max_per_file=Config.SEARCH_MAX_PER_FILE,
+            candidate_pool_multiplier=Config.SEARCH_CANDIDATE_POOL_MULTIPLIER,
+            recency_weight=Config.SEARCH_RECENCY_WEIGHT,
+            recency_half_life_days=Config.SEARCH_RECENCY_HALF_LIFE_DAYS,
         )
         logger.info(
             f"Search engine initialised (model={Config.SEARCH_EMBEDDER_MODEL}, "

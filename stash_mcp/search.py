@@ -202,6 +202,93 @@ class VectorStore:
 
         return results
 
+    def search_mmr(
+        self,
+        query_embedding: list[float],
+        *,
+        top_n: int = 10,
+        candidate_pool: int = 30,
+        mmr_lambda: float = 0.7,
+        max_per_file: int | None = 2,
+    ) -> list[dict]:
+        """Cosine retrieval followed by Maximal Marginal Relevance reranking.
+
+        Pulls ``candidate_pool`` raw chunks by cosine similarity, then
+        greedily picks up to ``top_n`` of them while balancing relevance
+        against diversity. ``mmr_lambda=1.0`` collapses to pure cosine
+        ordering; ``0.0`` ignores relevance and maximises diversity.
+        ``max_per_file`` (if set) hard-caps how many chunks from any one
+        file can land in the final result.
+
+        Returns the same metadata-with-score shape as ``search``.
+        """
+        if self._vectors is None or len(self._vectors) == 0:
+            return []
+        if top_n <= 0 or candidate_pool <= 0:
+            return []
+
+        import numpy as np
+
+        query = np.array(query_embedding, dtype=np.float32)
+        q_norm = np.linalg.norm(query)
+        if q_norm == 0:
+            return []
+        query = query / q_norm
+
+        norms = np.linalg.norm(self._vectors, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-10)
+        normed = self._vectors / norms
+
+        similarities = normed @ query
+        pool_size = min(candidate_pool, len(similarities))
+        # argpartition is O(n) vs argsort's O(n log n); fine either way at
+        # this scale, but argsort makes the post-sort cleaner.
+        pool_indices = np.argsort(similarities)[-pool_size:][::-1]
+
+        # Drop non-positive scores up front — they would never beat any
+        # positive candidate even with the diversity term.
+        pool = [int(i) for i in pool_indices if similarities[int(i)] > 0]
+        if not pool:
+            return []
+
+        selected: list[int] = []
+        per_file: dict[str, int] = {}
+
+        while pool and len(selected) < top_n:
+            if not selected:
+                best = pool[0]
+                best_pos = 0
+            else:
+                # Cosine sim between each remaining candidate and the
+                # already-selected set, using pre-normalised vectors.
+                selected_mat = normed[selected]
+                cand_mat = normed[pool]
+                cross_sim = cand_mat @ selected_mat.T
+                max_sim = cross_sim.max(axis=1)
+                rel = similarities[pool]
+                mmr_scores = mmr_lambda * rel - (1 - mmr_lambda) * max_sim
+                best_pos = int(np.argmax(mmr_scores))
+                best = pool[best_pos]
+
+            file_path = self._metadata[best].get("file_path", "")
+            if (
+                max_per_file is not None
+                and per_file.get(file_path, 0) >= max_per_file
+            ):
+                pool.pop(best_pos)
+                continue
+
+            selected.append(best)
+            per_file[file_path] = per_file.get(file_path, 0) + 1
+            pool.pop(best_pos)
+
+        results = []
+        for idx in selected:
+            result = dict(self._metadata[idx])
+            result["score"] = float(similarities[idx])
+            results.append(result)
+        return results
+
     def clear(self) -> None:
         """Remove all vectors and metadata."""
         self._vectors = None
@@ -384,6 +471,12 @@ class SearchEngine:
         git_backend=None,
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
+        mmr_enabled: bool = True,
+        mmr_lambda: float = 0.7,
+        max_per_file: int = 2,
+        candidate_pool_multiplier: int = 6,
+        recency_weight: float = 0.0,
+        recency_half_life_days: float = 180.0,
     ):
         """Initialize the search engine.
 
@@ -400,6 +493,18 @@ class SearchEngine:
             git_backend: Optional GitBackend instance for blame-enriched results.
             chunk_size: Number of characters per chunk for the sliding window.
             chunk_overlap: Number of characters to overlap between adjacent chunks.
+            mmr_enabled: Apply MMR diversification + per-file cap to the
+                cosine candidate pool before truncating to max_results.
+            mmr_lambda: MMR relevance/diversity balance (1.0 = relevance-only,
+                0.0 = diversity-only). Default 0.7.
+            max_per_file: Hard cap on chunks from a single file in the
+                final result set.
+            candidate_pool_multiplier: How many cosine candidates to fetch
+                per requested result (e.g. 6 means fetch 30 for max_results=5).
+            recency_weight: Blend factor for the git-blame recency boost
+                (0.0 = ignore recency, 1.0 = recency only). Off by default.
+            recency_half_life_days: Days for the recency boost to decay
+                from 1.0 to 0.5. Default 180 (6 months).
         """
         self.content_dir = content_dir
         self.index_dir = index_dir
@@ -413,6 +518,12 @@ class SearchEngine:
         self._git_backend = git_backend
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.mmr_enabled = mmr_enabled
+        self.mmr_lambda = mmr_lambda
+        self.max_per_file = max_per_file
+        self.candidate_pool_multiplier = max(1, candidate_pool_multiplier)
+        self.recency_weight = recency_weight
+        self.recency_half_life_days = recency_half_life_days
 
         # Validate numpy dependency at init time so we fail fast
         # rather than crashing on first file operation.
@@ -752,18 +863,72 @@ class SearchEngine:
 
         query_embedding = await self._embed_query(query)
 
-        # Get more results than needed so we can filter
-        fetch_n = max_results * 3 if file_types else max_results
+        # Fetch a larger candidate pool so MMR + per-file cap + file_types
+        # filter have room to work. file_types over-fetches further since
+        # the filter happens post-retrieval.
+        candidate_pool = max(
+            max_results * self.candidate_pool_multiplier,
+            max_results,
+        )
+        fetch_n = candidate_pool * 3 if file_types else candidate_pool
+
         async with self._lock:
-            raw_results = self.store.search(query_embedding, top_n=fetch_n)
+            if self.mmr_enabled:
+                raw_results = self.store.search_mmr(
+                    query_embedding,
+                    top_n=fetch_n,
+                    candidate_pool=fetch_n,
+                    mmr_lambda=self.mmr_lambda,
+                    max_per_file=self.max_per_file,
+                )
+            else:
+                raw_results = self.store.search(query_embedding, top_n=fetch_n)
+
+        if file_types:
+            raw_results = [
+                r
+                for r in raw_results
+                if any(r.get("file_path", "").endswith(ext) for ext in file_types)
+            ]
+
+        # Blame is needed up-front only when recency reranking is on
+        # (it needs every candidate's timestamp before truncation). When
+        # recency is off, defer the fetch until after truncation so we
+        # only pay for the files that actually make it into the result.
+        blame_cache: dict[str, list] = {}
+        recency_enabled = (
+            self.recency_weight > 0
+            and self._git_backend is not None
+            and raw_results
+        )
+        if recency_enabled:
+            unique_paths = list({
+                r.get("file_path", "")
+                for r in raw_results
+                if r.get("file_path")
+            })
+            blame_cache = await self._fetch_blame_batch(unique_paths)
+
+            reranked = []
+            for r in raw_results:
+                semantic = float(r.get("score", 0.0))
+                ts = self._most_recent_timestamp(
+                    blame_cache.get(r.get("file_path", ""), [])
+                )
+                recency = self._recency_boost(ts)
+                final = (
+                    semantic * (1 - self.recency_weight)
+                    + recency * self.recency_weight
+                )
+                rr = dict(r)
+                rr["score"] = final
+                reranked.append(rr)
+            reranked.sort(key=lambda d: d.get("score", 0.0), reverse=True)
+            raw_results = reranked
 
         results: list[SearchResult] = []
         for r in raw_results:
             fp = r.get("file_path", "")
-            if file_types:
-                if not any(fp.endswith(ext) for ext in file_types):
-                    continue
-
             results.append(
                 SearchResult(
                     file_path=fp,
@@ -776,27 +941,71 @@ class SearchEngine:
             if len(results) >= max_results:
                 break
 
-        # Lazy blame enrichment: annotate each result when git_backend is set
-        if self._git_backend is not None:
+        if self._git_backend is not None and results:
+            # Backfill blame for any final-result files not already in
+            # the cache (i.e. the recency-off path that skipped the
+            # candidate-pool fetch).
+            missing_paths = list({
+                r.file_path
+                for r in results
+                if r.file_path and r.file_path not in blame_cache
+            })
+            if missing_paths:
+                fetched = await self._fetch_blame_batch(missing_paths)
+                blame_cache.update(fetched)
             for result in results:
-                await self._enrich_with_blame(result)
+                blame_lines = blame_cache.get(result.file_path)
+                if blame_lines:
+                    await self._enrich_with_blame(result, blame_lines)
 
         return results
 
-    async def _enrich_with_blame(self, result: "SearchResult") -> None:
-        """Populate blame fields on *result* using the configured git backend.
+    async def _fetch_blame_batch(
+        self, file_paths: list[str]
+    ) -> dict[str, list]:
+        """Fetch blame for many files in parallel, returning {path: lines}."""
 
-        Uses the chunk's text content to locate its approximate line range,
-        then picks the most recently changed line's metadata.
+        async def _one(path: str) -> tuple[str, list]:
+            try:
+                lines = await asyncio.to_thread(self._git_backend.blame, path)
+            except Exception as e:
+                logger.debug("blame fetch failed for %s: %s", path, e)
+                return path, []
+            return path, lines or []
+
+        pairs = await asyncio.gather(*(_one(p) for p in file_paths))
+        return dict(pairs)
+
+    @staticmethod
+    def _most_recent_timestamp(blame_lines: list):
+        """Return the most recent timestamp in a blame line list, or None."""
+        if not blame_lines:
+            return None
+        return max(bl.timestamp for bl in blame_lines)
+
+    def _recency_boost(self, last_changed_at) -> float:
+        """Exponential-decay boost in [0, 1]. Files without history → 0.5."""
+        if last_changed_at is None:
+            return 0.5
+        from datetime import datetime, timezone
+        import math
+
+        ts = last_changed_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - ts).days
+        if self.recency_half_life_days <= 0:
+            return 1.0 if age_days <= 0 else 0.0
+        return math.exp(-math.log(2) * max(age_days, 0) / self.recency_half_life_days)
+
+    async def _enrich_with_blame(
+        self, result: "SearchResult", blame_lines: list
+    ) -> None:
+        """Populate blame fields on *result* from a pre-fetched blame list.
+
+        Scopes blame to the chunk's line range when possible, then takes
+        the most recent line in that range.
         """
-        try:
-            blame_lines = await asyncio.to_thread(
-                self._git_backend.blame, result.file_path
-            )
-        except Exception as e:
-            logger.debug("blame enrichment failed for %s: %s", result.file_path, e)
-            return
-
         if not blame_lines:
             return
 
