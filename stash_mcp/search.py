@@ -76,7 +76,28 @@ class VectorStore:
         self.store_path = store_path
         self._vectors = None  # np.ndarray | None, shape: (n, dim)
         self._metadata: list[dict] = []
+        # Lazy cache: (file_path, chunk_index) → metadata dict.
+        # Built on first access, invalidated on any mutation.
+        self._meta_index_cache: dict[tuple[str, int], dict] | None = None
         self._load()
+
+    def _invalidate_meta_index(self) -> None:
+        self._meta_index_cache = None
+
+    @property
+    def metadata_index(self) -> dict[tuple[str, int], dict]:
+        """Return a (file_path, chunk_index) → metadata dict, cached.
+
+        Cached across queries between mutations; invalidated by ``add``,
+        ``remove_by_file``, and ``clear``. Callers must treat the
+        returned dict as read-only.
+        """
+        if self._meta_index_cache is None:
+            self._meta_index_cache = {
+                (m.get("file_path", ""), int(m.get("chunk_index", 0))): m
+                for m in self._metadata
+            }
+        return self._meta_index_cache
 
     def _load(self) -> None:
         """Load vectors and metadata from disk if available."""
@@ -125,6 +146,7 @@ class VectorStore:
         else:
             self._vectors = np.vstack([self._vectors, new_vectors])
         self._metadata.extend(metadata)
+        self._invalidate_meta_index()
 
     def remove_by_file(self, file_path: str) -> int:
         """Remove all vectors belonging to a file.
@@ -156,6 +178,7 @@ class VectorStore:
         else:
             self._vectors = None
             self._metadata = []
+        self._invalidate_meta_index()
 
         return removed
 
@@ -370,12 +393,23 @@ class VectorStore:
             per_file[fp] = per_file.get(fp, 0) + 1
             pool.pop(best_pos)
 
-        return [cand_meta[p] for p in selected]
+        # Overwrite score with cosine similarity to the query so the
+        # returned items carry a consistent, interpretable relevance
+        # signal (matching VectorStore.search_mmr's behaviour). This
+        # is especially important in the hybrid path, where the input
+        # `score` was the RRF fused score — not the cosine similarity.
+        out: list[dict] = []
+        for p in selected:
+            item = dict(cand_meta[p])
+            item["score"] = float(similarities[cand_vec_idx[p]])
+            out.append(item)
+        return out
 
     def clear(self) -> None:
         """Remove all vectors and metadata."""
         self._vectors = None
         self._metadata = []
+        self._invalidate_meta_index()
         self.save()
 
     @property
@@ -1218,9 +1252,16 @@ class SearchEngine:
         fetch_n = candidate_pool * 3 if file_types else candidate_pool
 
         async with self._lock:
-            if self.hybrid_enabled and self.bm25_store.count > 0:
+            if (
+                self.hybrid_enabled
+                and self.bm25_store.count > 0
+                and not self.bm25_store.dirty
+            ):
                 # Hybrid: run both retrievers, fuse via RRF, then MMR
-                # over the fused candidate set.
+                # over the fused candidate set. We skip BM25 (and fall
+                # back to dense-only below) when the BM25 index is
+                # dirty — fusing fresh dense results with a stale
+                # sparse index would produce inconsistent rankings.
                 dense = self.store.search(query_embedding, top_n=fetch_n)
                 sparse = self.bm25_store.search(
                     query, top_n=self.bm25_candidate_pool
@@ -1228,12 +1269,10 @@ class SearchEngine:
                 fused = _rrf_fuse(dense, sparse, k=self.rrf_k)
                 # Hydrate sparse-only entries (which lack content/context)
                 # by looking up the full metadata from the vector store.
-                # Build the (file_path, chunk_index) → metadata map once
-                # rather than scanning _metadata per candidate.
-                meta_lookup = {
-                    (m.get("file_path", ""), int(m.get("chunk_index", 0))): m
-                    for m in self.store._metadata
-                }
+                # VectorStore.metadata_index is cached across queries and
+                # only rebuilt on mutations, so the lookup is O(1) per
+                # candidate without paying O(N) on every search.
+                meta_lookup = self.store.metadata_index
                 hydrated: list[dict] = []
                 for r in fused:
                     if r.get("content"):
