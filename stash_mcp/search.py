@@ -1048,13 +1048,23 @@ class SearchEngine:
         No-op unless hybrid retrieval is enabled — the BM25 store may
         still mark itself dirty (e.g. during indexing), but we avoid the
         rebuild cost when nothing will query it.
+
+        Holds ``self._lock`` for the whole rebuild + save: serializing
+        against concurrent ``search()`` (which also takes the lock) and
+        against other mutators ensures BM25 is never observed in a
+        partially-swapped state. The metadata list is snapshotted to a
+        local before being passed to the worker thread so the worker
+        doesn't iterate the live ``_metadata`` reference.
         """
         if not self.hybrid_enabled or not self.bm25_store.dirty:
             return
-        await asyncio.to_thread(
-            self.bm25_store.rebuild, self.store._metadata
-        )
-        await self.bm25_store.save_async()
+        async with self._lock:
+            # Re-check dirty: another waiter may have already rebuilt.
+            if not self.bm25_store.dirty:
+                return
+            snapshot = list(self.store._metadata)
+            await asyncio.to_thread(self.bm25_store.rebuild, snapshot)
+            await self.bm25_store.save_async()
 
     async def _index_file_locked(
         self, relative_path: str, *, content: str | None = None
