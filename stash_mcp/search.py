@@ -891,21 +891,24 @@ class SearchEngine:
                 if any(r.get("file_path", "").endswith(ext) for ext in file_types)
             ]
 
-        # Fetch blame once per unique file (in parallel) when either
-        # recency reranking or display enrichment will need it.
+        # Blame is needed up-front only when recency reranking is on
+        # (it needs every candidate's timestamp before truncation). When
+        # recency is off, defer the fetch until after truncation so we
+        # only pay for the files that actually make it into the result.
         blame_cache: dict[str, list] = {}
-        need_blame = self._git_backend is not None and raw_results
-        if need_blame:
-            unique_paths = list({r.get("file_path", "") for r in raw_results if r.get("file_path")})
-            blame_cache = await self._fetch_blame_batch(unique_paths)
-
-        # Recency reranking: blend in an exponential-decay boost based
-        # on the freshest blame timestamp for each file. Off by default.
-        if (
+        recency_enabled = (
             self.recency_weight > 0
             and self._git_backend is not None
             and raw_results
-        ):
+        )
+        if recency_enabled:
+            unique_paths = list({
+                r.get("file_path", "")
+                for r in raw_results
+                if r.get("file_path")
+            })
+            blame_cache = await self._fetch_blame_batch(unique_paths)
+
             reranked = []
             for r in raw_results:
                 semantic = float(r.get("score", 0.0))
@@ -938,7 +941,18 @@ class SearchEngine:
             if len(results) >= max_results:
                 break
 
-        if self._git_backend is not None:
+        if self._git_backend is not None and results:
+            # Backfill blame for any final-result files not already in
+            # the cache (i.e. the recency-off path that skipped the
+            # candidate-pool fetch).
+            missing_paths = list({
+                r.file_path
+                for r in results
+                if r.file_path and r.file_path not in blame_cache
+            })
+            if missing_paths:
+                fetched = await self._fetch_blame_batch(missing_paths)
+                blame_cache.update(fetched)
             for result in results:
                 blame_lines = blame_cache.get(result.file_path)
                 if blame_lines:
