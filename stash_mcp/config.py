@@ -64,6 +64,11 @@ class Config:
     SEARCH_CHUNK_SIZE: int = int(os.getenv("STASH_SEARCH_CHUNK_SIZE", "1000"))
     SEARCH_CHUNK_OVERLAP: int = int(os.getenv("STASH_SEARCH_CHUNK_OVERLAP", "100"))
 
+    # Find tool settings
+    FIND_MAX_RESULTS_CEILING: int = int(
+        os.getenv("STASH_FIND_MAX_RESULTS_CEILING", "500")
+    )
+
     # Model cache directory (for HuggingFace/sentence-transformers weights)
     MODEL_CACHE_DIR: Path = Path(
         os.getenv("STASH_MODEL_CACHE_DIR", "/data/models")
