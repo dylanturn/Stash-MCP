@@ -993,3 +993,254 @@ class TestSearchIndexIntegrity:
 
             results = store.search([0.0, 1.0])
             assert results[0]["file_path"] == "notes.md"
+
+
+# --- MMR + per-file cap tests ---
+
+
+class TestVectorStoreMMR:
+    """search_mmr() reranks the cosine pool for diversity + per-file cap."""
+
+    def _store(self, tmpdir):
+        store = VectorStore(Path(tmpdir) / "vectors.pkl")
+        # vec_a and vec_b nearly identical, vec_c has a small positive
+        # component on the query axis so it survives the >0 filter but
+        # is far away from a/b in the orthogonal direction.
+        store.add(
+            [
+                [1.0, 0.0, 0.0],
+                [0.99, 0.1, 0.0],
+                [0.1, 0.0, 1.0],
+            ],
+            [
+                {"file_path": "a.md", "chunk_index": 0, "content": "A"},
+                {"file_path": "b.md", "chunk_index": 0, "content": "B"},
+                {"file_path": "c.md", "chunk_index": 0, "content": "C"},
+            ],
+        )
+        return store
+
+    def test_mmr_diversifies_vs_pure_cosine(self):
+        """MMR with lambda<1 prefers the diverse vector over the redundant one."""
+        with TemporaryDirectory() as tmpdir:
+            store = self._store(tmpdir)
+            cosine = store.search([1.0, 0.0, 0.0], top_n=2)
+            assert [r["file_path"] for r in cosine] == ["a.md", "b.md"]
+
+            mmr = store.search_mmr(
+                [1.0, 0.0, 0.0], top_n=2, candidate_pool=3, mmr_lambda=0.3
+            )
+            assert [r["file_path"] for r in mmr] == ["a.md", "c.md"]
+
+    def test_mmr_lambda_one_matches_cosine(self):
+        """mmr_lambda=1.0 collapses to pure relevance ordering."""
+        with TemporaryDirectory() as tmpdir:
+            store = self._store(tmpdir)
+            mmr = store.search_mmr(
+                [1.0, 0.0, 0.0],
+                top_n=3,
+                candidate_pool=3,
+                mmr_lambda=1.0,
+                max_per_file=None,
+            )
+            assert [r["file_path"] for r in mmr] == ["a.md", "b.md", "c.md"]
+
+    def test_mmr_enforces_max_per_file(self):
+        """When all chunks come from one file, max_per_file caps the result."""
+        with TemporaryDirectory() as tmpdir:
+            store = VectorStore(Path(tmpdir) / "vectors.pkl")
+            store.add(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.95, 0.05, 0.0],
+                    [0.9, 0.1, 0.0],
+                ],
+                [
+                    {"file_path": "same.md", "chunk_index": i, "content": f"C{i}"}
+                    for i in range(3)
+                ],
+            )
+            mmr = store.search_mmr(
+                [1.0, 0.0, 0.0],
+                top_n=5,
+                candidate_pool=10,
+                mmr_lambda=1.0,
+                max_per_file=2,
+            )
+            assert len(mmr) == 2
+            assert all(r["file_path"] == "same.md" for r in mmr)
+
+    def test_mmr_empty_store_returns_empty(self):
+        with TemporaryDirectory() as tmpdir:
+            store = VectorStore(Path(tmpdir) / "vectors.pkl")
+            assert store.search_mmr([1.0, 0.0, 0.0], top_n=5) == []
+
+    def test_mmr_zero_query_returns_empty(self):
+        with TemporaryDirectory() as tmpdir:
+            store = self._store(tmpdir)
+            assert store.search_mmr([0.0, 0.0, 0.0], top_n=2) == []
+
+
+# --- SearchEngine recency reranking tests ---
+
+
+class TestSearchEngineRecency:
+    """SearchEngine blends a recency boost into the final score when enabled."""
+
+    @pytest.fixture
+    def engine_with_recency(self, tmp_path):
+        """Build a small engine with a fake git_backend serving controlled blame."""
+        from datetime import datetime, timedelta, timezone
+        from stash_mcp.git_backend import BlameLine
+
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        index_dir.mkdir()
+        (content_dir / "fresh.md").write_text("authentication content")
+        (content_dir / "stale.md").write_text("authentication content")
+
+        now = datetime.now(timezone.utc)
+
+        class FakeGit:
+            def blame(self, path):
+                ts = now if path == "fresh.md" else now - timedelta(days=720)
+                return [
+                    BlameLine(
+                        line_number=1,
+                        commit_hash="abc",
+                        author="dev",
+                        timestamp=ts,
+                        summary="msg",
+                        content="authentication content",
+                    )
+                ]
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            git_backend=FakeGit(),
+            mmr_enabled=False,
+            recency_weight=0.0,
+            recency_half_life_days=180.0,
+        )
+        return engine, now
+
+    async def test_recency_off_preserves_semantic_order(self, engine_with_recency):
+        """recency_weight=0 leaves ordering driven by semantic score alone."""
+        engine, _ = engine_with_recency
+        await engine.build_index(["fresh.md", "stale.md"])
+        # Both files have identical content → identical embeddings; the
+        # order is implementation-defined but blame must NOT swap them
+        # when recency is disabled.
+        results = await engine.search("authentication", max_results=2)
+        scores = [r.score for r in results]
+        # Scores equal because content is identical and recency is off.
+        assert scores[0] == pytest.approx(scores[1])
+
+    async def test_recency_on_boosts_fresh_over_stale(self, engine_with_recency):
+        """With recency_weight>0 and equal semantic scores, fresh wins."""
+        engine, _ = engine_with_recency
+        engine.recency_weight = 0.5
+        await engine.build_index(["fresh.md", "stale.md"])
+        results = await engine.search("authentication", max_results=2)
+        assert results[0].file_path == "fresh.md"
+        assert results[0].score > results[1].score
+
+    async def test_recency_neutral_for_unblamed_files(self, tmp_path):
+        """Files the git_backend cannot blame fall back to neutral (0.5) recency."""
+        from stash_mcp.git_backend import BlameLine
+
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        index_dir.mkdir()
+        (content_dir / "tracked.md").write_text("authentication content")
+        (content_dir / "untracked.md").write_text("authentication content")
+
+        class PartialGit:
+            def blame(self, path):
+                if path == "untracked.md":
+                    return []
+                from datetime import datetime, timedelta, timezone
+                return [
+                    BlameLine(
+                        line_number=1,
+                        commit_hash="abc",
+                        author="dev",
+                        # 5 half-lives old → boost ~0.03
+                        timestamp=datetime.now(timezone.utc) - timedelta(days=900),
+                        summary="msg",
+                        content="authentication content",
+                    )
+                ]
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            git_backend=PartialGit(),
+            mmr_enabled=False,
+            recency_weight=0.5,
+            recency_half_life_days=180.0,
+        )
+        await engine.build_index(["tracked.md", "untracked.md"])
+        results = await engine.search("authentication", max_results=2)
+        # Untracked file gets neutral 0.5 recency; tracked file gets a
+        # near-zero recency (very old). Untracked should rank higher.
+        order = [r.file_path for r in results]
+        assert order[0] == "untracked.md"
+
+
+# --- MMR config integration tests ---
+
+
+class TestSearchEngineMMRConfig:
+    """SearchEngine pipeline behaviour with mmr_enabled toggled."""
+
+    async def test_mmr_caps_results_per_file(self, tmp_path):
+        """A single file with many overlapping chunks is capped by max_per_file."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        index_dir.mkdir()
+        # Generate a long file so it produces many overlapping chunks.
+        body = "authentication " * 500
+        (content_dir / "auth.md").write_text(body)
+        (content_dir / "other.md").write_text("authentication once")
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            mmr_enabled=True,
+            max_per_file=2,
+            candidate_pool_multiplier=6,
+        )
+        await engine.build_index(["auth.md", "other.md"])
+        results = await engine.search("authentication", max_results=5)
+        auth_hits = [r for r in results if r.file_path == "auth.md"]
+        assert len(auth_hits) <= 2
+
+    async def test_mmr_disabled_skips_per_file_cap(self, tmp_path):
+        """mmr_enabled=False matches the legacy pipeline (no per-file cap)."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        index_dir.mkdir()
+        body = "authentication " * 500
+        (content_dir / "auth.md").write_text(body)
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=index_dir,
+            embed_fn=mock_embed,
+            mmr_enabled=False,
+            max_per_file=2,
+        )
+        await engine.build_index(["auth.md"])
+        results = await engine.search("authentication", max_results=5)
+        # No cap when MMR is off — all results may come from the one file.
+        assert all(r.file_path == "auth.md" for r in results)
+        assert len(results) > 2
