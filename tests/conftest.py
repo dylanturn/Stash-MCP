@@ -30,5 +30,12 @@ def _isolate_config_state():
     yield
     if _config_module.Config is not original_class:
         _config_module.Config = original_class
+    # Delete any uppercase attrs a test added (not in snapshot) before
+    # restoring the originals, so the class never carries extra state.
+    current_upper = {
+        name for name in vars(original_class) if name.isupper()
+    }
+    for name in current_upper - snapshot.keys():
+        delattr(original_class, name)
     for name, value in snapshot.items():
         setattr(original_class, name, value)

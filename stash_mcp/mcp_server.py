@@ -123,6 +123,8 @@ _SEARCHABLE_MIMES: frozenset[str] = frozenset({
     "text/x-rst",
     "text/x-mermaid",
     "text/x-gantt",
+    # SVG is XML text — may legitimately contain searchable strings.
+    "image/svg+xml",
 })
 
 

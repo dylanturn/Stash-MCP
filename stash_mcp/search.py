@@ -372,18 +372,6 @@ class VectorStore:
 
         return [cand_meta[p] for p in selected]
 
-    def get_by_key(self, file_path: str, chunk_index: int) -> dict | None:
-        """Return the metadata dict for a (file_path, chunk_index) pair."""
-        target_fp = file_path
-        target_ci = int(chunk_index)
-        for m in self._metadata:
-            if (
-                m.get("file_path", "") == target_fp
-                and int(m.get("chunk_index", 0)) == target_ci
-            ):
-                return m
-        return None
-
     def clear(self) -> None:
         """Remove all vectors and metadata."""
         self._vectors = None
@@ -1240,14 +1228,22 @@ class SearchEngine:
                 fused = _rrf_fuse(dense, sparse, k=self.rrf_k)
                 # Hydrate sparse-only entries (which lack content/context)
                 # by looking up the full metadata from the vector store.
+                # Build the (file_path, chunk_index) → metadata map once
+                # rather than scanning _metadata per candidate.
+                meta_lookup = {
+                    (m.get("file_path", ""), int(m.get("chunk_index", 0))): m
+                    for m in self.store._metadata
+                }
                 hydrated: list[dict] = []
                 for r in fused:
                     if r.get("content"):
                         hydrated.append(r)
                         continue
-                    meta = self.store.get_by_key(
-                        r.get("file_path", ""), int(r.get("chunk_index", 0))
+                    key = (
+                        r.get("file_path", ""),
+                        int(r.get("chunk_index", 0)),
                     )
+                    meta = meta_lookup.get(key)
                     if meta is None:
                         continue
                     merged = dict(meta)
@@ -1299,9 +1295,24 @@ class SearchEngine:
             })
             blame_cache = await self._fetch_blame_batch(unique_paths)
 
+            # Min-max normalize the candidate scores into [0, 1] before
+            # blending with the recency boost (which is already in that
+            # range). Without this, the dense path's cosine scores (~0–1)
+            # and the hybrid path's RRF scores (~0.01–0.05) would blend
+            # very differently against the same recency weight, letting
+            # recency disproportionately dominate the fused-score path.
+            scores = [float(r.get("score", 0.0)) for r in raw_results]
+            smin, smax = min(scores), max(scores)
+            span = smax - smin
+
+            def _normalize(s: float) -> float:
+                if span <= 0:
+                    return 0.5  # all equal — treat semantic as neutral
+                return (s - smin) / span
+
             reranked = []
             for r in raw_results:
-                semantic = float(r.get("score", 0.0))
+                semantic = _normalize(float(r.get("score", 0.0)))
                 ts = self._most_recent_timestamp(
                     blame_cache.get(r.get("file_path", ""), [])
                 )
