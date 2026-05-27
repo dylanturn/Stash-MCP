@@ -415,7 +415,7 @@ class TestMCPTransactionTools:
     async def test_transaction_tools_registered(self):
         with TemporaryDirectory() as tmpdir:
             mcp, tm, fs = self._make_mcp(Path(tmpdir))
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "start_content_transaction" in tool_names
             assert "commit_content_transaction" in tool_names
             assert "abort_content_transaction" in tool_names
@@ -532,7 +532,7 @@ class TestModeMatrix:
             git = GitBackend(Path(tmpdir))
             with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
                 mcp = create_mcp_server(fs, git_backend=git)
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "start_content_transaction" not in tool_names
             assert "commit_content_transaction" not in tool_names
             assert "abort_content_transaction" not in tool_names
@@ -546,7 +546,7 @@ class TestModeMatrix:
             with patch("stash_mcp.mcp_server.Config.READ_ONLY", False):
                 # No git_backend passed → no transaction tools
                 mcp = create_mcp_server(fs, git_backend=None)
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "start_content_transaction" not in tool_names
 
     @pytest.mark.asyncio
@@ -562,7 +562,7 @@ class TestModeMatrix:
             with patch("stash_mcp.mcp_server.Config.READ_ONLY", False):
                 # filesystem is a plain FileSystem (not TransactionManager)
                 mcp = create_mcp_server(fs, git_backend=git)
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "start_content_transaction" not in tool_names
 
 
@@ -660,7 +660,7 @@ class TestListContentTransactionsTool:
     async def test_tool_registered(self):
         with TemporaryDirectory() as tmpdir:
             mcp, _ = self._make_mcp(Path(tmpdir))
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "list_content_transactions" in tool_names
 
     @pytest.mark.asyncio
@@ -711,5 +711,5 @@ class TestListContentTransactionsTool:
             git = GitBackend(Path(tmpdir))
             with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
                 mcp = create_mcp_server(fs, git_backend=git)
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "list_content_transactions" not in tool_names

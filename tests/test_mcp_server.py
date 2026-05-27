@@ -591,15 +591,13 @@ async def test_move_content_directory_tool_with_readme(mcp_server, temp_fs, mock
     # Register the README.md resource first by creating a fresh server
     from stash_mcp.mcp_server import create_mcp_server
     mcp = create_mcp_server(temp_fs)
-    resources_before = await mcp._list_resources()
-    uris_before = {str(r.uri) for r in resources_before}
+    uris_before = set((await mcp.get_resources()).keys())
     assert "stash://docs/README.md" in uris_before
 
     tool = await mcp.get_tool("move_content_directory")
     await tool.run({"source_path": "docs", "dest_path": "archive/docs"})
 
-    resources_after = await mcp._list_resources()
-    uris_after = {str(r.uri) for r in resources_after}
+    uris_after = set((await mcp.get_resources()).keys())
     assert "stash://docs/README.md" not in uris_after
     assert "stash://archive/docs/README.md" in uris_after
     mock_context.send_resource_list_changed.assert_awaited()
@@ -765,8 +763,7 @@ async def test_move_content_batch_resource_registration(temp_fs, mock_context):
             MoveOperation(source_path="docs/README.md", dest_path="archive/docs/README.md"),
         ],
     })
-    resources = await mcp._list_resources()
-    uris = {str(r.uri) for r in resources}
+    uris = set((await mcp.get_resources()).keys())
     assert "stash://README.md" not in uris
     assert "stash://docs/README.md" not in uris
     assert "stash://archive/README.md" in uris
@@ -1112,8 +1109,7 @@ async def test_read_only_mode_omits_write_tools(temp_fs):
     """Test that write tools are not registered when READ_ONLY=True."""
     with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
         mcp = create_mcp_server(temp_fs)
-        tools = await mcp.list_tools()
-        tool_names = {t.name for t in tools}
+        tool_names = set((await mcp.get_tools()).keys())
         for name in WRITE_TOOL_NAMES:
             assert name not in tool_names, f"Write tool '{name}' should not be in read-only mode"
         for name in READ_TOOL_NAMES:
@@ -1124,8 +1120,7 @@ async def test_default_mode_includes_all_tools(temp_fs):
     """Test that all tools are registered when READ_ONLY=False (default)."""
     with patch("stash_mcp.mcp_server.Config.READ_ONLY", False):
         mcp = create_mcp_server(temp_fs)
-        tools = await mcp.list_tools()
-        tool_names = {t.name for t in tools}
+        tool_names = set((await mcp.get_tools()).keys())
         for name in WRITE_TOOL_NAMES | READ_TOOL_NAMES:
             assert name in tool_names, f"Tool '{name}' should be registered in default mode"
 
