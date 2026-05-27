@@ -104,6 +104,32 @@ def _get_mime_type(path: str) -> str:
     return MIME_TYPES.get(suffix, "text/plain")
 
 
+# Mime types that find_content treats as text-searchable. Anything outside
+# this set (images, binaries) is skipped without attempting to read.
+_SEARCHABLE_MIMES: frozenset[str] = frozenset({
+    "text/markdown",
+    "text/plain",
+    "application/json",
+    "application/x-yaml",
+    "application/xml",
+    "text/html",
+    "text/css",
+    "application/javascript",
+    "application/typescript",
+    "text/x-python",
+    "text/csv",
+    "text/tab-separated-values",
+    "application/toml",
+    "text/x-rst",
+    "text/x-mermaid",
+    "text/x-gantt",
+})
+
+
+def _is_searchable(path: str) -> bool:
+    return _get_mime_type(path) in _SEARCHABLE_MIMES
+
+
 def _get_description(fs: FileSystem, path: str) -> str:
     """Get description for a file from frontmatter or first line."""
     try:
@@ -762,6 +788,124 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     "error": str(exc),
                 })
         return {"results": results}
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Find literal matches in content",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def find_content(
+        pattern: str,
+        is_regex: bool = False,
+        case_sensitive: bool = False,
+        max_results: int = 50,
+        file_types: str | None = None,
+        path_prefix: str | None = None,
+        context_lines: int = 0,
+    ) -> dict:
+        """Find every line matching a literal string or regex.
+
+        Exhaustive enumeration, not ranked retrieval. Use this for
+        completeness queries: every reference to a symbol, every file
+        containing an env var, every match of an error string.
+
+        For conceptual queries ("how does X work"), use search_content.
+
+        Args:
+            pattern: Literal substring (default) or regex (when is_regex=True).
+            is_regex: Treat pattern as a Python regex.
+            case_sensitive: Match case-sensitively. Default false.
+            max_results: Hard cap on total matches returned. Default 50.
+            file_types: Optional comma-separated file extensions
+                (e.g. ".md,.py").
+            path_prefix: Optional path prefix to limit the search
+                (e.g. "docs/" restricts to that subtree).
+            context_lines: Lines of context to include before and after
+                each match. Default 0, max 10.
+        Returns:
+            A dict with 'matches' (list of {file_path, line_number, line,
+            context_before, context_after}), 'truncated' (bool), and
+            'files_scanned' (int).
+        """
+        if not pattern:
+            raise ValueError("pattern must be a non-empty string")
+        if max_results < 1:
+            raise ValueError("max_results must be a positive integer")
+        if max_results > Config.FIND_MAX_RESULTS_CEILING:
+            raise ValueError(
+                f"max_results exceeds ceiling of {Config.FIND_MAX_RESULTS_CEILING}"
+            )
+        if context_lines < 0:
+            raise ValueError("context_lines must be non-negative")
+        if context_lines > 10:
+            raise ValueError("context_lines capped at 10")
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if is_regex:
+            try:
+                compiled = re.compile(pattern, flags)
+            except re.error as e:
+                raise ValueError(f"Invalid regex: {e}")
+        else:
+            compiled = re.compile(re.escape(pattern), flags)
+
+        types_list = None
+        if file_types:
+            types_list = [t.strip() for t in file_types.split(",") if t.strip()]
+
+        try:
+            all_files = await asyncio.to_thread(
+                filesystem.list_all_files, path_prefix or ""
+            )
+        except InvalidPathError as exc:
+            raise ValueError(str(exc))
+
+        matches: list[dict] = []
+        files_scanned = 0
+        truncated = False
+
+        for fp in all_files:
+            if not _is_searchable(fp):
+                continue
+            if types_list and not any(fp.endswith(ext) for ext in types_list):
+                continue
+            try:
+                content = await asyncio.to_thread(filesystem.read_file, fp)
+            except Exception as exc:
+                logger.debug("find_content skipping %s: %s", fp, exc)
+                continue
+            files_scanned += 1
+            lines = content.splitlines()
+            for i, line in enumerate(lines, start=1):
+                if compiled.search(line):
+                    ctx_before = (
+                        lines[max(0, i - 1 - context_lines):i - 1]
+                        if context_lines else []
+                    )
+                    ctx_after = (
+                        lines[i:i + context_lines]
+                        if context_lines else []
+                    )
+                    matches.append({
+                        "file_path": fp,
+                        "line_number": i,
+                        "line": line,
+                        "context_before": ctx_before,
+                        "context_after": ctx_after,
+                    })
+                    if len(matches) >= max_results:
+                        truncated = True
+                        break
+            if truncated:
+                break
+
+        return {
+            "matches": matches,
+            "truncated": truncated,
+            "files_scanned": files_scanned,
+        }
 
     if not Config.READ_ONLY:
 
