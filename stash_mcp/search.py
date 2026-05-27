@@ -76,13 +76,15 @@ class VectorStore:
         self.store_path = store_path
         self._vectors = None  # np.ndarray | None, shape: (n, dim)
         self._metadata: list[dict] = []
-        # Lazy cache: (file_path, chunk_index) → metadata dict.
-        # Built on first access, invalidated on any mutation.
+        # Lazy caches keyed by (file_path, chunk_index). Built on first
+        # access, invalidated together on any mutation.
         self._meta_index_cache: dict[tuple[str, int], dict] | None = None
+        self._pos_index_cache: dict[tuple[str, int], int] | None = None
         self._load()
 
-    def _invalidate_meta_index(self) -> None:
+    def _invalidate_caches(self) -> None:
         self._meta_index_cache = None
+        self._pos_index_cache = None
 
     @property
     def metadata_index(self) -> dict[tuple[str, int], dict]:
@@ -98,6 +100,21 @@ class VectorStore:
                 for m in self._metadata
             }
         return self._meta_index_cache
+
+    @property
+    def vector_index(self) -> dict[tuple[str, int], int]:
+        """Return a (file_path, chunk_index) → position-in-_vectors map.
+
+        Same caching/invalidation contract as ``metadata_index``. Used
+        by MMR reranking to locate each candidate's vector for the
+        diversity term without scanning ``_metadata`` per query.
+        """
+        if self._pos_index_cache is None:
+            self._pos_index_cache = {
+                (m.get("file_path", ""), int(m.get("chunk_index", 0))): i
+                for i, m in enumerate(self._metadata)
+            }
+        return self._pos_index_cache
 
     def _load(self) -> None:
         """Load vectors and metadata from disk if available."""
@@ -146,7 +163,7 @@ class VectorStore:
         else:
             self._vectors = np.vstack([self._vectors, new_vectors])
         self._metadata.extend(metadata)
-        self._invalidate_meta_index()
+        self._invalidate_caches()
 
     def remove_by_file(self, file_path: str) -> int:
         """Remove all vectors belonging to a file.
@@ -178,7 +195,7 @@ class VectorStore:
         else:
             self._vectors = None
             self._metadata = []
-        self._invalidate_meta_index()
+        self._invalidate_caches()
 
         return removed
 
@@ -335,10 +352,10 @@ class VectorStore:
 
         import numpy as np
 
-        key_to_idx = {
-            (m.get("file_path", ""), int(m.get("chunk_index", 0))): i
-            for i, m in enumerate(self._metadata)
-        }
+        # Use VectorStore.vector_index — cached across queries and only
+        # invalidated on mutations — so this loop is O(len(candidates))
+        # rather than O(total_chunks) per call.
+        key_to_idx = self.vector_index
 
         cand_vec_idx: list[int] = []
         cand_meta: list[dict] = []
@@ -409,7 +426,7 @@ class VectorStore:
         """Remove all vectors and metadata."""
         self._vectors = None
         self._metadata = []
-        self._invalidate_meta_index()
+        self._invalidate_caches()
         self.save()
 
     @property
