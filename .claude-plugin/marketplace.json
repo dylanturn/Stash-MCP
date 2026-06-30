@@ -10,7 +10,7 @@
       "name": "stash-mcp",
       "source": "./plugins/stash-mcp",
       "description": "Connect to a Stash-MCP content store with smart workflows, transaction safety, and auto-bootstrapped usage patterns",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "author": {
         "name": "Dylan Turnbull"
       }
