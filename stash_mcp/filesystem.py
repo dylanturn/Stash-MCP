@@ -243,6 +243,27 @@ class FileSystem:
             logger.error(f"Error reading file '{relative_path}': {e}")
             raise FileSystemError(f"Failed to read file: {e}")
 
+    def try_read_text(self, relative_path: str) -> str | None:
+        """Best-effort UTF-8 read for bulk-scan callers.
+
+        Returns the file content on success, or None if the file does not
+        exist, is not a file, is outside the content directory, or fails
+        to decode as UTF-8. Decode/IO failures are logged at debug level
+        only — this is intended for tools like find_content that walk
+        many files and expect occasional skips.
+        """
+        try:
+            full_path = self._resolve_path(relative_path)
+        except InvalidPathError:
+            return None
+        if not full_path.is_file():
+            return None
+        try:
+            return full_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            logger.debug("try_read_text skipping '%s': %s", relative_path, e)
+            return None
+
     def write_file(self, relative_path: str, content: str) -> None:
         """Write content to file.
 

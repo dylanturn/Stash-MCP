@@ -139,6 +139,7 @@ async def test_list_tools(mcp_server):
     assert "move_content_batch" in tool_names
     assert "inspect_content_structure" in tool_names
     assert "inspect_content_structure_batch" in tool_names
+    assert "find_content" in tool_names
 
 
 async def test_create_content_tool(temp_fs, mock_context):
@@ -590,15 +591,13 @@ async def test_move_content_directory_tool_with_readme(mcp_server, temp_fs, mock
     # Register the README.md resource first by creating a fresh server
     from stash_mcp.mcp_server import create_mcp_server
     mcp = create_mcp_server(temp_fs)
-    resources_before = await mcp._list_resources()
-    uris_before = {str(r.uri) for r in resources_before}
+    uris_before = set((await mcp.get_resources()).keys())
     assert "stash://docs/README.md" in uris_before
 
     tool = await mcp.get_tool("move_content_directory")
     await tool.run({"source_path": "docs", "dest_path": "archive/docs"})
 
-    resources_after = await mcp._list_resources()
-    uris_after = {str(r.uri) for r in resources_after}
+    uris_after = set((await mcp.get_resources()).keys())
     assert "stash://docs/README.md" not in uris_after
     assert "stash://archive/docs/README.md" in uris_after
     mock_context.send_resource_list_changed.assert_awaited()
@@ -764,8 +763,7 @@ async def test_move_content_batch_resource_registration(temp_fs, mock_context):
             MoveOperation(source_path="docs/README.md", dest_path="archive/docs/README.md"),
         ],
     })
-    resources = await mcp._list_resources()
-    uris = {str(r.uri) for r in resources}
+    uris = set((await mcp.get_resources()).keys())
     assert "stash://README.md" not in uris
     assert "stash://docs/README.md" not in uris
     assert "stash://archive/README.md" in uris
@@ -1111,8 +1109,7 @@ async def test_read_only_mode_omits_write_tools(temp_fs):
     """Test that write tools are not registered when READ_ONLY=True."""
     with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
         mcp = create_mcp_server(temp_fs)
-        tools = await mcp.list_tools()
-        tool_names = {t.name for t in tools}
+        tool_names = set((await mcp.get_tools()).keys())
         for name in WRITE_TOOL_NAMES:
             assert name not in tool_names, f"Write tool '{name}' should not be in read-only mode"
         for name in READ_TOOL_NAMES:
@@ -1123,8 +1120,7 @@ async def test_default_mode_includes_all_tools(temp_fs):
     """Test that all tools are registered when READ_ONLY=False (default)."""
     with patch("stash_mcp.mcp_server.Config.READ_ONLY", False):
         mcp = create_mcp_server(temp_fs)
-        tools = await mcp.list_tools()
-        tool_names = {t.name for t in tools}
+        tool_names = set((await mcp.get_tools()).keys())
         for name in WRITE_TOOL_NAMES | READ_TOOL_NAMES:
             assert name in tool_names, f"Tool '{name}' should be registered in default mode"
 
@@ -1414,3 +1410,199 @@ async def test_inspect_content_structure_batch_all_missing(temp_fs):
         assert r["title"] is None
         assert r["sections"] is None
         assert r["error"] is not None
+
+
+# --- find_content tests ---
+
+
+def _find_data(result):
+    import json
+    return json.loads(str(result.content[0].text))
+
+
+@pytest.mark.anyio
+async def test_find_content_literal_match(temp_fs):
+    """Literal substring match returns every occurrence."""
+    temp_fs.write_file("a.md", "alpha\nfoo bar\nbaz")
+    temp_fs.write_file("b.md", "foo again\nnope")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(await tool.run({"pattern": "foo"}))
+    paths = sorted((m["file_path"], m["line_number"]) for m in data["matches"])
+    assert paths == [("a.md", 2), ("b.md", 1)]
+    assert data["truncated"] is False
+    assert data["files_scanned"] == 2
+
+
+@pytest.mark.anyio
+async def test_find_content_literal_treats_metacharacters_as_literal(temp_fs):
+    """Regex metacharacters in literal mode are escaped, not interpreted."""
+    temp_fs.write_file("a.md", "value: 1.0\nvalue: 1X0")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(await tool.run({"pattern": "1.0"}))
+    line_nums = [m["line_number"] for m in data["matches"]]
+    assert line_nums == [1]
+
+
+@pytest.mark.anyio
+async def test_find_content_regex_match(temp_fs):
+    """Regex mode interprets metacharacters."""
+    temp_fs.write_file("a.md", "value: 1.0\nvalue: 1X0\nvalue: 1_0")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(await tool.run({"pattern": r"1.0", "is_regex": True}))
+    assert len(data["matches"]) == 3
+
+
+@pytest.mark.anyio
+async def test_find_content_invalid_regex(temp_fs):
+    """Invalid regex raises ValueError."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    with pytest.raises(ValueError, match="Invalid regex"):
+        await tool.run({"pattern": "[unclosed", "is_regex": True})
+
+
+@pytest.mark.anyio
+async def test_find_content_case_insensitive_default(temp_fs):
+    """Default is case-insensitive."""
+    temp_fs.write_file("a.md", "Foo\nFOO\nfoo")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(await tool.run({"pattern": "foo"}))
+    assert len(data["matches"]) == 3
+
+
+@pytest.mark.anyio
+async def test_find_content_case_sensitive(temp_fs):
+    """case_sensitive=True respects case."""
+    temp_fs.write_file("a.md", "Foo\nFOO\nfoo")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(
+        await tool.run({"pattern": "foo", "case_sensitive": True})
+    )
+    line_nums = [m["line_number"] for m in data["matches"]]
+    assert line_nums == [3]
+
+
+@pytest.mark.anyio
+async def test_find_content_file_types_filter(temp_fs):
+    """file_types restricts matches to listed extensions."""
+    temp_fs.write_file("a.md", "needle")
+    temp_fs.write_file("b.py", "needle")
+    temp_fs.write_file("c.json", '"needle"')
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(
+        await tool.run({"pattern": "needle", "file_types": ".md,.py"})
+    )
+    paths = sorted({m["file_path"] for m in data["matches"]})
+    assert paths == ["a.md", "b.py"]
+
+
+@pytest.mark.anyio
+async def test_find_content_path_prefix(temp_fs):
+    """path_prefix restricts the walk to a subtree."""
+    temp_fs.write_file("docs/a.md", "needle")
+    temp_fs.write_file("src/b.md", "needle")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(
+        await tool.run({"pattern": "needle", "path_prefix": "docs"})
+    )
+    paths = [m["file_path"] for m in data["matches"]]
+    assert paths == ["docs/a.md"]
+
+
+@pytest.mark.anyio
+async def test_find_content_context_lines(temp_fs):
+    """context_lines includes surrounding lines."""
+    temp_fs.write_file("a.md", "line1\nline2\nMATCH\nline4\nline5")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(
+        await tool.run({"pattern": "MATCH", "context_lines": 2})
+    )
+    m = data["matches"][0]
+    assert m["context_before"] == ["line1", "line2"]
+    assert m["context_after"] == ["line4", "line5"]
+
+
+@pytest.mark.anyio
+async def test_find_content_max_results_truncates(temp_fs):
+    """max_results caps total matches and sets truncated flag."""
+    temp_fs.write_file("a.md", "hit\n" * 10)
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(
+        await tool.run({"pattern": "hit", "max_results": 3})
+    )
+    assert len(data["matches"]) == 3
+    assert data["truncated"] is True
+
+
+@pytest.mark.anyio
+async def test_find_content_max_results_ceiling(temp_fs):
+    """max_results above ceiling raises ValueError."""
+    from stash_mcp.config import Config
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    with pytest.raises(ValueError, match="exceeds ceiling"):
+        await tool.run(
+            {"pattern": "x", "max_results": Config.FIND_MAX_RESULTS_CEILING + 1}
+        )
+
+
+@pytest.mark.anyio
+async def test_find_content_empty_pattern(temp_fs):
+    """Empty pattern raises ValueError."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    with pytest.raises(ValueError, match="non-empty"):
+        await tool.run({"pattern": ""})
+
+
+@pytest.mark.anyio
+async def test_find_content_context_lines_capped(temp_fs):
+    """context_lines above 10 raises ValueError."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    with pytest.raises(ValueError, match="capped at 10"):
+        await tool.run({"pattern": "x", "context_lines": 11})
+
+
+@pytest.mark.anyio
+async def test_find_content_empty_results(temp_fs):
+    """No matches returns empty list, not an error."""
+    temp_fs.write_file("a.md", "nothing here")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(await tool.run({"pattern": "absent"}))
+    assert data["matches"] == []
+    assert data["truncated"] is False
+    assert data["files_scanned"] == 1
+
+
+@pytest.mark.anyio
+async def test_find_content_skips_binary_files(temp_fs):
+    """Binary files (by MIME) are skipped without errors."""
+    temp_fs.write_file("a.md", "needle")
+    # PNG: not in _SEARCHABLE_MIMES
+    (temp_fs.content_dir / "image.png").write_bytes(b"\x89PNG\r\n\x1a\nneedle")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    data = _find_data(await tool.run({"pattern": "needle"}))
+    paths = [m["file_path"] for m in data["matches"]]
+    assert paths == ["a.md"]
+    assert data["files_scanned"] == 1
+
+
+@pytest.mark.anyio
+async def test_find_content_invalid_path_prefix(temp_fs):
+    """path_prefix that escapes the content root raises ValueError."""
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("find_content")
+    with pytest.raises(ValueError):
+        await tool.run({"pattern": "x", "path_prefix": "../escape"})
