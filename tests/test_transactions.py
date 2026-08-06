@@ -146,13 +146,21 @@ class TestTransactionManagerDelegationCoverage:
         assert not missing, f"TransactionManager is missing delegations for: {missing}"
 
     def test_delegates_every_filesystem_attribute_the_server_uses(self):
-        import re as _re
-        from pathlib import Path as _Path
+        import ast
 
         import stash_mcp.mcp_server as server_mod
 
-        source = _Path(server_mod.__file__).read_text(encoding="utf-8")
-        used = set(_re.findall(r"\bfilesystem\.([A-Za-z_][A-Za-z0-9_]*)", source))
+        # Parse rather than regex-scan so only real attribute accesses on the
+        # injected `filesystem` count — not mentions in comments or docstrings.
+        tree = ast.parse(Path(server_mod.__file__).read_text(encoding="utf-8"))
+        used = {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "filesystem"
+        }
+        assert used, "found no filesystem attribute accesses — is the scan still valid?"
         missing = {name for name in used if not hasattr(TransactionManager, name)}
         assert not missing, (
             f"mcp_server calls filesystem.{{{', '.join(sorted(missing))}}} but "
@@ -485,7 +493,7 @@ class TestMCPTransactionTools:
             try:
                 await tm.start_transaction(str(id(ctx.session)), timeout=30, lock_wait=1)
                 tool = await mcp.get_tool("move_content_batch")
-                with pytest.raises(Exception, match="Destination already exists"):
+                with pytest.raises(ValueError, match="Destination already exists"):
                     await tool.run(
                         {"moves": [{"source_path": "src.md", "dest_path": "taken.md"}]}
                     )
