@@ -126,6 +126,51 @@ class TestGitBackendNewMethods:
 # ---------------------------------------------------------------------------
 
 
+class TestTransactionManagerDelegationCoverage:
+    """TransactionManager wraps FileSystem with an explicit allowlist.
+
+    It has no ``__getattr__`` fallback, so any FileSystem method the MCP
+    server calls but the wrapper forgets to delegate raises
+    ``AttributeError`` at runtime — and only in the configuration that
+    actually installs the wrapper (writes enabled + git backend), which
+    tests using a bare FileSystem never exercise.
+    """
+
+    def test_delegates_every_public_filesystem_method(self):
+        public = {
+            name
+            for name in vars(FileSystem)
+            if not name.startswith("_") and callable(getattr(FileSystem, name))
+        }
+        missing = {name for name in public if not hasattr(TransactionManager, name)}
+        assert not missing, f"TransactionManager is missing delegations for: {missing}"
+
+    def test_delegates_every_filesystem_attribute_the_server_uses(self):
+        import re as _re
+        from pathlib import Path as _Path
+
+        import stash_mcp.mcp_server as server_mod
+
+        source = _Path(server_mod.__file__).read_text(encoding="utf-8")
+        used = set(_re.findall(r"\bfilesystem\.([A-Za-z_][A-Za-z0-9_]*)", source))
+        missing = {name for name in used if not hasattr(TransactionManager, name)}
+        assert not missing, (
+            f"mcp_server calls filesystem.{{{', '.join(sorted(missing))}}} but "
+            "TransactionManager does not delegate it"
+        )
+
+    def test_try_read_text_passes_through(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, _fs = _make_tm(Path(tmpdir))
+            assert tm.try_read_text("README.md") == "# Test\n"
+            assert tm.try_read_text("does-not-exist.md") is None
+
+    def test_resolve_path_passes_through(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, fs = _make_tm(Path(tmpdir))
+            assert tm._resolve_path("README.md") == fs._resolve_path("README.md")
+
+
 class TestTransactionManagerWriteGating:
     @pytest.mark.asyncio
     async def test_write_blocked_without_transaction(self):
@@ -410,6 +455,44 @@ class TestMCPTransactionTools:
         ctx.send_resource_list_changed = AsyncMock()
         token = _current_context.set(ctx)
         return ctx, token
+
+    @pytest.mark.asyncio
+    async def test_find_content_works_through_transaction_manager(self):
+        """find_content reads via try_read_text, which the wrapper must delegate.
+
+        Every other find_content test injects a bare FileSystem, so a missing
+        delegation only surfaces in the wrapped (production) configuration.
+        """
+        import json
+
+        with TemporaryDirectory() as tmpdir:
+            mcp, tm, fs = self._make_mcp(Path(tmpdir))
+            fs.write_file("notes.md", "alpha\nfindme here\nomega")
+            tool = await mcp.get_tool("find_content")
+            data = json.loads(str((await tool.run({"pattern": "findme"})).content[0].text))
+            assert [(m["file_path"], m["line_number"]) for m in data["matches"]] == [
+                ("notes.md", 2)
+            ]
+
+    @pytest.mark.asyncio
+    async def test_move_content_batch_validation_works_through_transaction_manager(self):
+        """move_content_batch resolves destinations via the wrapper's _resolve_path."""
+        with TemporaryDirectory() as tmpdir:
+            mcp, tm, fs = self._make_mcp(Path(tmpdir))
+            fs.write_file("src.md", "body")
+            fs.write_file("taken.md", "body")
+            ctx, token = self._mock_context()
+            try:
+                await tm.start_transaction(str(id(ctx.session)), timeout=30, lock_wait=1)
+                tool = await mcp.get_tool("move_content_batch")
+                with pytest.raises(Exception, match="Destination already exists"):
+                    await tool.run(
+                        {"moves": [{"source_path": "src.md", "dest_path": "taken.md"}]}
+                    )
+            finally:
+                from fastmcp.server.context import _current_context
+
+                _current_context.reset(token)
 
     @pytest.mark.asyncio
     async def test_transaction_tools_registered(self):
