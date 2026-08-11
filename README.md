@@ -191,7 +191,7 @@ content   = await client.read_resource("stash://docs/architecture.md")
 
 ### MCP tools (write)
 
-Agents create, update, move, and delete content through MCP tools:
+Agents create, update, move, and delete content through MCP tools. Modifications are guarded by an optimistic-concurrency check: `read_content` returns the file's SHA-256, which `edit_content`, `overwrite_content`, and `delete_content` require:
 
 ```python
 await client.call_tool("create_content", {
@@ -199,12 +199,18 @@ await client.call_tool("create_content", {
     "content": "# New Document\n\nContent here..."
 })
 
-await client.call_tool("update_content", {
-    "path": "docs/existing-doc.md",
-    "content": "Updated content..."
+result = await client.call_tool("read_content", {"path": "docs/existing-doc.md"})
+
+await client.call_tool("edit_content", {
+    "file_path": "docs/existing-doc.md",
+    "sha": result.data["sha"],
+    "edits": [{"old_string": "old text", "new_string": "new text"}]
 })
 
-await client.call_tool("delete_content", {"path": "docs/old-doc.md"})
+await client.call_tool("delete_content", {
+    "path": "docs/old-doc.md",
+    "sha": "<sha from read_content>"
+})
 ```
 
 With git tracking enabled, three additional read tools are exposed: `log_content`, `diff_content`, and `blame_content`. See [Git Tracking](#git-tracking).
@@ -298,9 +304,9 @@ When `STASH_GIT_TRACKING=true` and `STASH_READ_ONLY=false`, all writes are gated
 
 Workflow:
 
-1. Call `start_content_transaction` — acquires an exclusive write lock and returns a `transaction_id`
-2. Perform any number of `create_content`, `update_content`, `delete_content`, or `move_content` calls — all changes are staged
-3. Call `commit_content_transaction` with the `transaction_id` — commits all staged changes to git and releases the lock
+1. Call `start_content_transaction` — acquires an exclusive write lock and returns a transaction ID
+2. Perform any number of write calls (`create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_directory`, `move_content_batch`) — all changes are staged
+3. Call `commit_content_transaction` with a commit message — commits all staged changes to git and releases the lock
 4. If something goes wrong, call `abort_content_transaction` — rolls back all staged changes and releases the lock
 
 **Concurrency.** Only one transaction can be active at a time. A second agent attempting `start_content_transaction` waits up to `STASH_TRANSACTION_LOCK_WAIT` seconds for the lock. If the active transaction is not committed or aborted within `STASH_TRANSACTION_TIMEOUT` seconds, it is automatically aborted.
