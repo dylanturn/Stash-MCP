@@ -2,129 +2,75 @@
 
 Stash is a persistent content store you have access to via MCP. Use it to save, retrieve, organize, and manage documents and notes that persist across conversations. Think of it as your filesystem — a place to stash working documents, reference material, specs, and anything worth keeping.
 
-## What You Have
+## How It Works
 
-### Resources (Read Path)
+Paths are POSIX-style and relative to the content root, with no leading slash (e.g. `docs/guide.md`). Writing a file creates missing parent directories automatically — there is no separate mkdir step.
 
-Every file in the store is exposed as an MCP resource with a `stash://` URI. Use `resources/list` to discover what's available, and `resources/read` to fetch content.
+Every modification is guarded by an optimistic-concurrency check: `read_content` returns a `sha` (SHA-256 of the file), and `overwrite_content`, `edit_content`, and `delete_content` require that sha. If the file changed since you read it, the call fails with a SHA mismatch — re-read and retry.
 
-URI pattern: `stash://{path}` where path is relative to the content root.
+## Core Tools
 
-Examples:
-- `stash://docs/welcome.md`
-- `stash://notes/meeting-2025-01-15.md`
-- `stash://specs/api-design.yaml`
+### Discover
 
-### Tools (Write Path)
+- **`list_content`** — `path` (default root), `recursive` (default false). Non-recursive entries are names prefixed with 📁 (directory) or 📄 (file); recursive listings are full relative paths.
+- **`inspect_content_structure`** / **`inspect_content_structure_batch`** — heading outline of a markdown file (title, nested sections with line numbers) without reading the full content.
 
-You have 5 tools for managing content:
+### Read
 
-**`create_content`** — Create a new file.
+- **`read_content`** — `path`, optional `max_lines`. Returns `content`, `sha` (of the full file), `truncated`, and `total_lines`.
+- **`read_content_batch`** — up to 10 paths in one call; per-file errors don't fail the batch.
+- Files are also exposed as MCP resources under `stash://{path}`.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `path` | string | yes | File path relative to content root |
-| `content` | string | yes | File content |
+### Write
 
-Creates parent directories automatically. Errors if the file already exists — use `update_content` to modify existing files.
+- **`create_content`** — `path`, `content`. New files only; errors if the file exists.
+- **`edit_content`** — `file_path`, `sha`, `edits` (list of `{old_string, new_string, replace_all}`). Targeted string replacement; preferred for small changes. All edits validate before anything is written.
+- **`overwrite_content`** — `path`, `content`, `sha`. Replaces the entire file.
+- **`edit_content_batch`** — atomic edits across up to 10 files; if any file fails validation, nothing is written.
 
-**`update_content`** — Update an existing file (or create one).
+### Organize
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `path` | string | yes | File path relative to content root |
-| `content` | string | yes | New file content (replaces entire file) |
+- **`move_content`** — `source_path`, `dest_path`. The destination must not already exist; parent directories are created automatically.
+- **`move_content_directory`** — moves a whole directory tree.
+- **`move_content_batch`** — up to 10 moves, validated all-or-nothing.
+- **`delete_content`** — `path`, `sha`. Deletes are permanent.
 
-This is a full replacement, not a patch. Always write the complete file content.
+### Configuration-Dependent Tools
 
-**`delete_content`** — Delete a file.
+Depending on how this server is configured, you may also have:
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `path` | string | yes | File path to delete |
+- **`search_content`** — semantic search returning ranked snippets; follow up with `read_content` for full files.
+- **`log_content`**, **`diff_content`**, **`blame_content`** — git history, diffs, and line-level authorship for any file.
+- **Transaction tools** — when writes are git-tracked, every write requires an active transaction: call `start_content_transaction`, make your changes, then `commit_content_transaction` with a commit message (or `abort_content_transaction` to discard). Write tools will say so in their descriptions if this applies.
 
-Errors if the file doesn't exist.
+If a tool isn't listed in your session, that feature is disabled — and in read-only deployments no write tools are registered at all.
 
-**`move_content`** — Move or rename a file.
+## Typical Workflows
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `source_path` | string | yes | Current file path |
-| `dest_path` | string | yes | New file path |
-
-Creates parent directories at the destination automatically. Errors if the destination already exists.
-
-**`list_content`** — List files and directories.
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `path` | string | no | `""` (root) | Directory to list |
-| `recursive` | boolean | no | `false` | List all files recursively |
-
-Returns directory contents with 📁 and 📄 prefixes for directories and files. With `recursive: true`, returns a flat list of all file paths.
-
-## How to Use It
-
-### Discover what's available
-
-Before reading or writing, check what exists:
+Save something new:
 
 ```
-list_content(path="", recursive=true)
+create_content(path="notes/project-ideas.md", content="# Project Ideas\n\n- CLI dashboard")
 ```
 
-This gives you the full directory tree. Use non-recursive listing to explore one level at a time if the tree is large.
-
-### Read a file
-
-Use the resource URI directly:
+Modify an existing file:
 
 ```
-resources/read → stash://docs/welcome.md
-```
-
-Or for dynamic access, the resource template `stash://{path}` resolves any path.
-
-### Save something new
-
-```
-create_content(
-  path="notes/project-ideas.md",
-  content="# Project Ideas\n\n- Build a CLI dashboard\n- Automate weekly reports"
+read_content(path="notes/project-ideas.md")            → returns sha
+edit_content(
+  file_path="notes/project-ideas.md",
+  sha="<sha from read>",
+  edits=[{"old_string": "- CLI dashboard", "new_string": "- CLI dashboard\n- Monitoring alerts"}],
 )
 ```
 
-### Update an existing file
+Reorganize:
 
 ```
-update_content(
-  path="notes/project-ideas.md",
-  content="# Project Ideas\n\n- Build a CLI dashboard\n- Automate weekly reports\n- Set up monitoring alerts"
-)
+move_content(source_path="notes/project-ideas.md", dest_path="projects/ideas.md")
 ```
 
-### Organize content
-
-```
-move_content(
-  source_path="notes/project-ideas.md",
-  dest_path="projects/ideas.md"
-)
-```
-
-### Clean up
-
-```
-delete_content(path="scratch/temp-notes.md")
-```
-
-## File Organization
-
-Paths use forward slashes and are relative to the content root. There's no leading slash. Directories are created automatically when you write a file — you don't need to create them explicitly.
-
-Supported file types include `.md`, `.txt`, `.json`, `.yaml`, `.yml`, `.xml`, `.html`, `.css`, `.js`, `.ts`, `.py`, `.csv`, `.toml`, `.ini`, `.rst`, `.log`, and more. Any text file works. Markdown is the most common format.
-
-### Suggested Structure
+## Suggested Structure
 
 ```
 docs/           — Long-lived documentation and reference material
@@ -138,22 +84,15 @@ You're not locked into this — organize however makes sense for the user's need
 
 ## Important Behaviors
 
-- **`create_content` will fail if the file exists.** Use `update_content` instead, or check with `list_content` first.
-- **`update_content` replaces the entire file.** Read the file first if you need to make a partial edit, then write back the full content with your changes.
-- **Paths are sandboxed.** You cannot traverse outside the content root. Attempts to use `..` or absolute paths will be rejected.
-- **Hidden files (dotfiles) are excluded** from listings but the filesystem layer skips them automatically.
-- **Content is plain text.** Binary files are not supported. Everything is read and written as UTF-8 strings.
-- **Changes persist immediately.** Files are written directly to disk. There's no staging, commits, or undo — be deliberate with deletions.
+- **`create_content` fails if the file exists.** Use `overwrite_content` or `edit_content` for existing files.
+- **Writes require the current sha.** Always `read_content` first; a SHA mismatch means the file changed under you.
+- **Paths are sandboxed.** You cannot traverse outside the content root; `..` escapes are rejected.
+- **Hidden files (dotfiles) are excluded** from listings.
+- **Content is UTF-8 text.** Binary files are not supported.
+- **Deletes are permanent** — there is no trash. On git-tracked servers, uncommitted transaction changes can be discarded with `abort_content_transaction`, but a committed delete only survives in git history.
 
 ## When to Use Stash
 
-Use Stash when the user asks you to save, remember, or persist something beyond the current conversation. Good candidates include:
-
-- Reference documentation the user wants to maintain
-- Working notes or drafts that evolve over multiple sessions
-- Technical specs, architecture decisions, or design docs
-- Templates, snippets, or reusable content
-- Summaries or digests of research
-- Any content the user explicitly asks you to "stash" or "save"
+Use Stash when the user asks you to save, remember, or persist something beyond the current conversation: reference documentation, working notes or drafts that evolve over sessions, technical specs, templates, research digests, or anything the user explicitly asks you to "stash" or "save."
 
 Don't use Stash for ephemeral responses or one-off answers — just respond normally in conversation for those.

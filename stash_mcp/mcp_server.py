@@ -3,12 +3,14 @@
 import asyncio
 import functools
 import hashlib
+import inspect
 import logging
 import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
+from typing import Annotated
 
 from fastmcp import FastMCP
 from fastmcp.resources import FunctionResource
@@ -20,6 +22,7 @@ from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
 from .metrics import get_metrics
+from .transactions import TransactionError, TransactionManager
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,9 @@ class FileEditOperation(BaseModel):
     """Edits targeting a single file, used by edit_content_batch."""
 
     file_path: str = Field(description="File path relative to content root")
-    sha: str = Field(description="SHA-256 hex digest of the current file content")
+    sha: str = Field(
+        description="SHA-256 hex digest of the file's current full content, from read_content"
+    )
     edits: list[EditOperation] = Field(description="Ordered list of edits to apply")
 
 
@@ -47,7 +52,86 @@ class MoveOperation(BaseModel):
     """A single file move operation."""
 
     source_path: str = Field(description="Current file path relative to content root")
-    dest_path: str = Field(description="New file path relative to content root")
+    dest_path: str = Field(
+        description="New file path relative to content root; must not already exist"
+    )
+
+
+# Shared parameter annotations so every tool's JSON schema carries
+# per-parameter descriptions (clients surface these to agents).
+ContentPath = Annotated[
+    str,
+    Field(description="File path relative to content root (POSIX-style, no leading slash)"),
+]
+FileSha = Annotated[
+    str,
+    Field(
+        description="SHA-256 hex digest of the file's current full content, "
+        "as returned by read_content"
+    ),
+]
+MaxLines = Annotated[
+    int | None,
+    Field(
+        ge=1,
+        description="Maximum number of lines to return from the beginning of the "
+        "file. Omit to return the full content — there is no offset parameter",
+    ),
+]
+
+# Appended to write-tool descriptions when writes are transaction-gated.
+_TXN_NOTE = (
+    "\n\nNote: this server gates writes behind transactions. Call "
+    "start_content_transaction before using this tool, then "
+    "commit_content_transaction to persist the changes."
+)
+
+
+def _build_instructions(
+    *,
+    read_only: bool,
+    search_enabled: bool,
+    git_enabled: bool,
+    transactions_active: bool,
+) -> str:
+    """Assemble the server-level instructions string sent to MCP clients."""
+    parts = [
+        "Stash is a file-backed document store. All paths are POSIX-style and "
+        "relative to the content root, with no leading slash (e.g. 'docs/guide.md'). "
+        "Start with list_content(recursive=true) to discover files."
+    ]
+    if read_only:
+        parts.append(
+            "This server is read-only: content can be listed and read but not modified."
+        )
+    else:
+        parts.append(
+            "Writing a file creates missing parent directories automatically; there "
+            "is no separate mkdir step. To modify a file, call read_content first to "
+            "get its sha, then edit_content (targeted string replacement, preferred "
+            "for small changes) or overwrite_content (full replace). create_content "
+            "is only for files that do not exist yet; delete_content also requires "
+            "the sha."
+        )
+    if transactions_active:
+        parts.append(
+            "Writes are gated behind transactions: call start_content_transaction "
+            "before any create/edit/overwrite/move/delete, make the changes, then "
+            "commit_content_transaction with a commit message to persist them (or "
+            "abort_content_transaction to discard). Idle transactions are "
+            "auto-aborted after a timeout."
+        )
+    if search_enabled:
+        parts.append(
+            "search_content finds content by meaning and returns ranked snippets; "
+            "follow up with read_content to retrieve full files."
+        )
+    if git_enabled:
+        parts.append(
+            "log_content, diff_content, and blame_content expose the git history "
+            "of any file."
+        )
+    return "\n\n".join(parts)
 
 
 # Mime type mapping for common extensions
@@ -153,6 +237,34 @@ def _get_description(fs: FileSystem, path: str) -> str:
         return f"Content file: {path}"
 
 
+def _count_lines(text: str) -> int:
+    """Number of newline-delimited lines in *text* (0 for empty).
+
+    Content read through the filesystem layer is universal-newline
+    translated, so counting "\\n" matches line semantics without
+    materializing a splitlines() list.
+    """
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _truncate_lines(text: str, max_lines: int) -> tuple[str, bool]:
+    """Return the first *max_lines* lines of *text* and whether it was cut.
+
+    Equivalent to joining the first *max_lines* entries of
+    ``text.splitlines(keepends=True)`` but without allocating the list.
+    """
+    pos = -1
+    for _ in range(max_lines):
+        pos = text.find("\n", pos + 1)
+        if pos == -1:
+            return text, False
+    if pos + 1 >= len(text):
+        return text, False
+    return text[: pos + 1], True
+
+
 def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
     """Apply a sequence of string-replacement edits to *content*.
 
@@ -243,10 +355,22 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         """Lifespan handler to inject filesystem into context."""
         yield {"fs": filesystem}
 
+    transactions_active = (
+        not Config.READ_ONLY
+        and git_backend is not None
+        and isinstance(filesystem, TransactionManager)
+    )
+
     mcp = FastMCP(
         name=Config.SERVER_NAME,
         version=Config.SERVER_VERSION,
         lifespan=lifespan,
+        instructions=_build_instructions(
+            read_only=Config.READ_ONLY,
+            search_enabled=search_engine is not None,
+            git_enabled=git_backend is not None,
+            transactions_active=transactions_active,
+        ),
     )
 
     # Wrap mcp.tool() so every registered tool is automatically timed and
@@ -283,6 +407,21 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         return patching_decorator
 
     mcp.tool = _instrumented_tool
+
+    def _write_tool(**tool_kwargs):
+        """mcp.tool wrapper for mutating tools.
+
+        When writes are transaction-gated, appends a note to the tool
+        description so agents learn the requirement up front instead of
+        from a failed first call.
+        """
+
+        def decorate(fn):
+            if transactions_active:
+                fn.__doc__ = inspect.cleandoc(fn.__doc__ or "") + _TXN_NOTE
+            return mcp.tool(**tool_kwargs)(fn)
+
+        return decorate
 
     # --- Resources ---
 
@@ -359,7 +498,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     if not Config.READ_ONLY:
 
-        @mcp.tool(
+        @_write_tool(
             annotations=ToolAnnotations(
                 title="Create file",
                 readOnlyHint=False,
@@ -368,12 +507,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def create_content(
-            path: str,
-            content: str,
+            path: ContentPath,
+            content: Annotated[str, Field(description="File content (UTF-8 text)")],
             ctx: Context,
         ) -> str:
             """
-            Create a new file. Errors if file already exists.
+            Create a new file. Errors if the file already exists.
+
+            Missing parent directories are created automatically — writing a
+            file is also the only way to create a directory.
 
             Args:
                 path: File path relative to content root
@@ -381,7 +523,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             """
             if filesystem.file_exists(path):
                 raise ValueError(
-                    f"File already exists: {path}. Use update_content to modify existing files."
+                    f"File already exists: {path}. Use overwrite_content to replace "
+                    "it or edit_content for targeted edits."
                 )
             filesystem.write_file(path, content)
             if _register_resource(path):
@@ -390,7 +533,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             logger.info(f"Created: {path}")
             return f"Created: {path}"
 
-        @mcp.tool(
+        @_write_tool(
             annotations=ToolAnnotations(
                 title="Overwrite file content",
                 readOnlyHint=False,
@@ -400,13 +543,19 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def overwrite_content(
-            path: str,
-            content: str,
-            sha: str,
+            path: ContentPath,
+            content: Annotated[
+                str, Field(description="New full file content (replaces everything)")
+            ],
+            sha: FileSha,
             ctx: Context,
         ) -> str:
             """
-            Replace the content of an existing file.
+            Replace the full content of an existing file.
+
+            The file must already exist (use create_content for new files).
+            For small changes prefer edit_content, which replaces exact
+            strings instead of the whole file.
 
             Args:
                 path: File path relative to content root
@@ -433,7 +582,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             logger.info(f"Updated: {path}")
             return f"Updated: {path}"
 
-        @mcp.tool(
+        @_write_tool(
             annotations=ToolAnnotations(
                 title="Edit file",
                 readOnlyHint=False,
@@ -443,16 +592,21 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def edit_content(
-            file_path: str,
-            sha: str,
-            edits: list[EditOperation],
+            file_path: ContentPath,
+            sha: FileSha,
+            edits: Annotated[
+                list[EditOperation],
+                Field(min_length=1, description="Ordered list of edits to apply"),
+            ],
             ctx: Context,
         ) -> dict:
             """
             Apply targeted string-replacement edits to an existing file.
 
             Each edit replaces an exact occurrence of old_string with new_string.
-            Edits are applied sequentially — later edits see the result of earlier ones.
+            Edits are applied sequentially — later edits see the result of earlier
+            ones. All edits are validated in memory and the file is written once;
+            if any edit fails, nothing is written.
 
             Args:
                 file_path: File path relative to content root
@@ -478,7 +632,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             new_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
             return {"path": file_path, "result": "ok", "new_sha": new_sha}
 
-        @mcp.tool(
+        @_write_tool(
             annotations=ToolAnnotations(
                 title="Edit multiple files",
                 readOnlyHint=False,
@@ -488,20 +642,33 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def edit_content_batch(
-            edit_operations: list[FileEditOperation],
+            edit_operations: Annotated[
+                list[FileEditOperation],
+                Field(
+                    min_length=1,
+                    max_length=10,
+                    description="Per-file edit operations (max 10 files, no duplicates)",
+                ),
+            ],
             ctx: Context,
         ) -> dict:
             """
-            Atomically apply edits to multiple files.
+            Atomically apply edits to multiple files (max 10 per call).
 
             All validations run before any writes — if any file fails validation
             the entire operation is aborted and no files are modified.
 
             Args:
-                edit_operations: List of per-file edit operations
+                edit_operations: List of per-file edit operations (max 10)
             Returns:
                 A dict with a results list containing path, result status, and new_sha per file
             """
+            if len(edit_operations) == 0:
+                raise ValueError("At least one edit operation is required.")
+            if len(edit_operations) > 10:
+                raise ValueError(
+                    f"Maximum 10 files per batch edit. Got {len(edit_operations)}."
+                )
             # Reject duplicate file paths
             paths = [op.file_path for op in edit_operations]
             if len(paths) != len(set(paths)):
@@ -538,7 +705,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
             return {"results": results}
 
-        @mcp.tool(
+        @_write_tool(
             annotations=ToolAnnotations(
                 title="Delete file",
                 readOnlyHint=False,
@@ -547,8 +714,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def delete_content(
-            path: str,
-            sha: str,
+            path: ContentPath,
+            sha: FileSha,
             ctx: Context,
         ) -> str:
             """
@@ -584,32 +751,39 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         )
     )
     async def read_content(
-        path: str,
-        max_lines: int | None = None,
+        path: ContentPath,
+        max_lines: MaxLines = None,
     ) -> dict:
         """
         Read and return the contents of a file along with its SHA-256 hash.
-        The SHA will be required for update and delete operations to ensure the file has not changed since it was read.
+        The sha is required by overwrite_content, edit_content, and
+        delete_content to ensure the file has not changed since it was read.
 
         Args:
             path: File path relative to content root
             max_lines: Optional maximum number of lines to return from the
                 beginning of the file. If omitted, returns the full file.
+                There is no offset parameter — to read past the truncation
+                point, call again without max_lines.
         Returns:
             A dict with 'content' (file text), 'sha' (SHA-256 hex digest of
-            the FULL file), and 'truncated' (bool)
+            the FULL file, even when truncated), 'truncated' (bool), and
+            'total_lines' (line count of the full file)
         """
         content = await asyncio.to_thread(filesystem.read_file, path)
         sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        total_lines = _count_lines(content)
         truncated = False
         if max_lines is not None:
             if max_lines < 1:
                 raise ValueError("max_lines must be a positive integer.")
-            lines = content.splitlines(keepends=True)
-            if len(lines) > max_lines:
-                content = "".join(lines[:max_lines])
-                truncated = True
-        return {"content": content, "sha": sha, "truncated": truncated}
+            content, truncated = _truncate_lines(content, max_lines)
+        return {
+            "content": content,
+            "sha": sha,
+            "truncated": truncated,
+            "total_lines": total_lines,
+        }
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -619,13 +793,20 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         )
     )
     async def read_content_batch(
-        paths: list[str],
-        max_lines: int | None = None,
+        paths: Annotated[
+            list[str],
+            Field(
+                min_length=1,
+                max_length=10,
+                description="File paths relative to content root (max 10, no duplicates)",
+            ),
+        ],
+        max_lines: MaxLines = None,
     ) -> dict:
         """Read multiple files and return their contents with SHA-256 hashes.
 
-        Reads up to 10 files in a single call. Each file's content and SHA
-        are returned so they can be used with update/delete operations.
+        Reads up to 10 files in a single call. Each file's sha is required
+        by overwrite_content, edit_content, and delete_content.
 
         Args:
             paths: List of file paths relative to content root (max 10)
@@ -633,7 +814,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 beginning of each file. If omitted, returns full content.
         Returns:
             A dict with 'results' list, each containing 'path', 'content',
-            'sha', 'truncated', and 'error' (null on success)
+            'sha', 'truncated', 'total_lines', and 'error' (null on success;
+            per-file failures set 'error' without failing the whole call)
         """
         if not paths:
             raise ValueError("At least one path is required.")
@@ -649,20 +831,20 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             try:
                 content = await asyncio.to_thread(filesystem.read_file, path)
                 sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                total_lines = _count_lines(content)
                 truncated = False
                 if max_lines is not None:
-                    lines = content.splitlines(keepends=True)
-                    if len(lines) > max_lines:
-                        content = "".join(lines[:max_lines])
-                        truncated = True
+                    content, truncated = _truncate_lines(content, max_lines)
                 results.append({
                     "path": path, "content": content, "sha": sha,
-                    "truncated": truncated, "error": None,
+                    "truncated": truncated, "total_lines": total_lines,
+                    "error": None,
                 })
             except (FileNotFoundError, InvalidPathError) as exc:
                 results.append({
                     "path": path, "content": None, "sha": None,
-                    "truncated": False, "error": str(exc),
+                    "truncated": False, "total_lines": None,
+                    "error": str(exc),
                 })
         return {"results": results}
 
@@ -674,10 +856,22 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         )
     )
     async def list_content(
-        path: str = "",
-        recursive: bool = False,
+        path: Annotated[
+            str,
+            Field(description="Directory path relative to content root; empty string is the root"),
+        ] = "",
+        recursive: Annotated[
+            bool,
+            Field(description="If true, list every file under path as full relative paths"),
+        ] = False,
     ) -> str:
         """List files and directories in the content store.
+
+        Non-recursive listings show one entry per line with a 📁 prefix for
+        directories and 📄 for files; entries are names only, so join them
+        with *path* to build full paths. Recursive listings return full
+        relative file paths, one per line, with no prefixes. Hidden files
+        (dotfiles) are excluded.
 
         Args:
             path: Path relative to content root (defaults to root)
@@ -708,7 +902,10 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         )
     )
     async def inspect_content_structure(
-        path: str,
+        path: Annotated[
+            str,
+            Field(description="Markdown file path (.md or .markdown) relative to content root"),
+        ],
     ) -> dict:
         """Read a markdown file and return its document structure based on headings.
 
@@ -720,7 +917,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             path: File path relative to content root (must be a .md or .markdown file)
         Returns:
             A dict with 'path', 'title' (first h1 if present), and 'sections'
-            (nested list of heading entries)
+            (nested list of {heading, level, line_number, children} entries)
         """
         suffix = PurePosixPath(path).suffix.lower()
         if suffix not in {".md", ".markdown"}:
@@ -744,7 +941,15 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         )
     )
     async def inspect_content_structure_batch(
-        paths: list[str],
+        paths: Annotated[
+            list[str],
+            Field(
+                min_length=1,
+                max_length=10,
+                description="Markdown file paths (.md or .markdown) relative to "
+                "content root (max 10, no duplicates)",
+            ),
+        ],
     ) -> dict:
         """Return the heading structure of multiple markdown files.
 
@@ -755,8 +960,10 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         Args:
             paths: List of markdown file paths relative to content root (max 10)
         Returns:
-            A dict with 'results' list, each containing the path, title, sections,
-            and error (null on success)
+            A dict with 'results' list, each containing the path, title, sections
+            (nested {heading, level, line_number, children} entries), and error
+            (null on success; per-file failures set 'error' without failing
+            the whole call)
         """
         if len(paths) == 0:
             raise ValueError("At least one path is required.")
@@ -916,7 +1123,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     if not Config.READ_ONLY:
 
-        @mcp.tool(
+        @_write_tool(
             annotations=ToolAnnotations(
                 title="Move or rename file",
                 readOnlyHint=False,
@@ -925,11 +1132,23 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def move_content(
-            source_path: str,
-            dest_path: str,
+            source_path: Annotated[
+                str, Field(description="Current file path relative to content root")
+            ],
+            dest_path: Annotated[
+                str,
+                Field(
+                    description="New file path relative to content root; "
+                    "must not already exist"
+                ),
+            ],
             ctx: Context,
         ) -> str:
             """Move or rename a content file.
+
+            The destination must not already exist (files are never
+            overwritten by a move); missing parent directories are created
+            automatically. Use move_content_directory for whole directories.
 
             Args:
                 source_path: Current file path relative to content root
@@ -946,7 +1165,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             logger.info(f"Moved: {source_path} -> {dest_path}")
             return f"Moved: {source_path} -> {dest_path}"
 
-        @mcp.tool(
+        @_write_tool(
             annotations=ToolAnnotations(
                 title="Move content directory",
                 readOnlyHint=False,
@@ -955,8 +1174,16 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def move_content_directory(
-            source_path: str,
-            dest_path: str,
+            source_path: Annotated[
+                str, Field(description="Current directory path relative to content root")
+            ],
+            dest_path: Annotated[
+                str,
+                Field(
+                    description="New directory path relative to content root; "
+                    "must not already exist"
+                ),
+            ],
             ctx: Context,
         ) -> dict:
             """Move or rename an entire directory tree.
@@ -991,7 +1218,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 "files_moved": len(moved_files),
             }
 
-        @mcp.tool(
+        @_write_tool(
             annotations=ToolAnnotations(
                 title="Move multiple files",
                 readOnlyHint=False,
@@ -1000,13 +1227,22 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def move_content_batch(
-            moves: list[MoveOperation],
+            moves: Annotated[
+                list[MoveOperation],
+                Field(
+                    min_length=1,
+                    max_length=10,
+                    description="Move operations (max 10); no duplicate sources or "
+                    "destinations, and no path may be both",
+                ),
+            ],
             ctx: Context,
         ) -> dict:
             """Move or rename multiple files in a single operation.
 
             All validations run before any moves — if any move fails validation
-            the entire operation is aborted and no files are moved.
+            the entire operation is aborted and no files are moved. Destinations
+            must not already exist.
 
             Args:
                 moves: List of move operations (max 10), each with source_path and dest_path
@@ -1151,16 +1387,23 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def log_content(
-            path: str,
-            max_count: int = 20,
+            path: ContentPath,
+            max_count: Annotated[
+                int, Field(ge=1, description="Maximum number of commits to return")
+            ] = 20,
         ) -> str:
             """Return recent git commits touching a file.
+
+            Each line is: short hash, ISO timestamp, author, commit message.
+            Uncommitted changes (e.g. writes in an open transaction) do not
+            appear until committed.
 
             Args:
                 path: File path relative to content root
                 max_count: Maximum number of commits to return (default 20)
             Returns:
-                Commit history formatted as a string
+                Commit history formatted as a string, or a "No git history
+                found" message for files with no commits
             """
             import asyncio
 
@@ -1182,16 +1425,28 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def diff_content(
-            path: str,
-            ref: str | None = None,
+            path: ContentPath,
+            ref: Annotated[
+                str | None,
+                Field(
+                    description="Git ref to diff against (default HEAD~1). "
+                    "Use 'HEAD' to see uncommitted changes"
+                ),
+            ] = None,
         ) -> str:
             """Show what changed in a file since a given git ref.
+
+            Compares the file's current on-disk content (working tree)
+            against *ref*. The default HEAD~1 shows changes since the
+            previous commit; pass ref='HEAD' to see only uncommitted
+            changes, such as pending edits in an open transaction.
 
             Args:
                 path: File path relative to content root
                 ref: Git ref to diff against (default: HEAD~1)
             Returns:
-                Unified diff as a string
+                Unified diff as a string; an empty string means no changes.
+                Invalid refs return git's error text instead of a diff.
             """
             import asyncio
 
@@ -1205,16 +1460,33 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             )
         )
         async def blame_content(
-            path: str,
-            start_line: int | None = None,
-            end_line: int | None = None,
+            path: ContentPath,
+            start_line: Annotated[
+                int | None,
+                Field(
+                    ge=1,
+                    description="1-based start line (inclusive); requires end_line "
+                    "to also be set, otherwise the whole file is blamed",
+                ),
+            ] = None,
+            end_line: Annotated[
+                int | None,
+                Field(
+                    ge=1,
+                    description="1-based end line (inclusive); requires start_line "
+                    "to also be set, otherwise the whole file is blamed",
+                ),
+            ] = None,
         ) -> str:
             """Return line-level authorship and timestamps for a file.
 
+            The line range applies only when BOTH start_line and end_line are
+            provided; if either is omitted, the entire file is blamed.
+
             Args:
                 path: File path relative to content root
-                start_line: Optional 1-based start line
-                end_line: Optional 1-based end line
+                start_line: Optional 1-based start line (requires end_line)
+                end_line: Optional 1-based end line (requires start_line)
             Returns:
                 Blame information formatted as a string
             """
@@ -1236,8 +1508,6 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
     # --- Transaction tools (only when write mode + git tracking are both active) ---
 
     if not Config.READ_ONLY and git_backend is not None:
-        from .transactions import TransactionError, TransactionManager
-
         tm = filesystem if isinstance(filesystem, TransactionManager) else None
 
         if tm is not None:
@@ -1255,10 +1525,13 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
                 Acquires the global transaction lock.  All subsequent mutating
                 tool calls (create_content, overwrite_content, edit_content,
-                edit_content_batch, delete_content, move_content) on this
-                session will be part of the transaction.  Call
+                edit_content_batch, delete_content, move_content,
+                move_content_directory, move_content_batch) on this session
+                will be part of the transaction.  Call
                 commit_content_transaction to commit or abort_content_transaction
-                to discard.
+                to discard.  Only one transaction may be active at a time
+                across all sessions; idle transactions are auto-aborted after
+                a timeout.
 
                 Returns:
                     Transaction UUID string
@@ -1288,9 +1561,18 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 )
             )
             async def commit_content_transaction(
-                message: str,
+                message: Annotated[
+                    str,
+                    Field(description="Git commit message describing the changes"),
+                ],
                 ctx: Context,
-                author: str | None = None,
+                author: Annotated[
+                    str | None,
+                    Field(
+                        description='Optional commit author as "Name <email>"; '
+                        "defaults to the repository's configured identity"
+                    ),
+                ] = None,
             ) -> str:
                 """Commit all changes in the active transaction.
 

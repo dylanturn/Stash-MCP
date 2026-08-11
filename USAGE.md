@@ -211,9 +211,9 @@ Resources represent files that can be read by agents:
 
 ### MCP Tools
 
-Tools allow agents to create, update, and delete content:
+Tools allow agents to create, edit, overwrite, move, and delete content. Modifications require the file's current SHA-256, returned by `read_content`:
 
-**create_content** - Create a new file:
+**create_content** - Create a new file (errors if it already exists):
 ```json
 {
   "path": "docs/new-doc.md",
@@ -221,10 +221,27 @@ Tools allow agents to create, update, and delete content:
 }
 ```
 
-**update_content** - Update an existing file (or create if it doesn't exist):
+**read_content** - Read a file and get its `sha` for later modifications:
+```json
+{
+  "path": "docs/existing-doc.md"
+}
+```
+
+**edit_content** - Apply targeted string-replacement edits to an existing file:
+```json
+{
+  "file_path": "docs/existing-doc.md",
+  "sha": "<sha from read_content>",
+  "edits": [{"old_string": "old text", "new_string": "new text"}]
+}
+```
+
+**overwrite_content** - Replace the full content of an existing file:
 ```json
 {
   "path": "docs/existing-doc.md",
+  "sha": "<sha from read_content>",
   "content": "# Updated content..."
 }
 ```
@@ -232,7 +249,8 @@ Tools allow agents to create, update, and delete content:
 **delete_content** - Delete a file:
 ```json
 {
-  "path": "docs/old-doc.md"
+  "path": "docs/old-doc.md",
+  "sha": "<sha from read_content>"
 }
 ```
 

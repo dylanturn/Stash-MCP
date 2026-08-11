@@ -199,7 +199,9 @@ class FileSystem:
                         continue
                     if any(part.startswith(".") for part in item.relative_to(self.content_dir).parts):
                         continue
-                    rel = str(item.relative_to(self.content_dir))
+                    # POSIX-style separators regardless of host OS, matching
+                    # the path contract exposed to MCP clients.
+                    rel = item.relative_to(self.content_dir).as_posix()
                     # Filter by relative_path prefix
                     if relative_path:
                         prefix = relative_path.rstrip("/") + "/"
@@ -212,7 +214,7 @@ class FileSystem:
         for item in full_path.rglob("*"):
             if item.is_file() and not any(part.startswith(".") for part in item.parts):
                 rel_path = item.relative_to(self.content_dir)
-                files.append(str(rel_path))
+                files.append(rel_path.as_posix())
 
         return sorted(files)
 
@@ -401,7 +403,7 @@ class FileSystem:
         dst_rel = Path(dest_path.rstrip("/"))
         moved_files = []
         for file_path in self.list_all_files(source_path):
-            new_path = str(dst_rel / Path(file_path).relative_to(src_rel))
+            new_path = (dst_rel / Path(file_path).relative_to(src_rel)).as_posix()
             moved_files.append((file_path, new_path))
 
         try:
