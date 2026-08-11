@@ -191,7 +191,7 @@ content   = await client.read_resource("stash://docs/architecture.md")
 
 ### MCP tools (write)
 
-Agents create, update, move, and delete content through MCP tools. Modifications are guarded by an optimistic-concurrency check: `read_content` returns the file's SHA-256, which `edit_content`, `overwrite_content`, and `delete_content` require:
+Agents create, edit, move, and delete content through MCP tools. Modifications are guarded by an optimistic-concurrency check: `read_content` returns the file's SHA-256, which `edit_content`, `overwrite_content`, and `delete_content` require:
 
 ```python
 await client.call_tool("create_content", {

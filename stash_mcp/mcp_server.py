@@ -204,6 +204,34 @@ def _get_description(fs: FileSystem, path: str) -> str:
         return f"Content file: {path}"
 
 
+def _count_lines(text: str) -> int:
+    """Number of newline-delimited lines in *text* (0 for empty).
+
+    Content read through the filesystem layer is universal-newline
+    translated, so counting "\\n" matches line semantics without
+    materializing a splitlines() list.
+    """
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _truncate_lines(text: str, max_lines: int) -> tuple[str, bool]:
+    """Return the first *max_lines* lines of *text* and whether it was cut.
+
+    Equivalent to joining the first *max_lines* entries of
+    ``text.splitlines(keepends=True)`` but without allocating the list.
+    """
+    pos = -1
+    for _ in range(max_lines):
+        pos = text.find("\n", pos + 1)
+        if pos == -1:
+            return text, False
+    if pos + 1 >= len(text):
+        return text, False
+    return text[: pos + 1], True
+
+
 def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
     """Apply a sequence of string-replacement edits to *content*.
 
@@ -711,15 +739,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         """
         content = await asyncio.to_thread(filesystem.read_file, path)
         sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        total_lines = _count_lines(content)
         truncated = False
-        lines = content.splitlines(keepends=True)
-        total_lines = len(lines)
         if max_lines is not None:
             if max_lines < 1:
                 raise ValueError("max_lines must be a positive integer.")
-            if total_lines > max_lines:
-                content = "".join(lines[:max_lines])
-                truncated = True
+            content, truncated = _truncate_lines(content, max_lines)
         return {
             "content": content,
             "sha": sha,
@@ -773,12 +798,10 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             try:
                 content = await asyncio.to_thread(filesystem.read_file, path)
                 sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                total_lines = _count_lines(content)
                 truncated = False
-                lines = content.splitlines(keepends=True)
-                total_lines = len(lines)
-                if max_lines is not None and total_lines > max_lines:
-                    content = "".join(lines[:max_lines])
-                    truncated = True
+                if max_lines is not None:
+                    content, truncated = _truncate_lines(content, max_lines)
                 results.append({
                     "path": path, "content": content, "sha": sha,
                     "truncated": truncated, "total_lines": total_lines,

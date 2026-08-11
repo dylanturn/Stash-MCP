@@ -211,7 +211,7 @@ Resources represent files that can be read by agents:
 
 ### MCP Tools
 
-Tools allow agents to create, update, and delete content. Modifications require the file's current SHA-256, returned by `read_content`:
+Tools allow agents to create, edit, overwrite, move, and delete content. Modifications require the file's current SHA-256, returned by `read_content`:
 
 **create_content** - Create a new file (errors if it already exists):
 ```json

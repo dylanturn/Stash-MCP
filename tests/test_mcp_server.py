@@ -1276,6 +1276,25 @@ async def test_batch_schemas_carry_max_items(mcp_server):
     assert tools["move_content_batch"].parameters["properties"]["moves"]["maxItems"] == 10
 
 
+def test_line_helpers_match_splitlines():
+    """_count_lines/_truncate_lines mirror splitlines(keepends=True) for \\n text."""
+    from stash_mcp.mcp_server import _count_lines, _truncate_lines
+
+    cases = ["", "a", "a\n", "a\nb", "a\nb\n", "a\n\nb", "\n", "\n\n", "x\ny\nz\n"]
+    for text in cases:
+        lines = text.splitlines(keepends=True)
+        assert _count_lines(text) == len(lines), repr(text)
+        for max_lines in (1, 2, 3, 10):
+            expected_content = "".join(lines[:max_lines])
+            expected_truncated = len(lines) > max_lines
+            got_content, got_truncated = _truncate_lines(text, max_lines)
+            if expected_truncated:
+                assert (got_content, got_truncated) == (expected_content, True), (
+                    repr(text), max_lines)
+            else:
+                assert (got_content, got_truncated) == (text, False), (repr(text), max_lines)
+
+
 # --- Read-only mode tests ---
 
 WRITE_TOOL_NAMES = {
