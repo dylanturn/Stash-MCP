@@ -817,6 +817,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         Exhaustive enumeration, not ranked retrieval. Use this for
         completeness queries: every reference to a symbol, every file
         containing an env var, every match of an error string.
+        Only files with recognized text extensions are scanned; binaries
+        and unknown extensions are skipped.
 
         For conceptual queries ("how does X work"), use search_content.
 
@@ -1090,7 +1092,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             For literal substring or regex matching with exhaustive results
             (every file mentioning STASH_FOO, every reference to an old
             symbol, every occurrence of an error string), use find_content
-            instead — it does not rank and does not cap at top-k.
+            instead — it returns every match up to max_results (see the
+            truncated flag) rather than a ranked top-k.
 
             Args:
                 query: Natural language search query

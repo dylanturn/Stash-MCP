@@ -1,5 +1,6 @@
 """Tests for MCP server implementation."""
 
+import json
 import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -139,6 +140,14 @@ async def test_list_tools(mcp_server):
     assert "move_content_batch" in tool_names
     assert "inspect_content_structure" in tool_names
     assert "inspect_content_structure_batch" in tool_names
+    assert "find_content" in tool_names
+
+
+def test_manifest_lists_find_content_tool():
+    """Test manifest tool metadata includes find_content."""
+    manifest_path = Path(__file__).resolve().parents[1] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    tool_names = [tool["name"] for tool in manifest["tools"]]
     assert "find_content" in tool_names
 
 
