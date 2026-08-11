@@ -274,8 +274,14 @@ class TransactionManager:
 
     # --- Read methods (unconditional) ---
 
+    def _resolve_path(self, relative_path: str):
+        return self.fs._resolve_path(relative_path)
+
     def read_file(self, path: str) -> str:
         return self.fs.read_file(path)
+
+    def try_read_text(self, path: str) -> str | None:
+        return self.fs.try_read_text(path)
 
     def list_files(self, relative_path: str = "") -> list:
         return self.fs.list_files(relative_path)

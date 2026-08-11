@@ -64,6 +64,38 @@ class Config:
     SEARCH_CHUNK_SIZE: int = int(os.getenv("STASH_SEARCH_CHUNK_SIZE", "1000"))
     SEARCH_CHUNK_OVERLAP: int = int(os.getenv("STASH_SEARCH_CHUNK_OVERLAP", "100"))
 
+    # Find tool settings
+    FIND_MAX_RESULTS_CEILING: int = int(
+        os.getenv("STASH_FIND_MAX_RESULTS_CEILING", "500")
+    )
+
+    # Search ranking — MMR diversification
+    SEARCH_MMR_ENABLED: bool = (
+        os.getenv("STASH_SEARCH_MMR_ENABLED", "true").lower() == "true"
+    )
+    SEARCH_MMR_LAMBDA: float = float(os.getenv("STASH_SEARCH_MMR_LAMBDA", "0.7"))
+    SEARCH_MAX_PER_FILE: int = int(os.getenv("STASH_SEARCH_MAX_PER_FILE", "2"))
+    SEARCH_CANDIDATE_POOL_MULTIPLIER: int = int(
+        os.getenv("STASH_SEARCH_CANDIDATE_POOL_MULTIPLIER", "6")
+    )
+
+    # Search ranking — recency boost from git blame
+    SEARCH_RECENCY_WEIGHT: float = float(
+        os.getenv("STASH_SEARCH_RECENCY_WEIGHT", "0.0")
+    )
+    SEARCH_RECENCY_HALF_LIFE_DAYS: float = float(
+        os.getenv("STASH_SEARCH_RECENCY_HALF_LIFE_DAYS", "180")
+    )
+
+    # Search retrieval — hybrid BM25 + dense via Reciprocal Rank Fusion
+    SEARCH_HYBRID_ENABLED: bool = (
+        os.getenv("STASH_SEARCH_HYBRID_ENABLED", "false").lower() == "true"
+    )
+    SEARCH_RRF_K: int = int(os.getenv("STASH_SEARCH_RRF_K", "60"))
+    SEARCH_BM25_CANDIDATE_POOL: int = int(
+        os.getenv("STASH_SEARCH_BM25_CANDIDATE_POOL", "30")
+    )
+
     # Model cache directory (for HuggingFace/sentence-transformers weights)
     MODEL_CACHE_DIR: Path = Path(
         os.getenv("STASH_MODEL_CACHE_DIR", "/data/models")

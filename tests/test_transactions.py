@@ -126,6 +126,59 @@ class TestGitBackendNewMethods:
 # ---------------------------------------------------------------------------
 
 
+class TestTransactionManagerDelegationCoverage:
+    """TransactionManager wraps FileSystem with an explicit allowlist.
+
+    It has no ``__getattr__`` fallback, so any FileSystem method the MCP
+    server calls but the wrapper forgets to delegate raises
+    ``AttributeError`` at runtime — and only in the configuration that
+    actually installs the wrapper (writes enabled + git backend), which
+    tests using a bare FileSystem never exercise.
+    """
+
+    def test_delegates_every_public_filesystem_method(self):
+        public = {
+            name
+            for name in vars(FileSystem)
+            if not name.startswith("_") and callable(getattr(FileSystem, name))
+        }
+        missing = {name for name in public if not hasattr(TransactionManager, name)}
+        assert not missing, f"TransactionManager is missing delegations for: {missing}"
+
+    def test_delegates_every_filesystem_attribute_the_server_uses(self):
+        import ast
+
+        import stash_mcp.mcp_server as server_mod
+
+        # Parse rather than regex-scan so only real attribute accesses on the
+        # injected `filesystem` count — not mentions in comments or docstrings.
+        tree = ast.parse(Path(server_mod.__file__).read_text(encoding="utf-8"))
+        used = {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "filesystem"
+        }
+        assert used, "found no filesystem attribute accesses — is the scan still valid?"
+        missing = {name for name in used if not hasattr(TransactionManager, name)}
+        assert not missing, (
+            f"mcp_server calls filesystem.{{{', '.join(sorted(missing))}}} but "
+            "TransactionManager does not delegate it"
+        )
+
+    def test_try_read_text_passes_through(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, _fs = _make_tm(Path(tmpdir))
+            assert tm.try_read_text("README.md") == "# Test\n"
+            assert tm.try_read_text("does-not-exist.md") is None
+
+    def test_resolve_path_passes_through(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, fs = _make_tm(Path(tmpdir))
+            assert tm._resolve_path("README.md") == fs._resolve_path("README.md")
+
+
 class TestTransactionManagerWriteGating:
     @pytest.mark.asyncio
     async def test_write_blocked_without_transaction(self):
@@ -412,10 +465,48 @@ class TestMCPTransactionTools:
         return ctx, token
 
     @pytest.mark.asyncio
+    async def test_find_content_works_through_transaction_manager(self):
+        """find_content reads via try_read_text, which the wrapper must delegate.
+
+        Every other find_content test injects a bare FileSystem, so a missing
+        delegation only surfaces in the wrapped (production) configuration.
+        """
+        import json
+
+        with TemporaryDirectory() as tmpdir:
+            mcp, tm, fs = self._make_mcp(Path(tmpdir))
+            fs.write_file("notes.md", "alpha\nfindme here\nomega")
+            tool = await mcp.get_tool("find_content")
+            data = json.loads(str((await tool.run({"pattern": "findme"})).content[0].text))
+            assert [(m["file_path"], m["line_number"]) for m in data["matches"]] == [
+                ("notes.md", 2)
+            ]
+
+    @pytest.mark.asyncio
+    async def test_move_content_batch_validation_works_through_transaction_manager(self):
+        """move_content_batch resolves destinations via the wrapper's _resolve_path."""
+        with TemporaryDirectory() as tmpdir:
+            mcp, tm, fs = self._make_mcp(Path(tmpdir))
+            fs.write_file("src.md", "body")
+            fs.write_file("taken.md", "body")
+            ctx, token = self._mock_context()
+            try:
+                await tm.start_transaction(str(id(ctx.session)), timeout=30, lock_wait=1)
+                tool = await mcp.get_tool("move_content_batch")
+                with pytest.raises(ValueError, match="Destination already exists"):
+                    await tool.run(
+                        {"moves": [{"source_path": "src.md", "dest_path": "taken.md"}]}
+                    )
+            finally:
+                from fastmcp.server.context import _current_context
+
+                _current_context.reset(token)
+
+    @pytest.mark.asyncio
     async def test_transaction_tools_registered(self):
         with TemporaryDirectory() as tmpdir:
             mcp, tm, fs = self._make_mcp(Path(tmpdir))
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "start_content_transaction" in tool_names
             assert "commit_content_transaction" in tool_names
             assert "abort_content_transaction" in tool_names
@@ -532,7 +623,7 @@ class TestModeMatrix:
             git = GitBackend(Path(tmpdir))
             with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
                 mcp = create_mcp_server(fs, git_backend=git)
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "start_content_transaction" not in tool_names
             assert "commit_content_transaction" not in tool_names
             assert "abort_content_transaction" not in tool_names
@@ -546,7 +637,7 @@ class TestModeMatrix:
             with patch("stash_mcp.mcp_server.Config.READ_ONLY", False):
                 # No git_backend passed → no transaction tools
                 mcp = create_mcp_server(fs, git_backend=None)
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "start_content_transaction" not in tool_names
 
     @pytest.mark.asyncio
@@ -562,7 +653,7 @@ class TestModeMatrix:
             with patch("stash_mcp.mcp_server.Config.READ_ONLY", False):
                 # filesystem is a plain FileSystem (not TransactionManager)
                 mcp = create_mcp_server(fs, git_backend=git)
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "start_content_transaction" not in tool_names
 
 
@@ -660,7 +751,7 @@ class TestListContentTransactionsTool:
     async def test_tool_registered(self):
         with TemporaryDirectory() as tmpdir:
             mcp, _ = self._make_mcp(Path(tmpdir))
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "list_content_transactions" in tool_names
 
     @pytest.mark.asyncio
@@ -711,5 +802,5 @@ class TestListContentTransactionsTool:
             git = GitBackend(Path(tmpdir))
             with patch("stash_mcp.mcp_server.Config.READ_ONLY", True):
                 mcp = create_mcp_server(fs, git_backend=git)
-            tool_names = {t.name for t in await mcp.list_tools()}
+            tool_names = set((await mcp.get_tools()).keys())
             assert "list_content_transactions" not in tool_names
