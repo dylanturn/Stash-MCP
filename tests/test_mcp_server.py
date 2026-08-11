@@ -1098,6 +1098,184 @@ async def test_edit_content_batch_returns_per_file_results(mcp_server, temp_fs, 
     assert _sha('{"key": "done"}') in text
 
 
+
+# --- Agent-guidance tests: error messages, schema descriptions, instructions ---
+
+
+class _StubGit:
+    """Minimal git backend stand-in for transaction-wrapped servers."""
+
+    def commit(self, message, author=None):
+        pass
+
+    def reset_hard(self):
+        pass
+
+    def push(self, remote, branch):
+        pass
+
+
+def _txn_server(tmpdir: Path):
+    """Create a transaction-gated MCP server over a temp filesystem."""
+    from stash_mcp.transactions import TransactionManager
+
+    git = _StubGit()
+    tm = TransactionManager(FileSystem(tmpdir), git)
+    return create_mcp_server(tm, git_backend=git)
+
+
+async def test_create_content_existing_file_error_names_real_tools(
+    mcp_server, temp_fs, mock_context
+):
+    """The already-exists error must point at tools that actually exist."""
+    tool = await mcp_server.get_tool("create_content")
+    with pytest.raises(ValueError) as exc_info:
+        await tool.run({"path": "README.md", "content": "overwrite"})
+    message = str(exc_info.value)
+    assert "overwrite_content" in message
+    assert "edit_content" in message
+    assert "update_content" not in message
+
+
+async def test_edit_content_batch_empty_list(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch rejects an empty list."""
+    tool = await mcp_server.get_tool("edit_content_batch")
+    with pytest.raises(
+        ValueError, match="At least one edit operation is required|at least 1 item"
+    ):
+        await tool.run({"edit_operations": []})
+
+
+async def test_edit_content_batch_over_limit(mcp_server, temp_fs, mock_context):
+    """Test edit_content_batch rejects more than 10 files."""
+    tool = await mcp_server.get_tool("edit_content_batch")
+    ops = [
+        FileEditOperation(
+            file_path=f"f{i}.md",
+            sha=_sha("x"),
+            edits=[EditOperation(old_string="a", new_string="b")],
+        )
+        for i in range(11)
+    ]
+    with pytest.raises(ValueError, match="Maximum 10 files per batch edit|at most 10 items"):
+        await tool.run({"edit_operations": ops})
+
+
+async def test_read_content_returns_total_lines(temp_fs):
+    """read_content reports the full file's line count even when truncated."""
+    import json
+
+    temp_fs.write_file("multi.md", "l1\nl2\nl3\nl4\nl5\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content")
+
+    result = await tool.run({"path": "multi.md", "max_lines": 2})
+    data = json.loads(str(result.content[0].text))
+    assert data["truncated"] is True
+    assert data["total_lines"] == 5
+
+    result = await tool.run({"path": "multi.md"})
+    data = json.loads(str(result.content[0].text))
+    assert data["truncated"] is False
+    assert data["total_lines"] == 5
+
+
+async def test_read_content_batch_returns_total_lines(temp_fs):
+    """read_content_batch reports per-file total_lines; None on error entries."""
+    import json
+
+    temp_fs.write_file("a.md", "1\n2\n3\n")
+    mcp = create_mcp_server(temp_fs)
+    tool = await mcp.get_tool("read_content_batch")
+    result = await tool.run({"paths": ["a.md", "missing.md"], "max_lines": 1})
+    data = json.loads(str(result.content[0].text))
+    by_path = {r["path"]: r for r in data["results"]}
+    assert by_path["a.md"]["total_lines"] == 3
+    assert by_path["a.md"]["truncated"] is True
+    assert by_path["missing.md"]["total_lines"] is None
+    assert by_path["missing.md"]["error"] is not None
+
+
+async def test_server_instructions_default_mode(mcp_server):
+    """Writable non-transactional server: sha workflow yes, transactions no."""
+    instructions = mcp_server.instructions
+    assert instructions
+    assert "read_content" in instructions
+    assert "edit_content" in instructions
+    assert "start_content_transaction" not in instructions
+    assert "read-only" not in instructions
+
+
+async def test_server_instructions_read_only(temp_fs, monkeypatch):
+    """Read-only server: instructions say so and skip the write workflow."""
+    # Patch the Config reference mcp_server actually uses — an earlier test
+    # reloads stash_mcp.config, so patching by fresh import can miss it.
+    monkeypatch.setattr("stash_mcp.mcp_server.Config.READ_ONLY", True)
+    mcp = create_mcp_server(temp_fs)
+    instructions = mcp.instructions
+    assert "read-only" in instructions
+    assert "start_content_transaction" not in instructions
+    assert "create_content" not in await mcp.get_tools()
+
+
+async def test_server_instructions_transaction_mode(tmp_path):
+    """Transaction-gated server: instructions describe the transaction workflow."""
+    mcp = _txn_server(tmp_path)
+    instructions = mcp.instructions
+    assert "start_content_transaction" in instructions
+    assert "commit_content_transaction" in instructions
+
+
+async def test_write_tool_descriptions_note_transactions_when_gated(tmp_path):
+    """Write tools warn about transaction gating only on gated servers."""
+    mcp = _txn_server(tmp_path)
+    tools = await mcp.get_tools()
+    for name in (
+        "create_content",
+        "overwrite_content",
+        "edit_content",
+        "edit_content_batch",
+        "delete_content",
+        "move_content",
+        "move_content_directory",
+        "move_content_batch",
+    ):
+        assert "start_content_transaction" in tools[name].description, name
+
+
+async def test_write_tool_descriptions_no_transaction_note_when_plain(mcp_server):
+    """Plain servers must not mention transactions in write tool descriptions."""
+    tools = await mcp_server.get_tools()
+    assert "start_content_transaction" not in tools["create_content"].description
+
+
+async def test_tool_schemas_have_parameter_descriptions(mcp_server):
+    """Top-level tool parameters carry descriptions in the JSON schema."""
+    tools = await mcp_server.get_tools()
+    checks = {
+        "read_content": "path",
+        "read_content_batch": "paths",
+        "create_content": "path",
+        "overwrite_content": "sha",
+        "edit_content": "file_path",
+        "delete_content": "sha",
+        "list_content": "recursive",
+        "move_content": "dest_path",
+        "inspect_content_structure": "path",
+    }
+    for tool_name, param in checks.items():
+        schema = tools[tool_name].parameters
+        assert schema["properties"][param].get("description"), f"{tool_name}.{param}"
+
+
+async def test_batch_schemas_carry_max_items(mcp_server):
+    """Batch list parameters expose the 10-item cap in their schemas."""
+    tools = await mcp_server.get_tools()
+    assert tools["read_content_batch"].parameters["properties"]["paths"]["maxItems"] == 10
+    assert tools["edit_content_batch"].parameters["properties"]["edit_operations"]["maxItems"] == 10
+    assert tools["move_content_batch"].parameters["properties"]["moves"]["maxItems"] == 10
+
+
 # --- Read-only mode tests ---
 
 WRITE_TOOL_NAMES = {
@@ -1422,180 +1600,3 @@ async def test_inspect_content_structure_batch_all_missing(temp_fs):
         assert r["title"] is None
         assert r["sections"] is None
         assert r["error"] is not None
-
-
-# --- Agent-guidance tests: error messages, schema descriptions, instructions ---
-
-
-class _StubGit:
-    """Minimal git backend stand-in for transaction-wrapped servers."""
-
-    def commit(self, message, author=None):
-        pass
-
-    def reset_hard(self):
-        pass
-
-    def push(self, remote, branch):
-        pass
-
-
-def _txn_server(tmpdir: Path):
-    """Create a transaction-gated MCP server over a temp filesystem."""
-    from stash_mcp.transactions import TransactionManager
-
-    git = _StubGit()
-    tm = TransactionManager(FileSystem(tmpdir), git)
-    return create_mcp_server(tm, git_backend=git)
-
-
-async def test_create_content_existing_file_error_names_real_tools(
-    mcp_server, temp_fs, mock_context
-):
-    """The already-exists error must point at tools that actually exist."""
-    tool = await mcp_server.get_tool("create_content")
-    with pytest.raises(ValueError) as exc_info:
-        await tool.run({"path": "README.md", "content": "overwrite"})
-    message = str(exc_info.value)
-    assert "overwrite_content" in message
-    assert "edit_content" in message
-    assert "update_content" not in message
-
-
-async def test_edit_content_batch_empty_list(mcp_server, temp_fs, mock_context):
-    """Test edit_content_batch rejects an empty list."""
-    tool = await mcp_server.get_tool("edit_content_batch")
-    with pytest.raises(
-        ValueError, match="At least one edit operation is required|at least 1 item"
-    ):
-        await tool.run({"edit_operations": []})
-
-
-async def test_edit_content_batch_over_limit(mcp_server, temp_fs, mock_context):
-    """Test edit_content_batch rejects more than 10 files."""
-    tool = await mcp_server.get_tool("edit_content_batch")
-    ops = [
-        FileEditOperation(
-            file_path=f"f{i}.md",
-            sha=_sha("x"),
-            edits=[EditOperation(old_string="a", new_string="b")],
-        )
-        for i in range(11)
-    ]
-    with pytest.raises(ValueError, match="Maximum 10 files per batch edit|at most 10 items"):
-        await tool.run({"edit_operations": ops})
-
-
-async def test_read_content_returns_total_lines(temp_fs):
-    """read_content reports the full file's line count even when truncated."""
-    import json
-
-    temp_fs.write_file("multi.md", "l1\nl2\nl3\nl4\nl5\n")
-    mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("read_content")
-
-    result = await tool.run({"path": "multi.md", "max_lines": 2})
-    data = json.loads(str(result.content[0].text))
-    assert data["truncated"] is True
-    assert data["total_lines"] == 5
-
-    result = await tool.run({"path": "multi.md"})
-    data = json.loads(str(result.content[0].text))
-    assert data["truncated"] is False
-    assert data["total_lines"] == 5
-
-
-async def test_read_content_batch_returns_total_lines(temp_fs):
-    """read_content_batch reports per-file total_lines; None on error entries."""
-    import json
-
-    temp_fs.write_file("a.md", "1\n2\n3\n")
-    mcp = create_mcp_server(temp_fs)
-    tool = await mcp.get_tool("read_content_batch")
-    result = await tool.run({"paths": ["a.md", "missing.md"], "max_lines": 1})
-    data = json.loads(str(result.content[0].text))
-    by_path = {r["path"]: r for r in data["results"]}
-    assert by_path["a.md"]["total_lines"] == 3
-    assert by_path["a.md"]["truncated"] is True
-    assert by_path["missing.md"]["total_lines"] is None
-    assert by_path["missing.md"]["error"] is not None
-
-
-async def test_server_instructions_default_mode(mcp_server):
-    """Writable non-transactional server: sha workflow yes, transactions no."""
-    instructions = mcp_server.instructions
-    assert instructions
-    assert "read_content" in instructions
-    assert "edit_content" in instructions
-    assert "start_content_transaction" not in instructions
-    assert "read-only" not in instructions
-
-
-async def test_server_instructions_read_only(temp_fs, monkeypatch):
-    """Read-only server: instructions say so and skip the write workflow."""
-    # Patch the Config reference mcp_server actually uses — an earlier test
-    # reloads stash_mcp.config, so patching by fresh import can miss it.
-    monkeypatch.setattr("stash_mcp.mcp_server.Config.READ_ONLY", True)
-    mcp = create_mcp_server(temp_fs)
-    instructions = mcp.instructions
-    assert "read-only" in instructions
-    assert "start_content_transaction" not in instructions
-    assert "create_content" not in await mcp.get_tools()
-
-
-async def test_server_instructions_transaction_mode(tmp_path):
-    """Transaction-gated server: instructions describe the transaction workflow."""
-    mcp = _txn_server(tmp_path)
-    instructions = mcp.instructions
-    assert "start_content_transaction" in instructions
-    assert "commit_content_transaction" in instructions
-
-
-async def test_write_tool_descriptions_note_transactions_when_gated(tmp_path):
-    """Write tools warn about transaction gating only on gated servers."""
-    mcp = _txn_server(tmp_path)
-    tools = await mcp.get_tools()
-    for name in (
-        "create_content",
-        "overwrite_content",
-        "edit_content",
-        "edit_content_batch",
-        "delete_content",
-        "move_content",
-        "move_content_directory",
-        "move_content_batch",
-    ):
-        assert "start_content_transaction" in tools[name].description, name
-
-
-async def test_write_tool_descriptions_no_transaction_note_when_plain(mcp_server):
-    """Plain servers must not mention transactions in write tool descriptions."""
-    tools = await mcp_server.get_tools()
-    assert "start_content_transaction" not in tools["create_content"].description
-
-
-async def test_tool_schemas_have_parameter_descriptions(mcp_server):
-    """Top-level tool parameters carry descriptions in the JSON schema."""
-    tools = await mcp_server.get_tools()
-    checks = {
-        "read_content": "path",
-        "read_content_batch": "paths",
-        "create_content": "path",
-        "overwrite_content": "sha",
-        "edit_content": "file_path",
-        "delete_content": "sha",
-        "list_content": "recursive",
-        "move_content": "dest_path",
-        "inspect_content_structure": "path",
-    }
-    for tool_name, param in checks.items():
-        schema = tools[tool_name].parameters
-        assert schema["properties"][param].get("description"), f"{tool_name}.{param}"
-
-
-async def test_batch_schemas_carry_max_items(mcp_server):
-    """Batch list parameters expose the 10-item cap in their schemas."""
-    tools = await mcp_server.get_tools()
-    assert tools["read_content_batch"].parameters["properties"]["paths"]["maxItems"] == 10
-    assert tools["edit_content_batch"].parameters["properties"]["edit_operations"]["maxItems"] == 10
-    assert tools["move_content_batch"].parameters["properties"]["moves"]["maxItems"] == 10
