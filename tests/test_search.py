@@ -834,17 +834,177 @@ class TestSearchConfig:
 
         assert Config.SEARCH_INDEX_DIR == Path("/data/.stash-index")
         # Default local backend is ONNX Runtime (fastembed), not torch
-        assert Config.SEARCH_EMBEDDER_MODEL == "onnx:sentence-transformers/all-MiniLM-L6-v2"
+        assert Config.SEARCH_EMBEDDER_MODEL == "onnx:BAAI/bge-small-en-v1.5"
         assert Config.CONTEXTUAL_RETRIEVAL is False
         assert Config.CONTEXTUAL_MODEL == "claude-haiku-4-5-20251001"
         assert Config.SEARCH_CHUNK_SIZE == 1000
         assert Config.SEARCH_CHUNK_OVERLAP == 100
+        assert Config.SEARCH_HEADING_CONTEXT is True
+
+    @pytest.mark.parametrize("module_name", ["stash_mcp.main", "stash_mcp.server"])
+    def test_entrypoints_pass_search_settings_from_config(
+        self, module_name, monkeypatch, tmp_path
+    ):
+        """Both entry points must forward the search settings they own."""
+        import importlib
+
+        module = importlib.import_module(module_name)
+        from stash_mcp.config import Config
+
+        captured = {}
+
+        class FakeEngine:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                self._filesystem = None
+
+        monkeypatch.setattr("stash_mcp.search.SearchEngine", FakeEngine)
+        monkeypatch.setattr(Config, "SEARCH_ENABLED", True)
+        monkeypatch.setattr(Config, "SEARCH_EMBEDDER_MODEL", "onnx:test-model")
+        monkeypatch.setattr(Config, "MODEL_CACHE_DIR", tmp_path / "models")
+        monkeypatch.setattr(Config, "SEARCH_ONNX_THREADS", 3)
+        monkeypatch.setattr(Config, "SEARCH_QUERY_PREFIX", "q: ")
+        monkeypatch.setattr(Config, "SEARCH_DOCUMENT_PREFIX", "d: ")
+        monkeypatch.setattr(Config, "SEARCH_HEADING_CONTEXT", False)
+        monkeypatch.setattr(Config, "SEARCH_HYBRID_ENABLED", True)
+
+        create = module._create_search_engine
+        engine = create(None) if module_name == "stash_mcp.server" else create()
+
+        assert engine is not None
+        assert captured["embedder_model"] == "onnx:test-model"
+        assert captured["model_cache_dir"] == tmp_path / "models"
+        assert captured["onnx_threads"] == 3
+        assert captured["query_prefix"] == "q: "
+        assert captured["document_prefix"] == "d: "
+        assert captured["heading_context"] is False
+        assert captured["hybrid_enabled"] is True
+
+    def test_hybrid_retrieval_on_by_default_when_bm25s_is_installed(self):
+        """BM25 catches the exact-token queries dense retrieval is worst at."""
+        import importlib.util
+
+        from stash_mcp.config import Config
+
+        expected = importlib.util.find_spec("bm25s") is not None
+        assert Config.SEARCH_HYBRID_ENABLED is expected
 
     def test_model_cache_dir_default(self):
         """Test that MODEL_CACHE_DIR defaults to /data/models."""
         from stash_mcp.config import Config
 
         assert Config.MODEL_CACHE_DIR == Path("/data/models")
+
+
+# --- MMR must not discard the fused ranking ---
+
+
+class TestMMRRelevanceSource:
+    """MMR's relevance term defaults to cosine, but the hybrid path must be
+    able to rank on the fused score instead — otherwise BM25 only widens the
+    candidate pool and its ranking is thrown away."""
+
+    @staticmethod
+    def _store(tmp_path):
+        store = VectorStore(tmp_path / "vectors.pkl")
+        # c.md is the closest to the query vector, a.md the farthest
+        store.add(
+            [[1.0, 0.0], [0.9, 0.44], [0.99, 0.14]],
+            [
+                {"file_path": "a.md", "chunk_index": 0, "content": "a"},
+                {"file_path": "b.md", "chunk_index": 0, "content": "b"},
+                {"file_path": "c.md", "chunk_index": 0, "content": "c"},
+            ],
+        )
+        return store
+
+    def test_defaults_to_cosine_ordering(self, tmp_path):
+        store = self._store(tmp_path)
+        candidates = [
+            {"file_path": "b.md", "chunk_index": 0, "score": 0.03},
+            {"file_path": "a.md", "chunk_index": 0, "score": 0.01},
+            {"file_path": "c.md", "chunk_index": 0, "score": 0.02},
+        ]
+        out = store.mmr_rerank([1.0, 0.0], candidates, top_n=3, mmr_lambda=1.0)
+        assert [r["file_path"] for r in out] == ["a.md", "c.md", "b.md"]
+
+    def test_supplied_relevance_drives_the_ordering(self, tmp_path):
+        store = self._store(tmp_path)
+        # Fused (RRF-style) scores rank b.md first even though a.md is the
+        # closest vector — the lexical side found something.
+        candidates = [
+            {"file_path": "b.md", "chunk_index": 0, "score": 0.033},
+            {"file_path": "a.md", "chunk_index": 0, "score": 0.016},
+            {"file_path": "c.md", "chunk_index": 0, "score": 0.024},
+        ]
+        out = store.mmr_rerank(
+            [1.0, 0.0],
+            candidates,
+            top_n=3,
+            mmr_lambda=1.0,
+            relevance=[c["score"] for c in candidates],
+        )
+        assert [r["file_path"] for r in out] == ["b.md", "c.md", "a.md"]
+
+    def test_relevance_is_normalised_before_the_diversity_term(self, tmp_path):
+        """Raw RRF scores (~0.02) would be swamped by the cosine diversity
+        term; normalising to [0, 1] keeps the trade-off meaningful."""
+        store = self._store(tmp_path)
+        candidates = [
+            {"file_path": "b.md", "chunk_index": 0, "score": 0.033},
+            {"file_path": "a.md", "chunk_index": 0, "score": 0.016},
+            {"file_path": "c.md", "chunk_index": 0, "score": 0.024},
+        ]
+        out = store.mmr_rerank(
+            [1.0, 0.0], candidates, top_n=3, mmr_lambda=0.7,
+            relevance=[c["score"] for c in candidates], max_per_file=None,
+        )
+        # Top hit is still the fused winner, not whatever is most "diverse"
+        assert out[0]["file_path"] == "b.md"
+        # Scores stay on the interpretable cosine scale for display
+        assert all(0.0 <= r["score"] <= 1.0 for r in out)
+
+    async def test_hybrid_search_ranks_on_the_fused_score(self, tmp_path):
+        """End-to-end: a lexical-only match must be able to win the top slot.
+
+        The embedder here puts a.md closest to the query, while the rare
+        literal token exists only in b.md — exactly the case hybrid retrieval
+        is for. Ranking on cosine after fusion would return a.md.
+        """
+
+        async def embed_by_topic(texts):
+            # Models a synonym match: the query word ("primary") shares no
+            # literal token with the document ("alpha"), so only the dense
+            # side connects them.
+            return [
+                [1.0, 0.0]
+                if ("alpha" in t.lower() or "primary" in t.lower())
+                else [0.2, 0.98]
+                for t in texts
+            ]
+
+        content_dir = tmp_path / "content"
+        content_dir.mkdir()
+        (content_dir / "a.md").write_text("alpha alpha alpha topical prose\n")
+        (content_dir / "b.md").write_text(
+            "STASH_GIT_SYNC_INTERVAL controls the pull cadence\n"
+        )
+        (content_dir / "c.md").write_text("beta gamma delta filler\n")
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=embed_by_topic,
+            hybrid_enabled=True,
+            heading_context=False,
+        )
+        await engine.build_index(["a.md", "b.md", "c.md"])
+        assert engine.bm25_store.count == 3
+
+        results = await engine.search("primary STASH_GIT_SYNC_INTERVAL", max_results=3)
+        assert [r.file_path for r in results][0] == "b.md"
+        # a.md is still retrieved — fusion reorders, it does not exclude
+        assert "a.md" in [r.file_path for r in results]
 
 
 # --- Index fingerprint ---

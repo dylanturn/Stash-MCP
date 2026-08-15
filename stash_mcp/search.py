@@ -347,6 +347,7 @@ class VectorStore:
         top_n: int,
         mmr_lambda: float = 0.7,
         max_per_file: int | None = 2,
+        relevance: list[float] | None = None,
     ) -> list[dict]:
         """MMR over a pre-selected candidate set (used after hybrid fusion).
 
@@ -354,6 +355,16 @@ class VectorStore:
         we look the vector up in the store by that key and run the same
         relevance-vs-diversity MMR loop as ``search_mmr``. Candidates
         whose vector can't be found are skipped.
+
+        Args:
+            relevance: Optional per-candidate relevance to rank on instead of
+                cosine similarity — the hybrid path passes the RRF fused
+                scores here. Without it, a fused ranking would be silently
+                replaced by the dense one and the sparse retriever could only
+                ever widen the candidate pool, never change the order. Values
+                are min-max normalised to [0, 1] first so they stay
+                commensurate with the cosine diversity term (raw RRF scores
+                sit around 0.02 and would be swamped by it).
         """
         if not candidates or self._vectors is None or len(self._vectors) == 0:
             return []
@@ -369,12 +380,15 @@ class VectorStore:
 
         cand_vec_idx: list[int] = []
         cand_meta: list[dict] = []
-        for c in candidates:
+        cand_relevance: list[float] = []
+        for position, c in enumerate(candidates):
             key = (c.get("file_path", ""), int(c.get("chunk_index", 0)))
             idx = key_to_idx.get(key)
             if idx is not None:
                 cand_vec_idx.append(idx)
                 cand_meta.append(c)
+                if relevance is not None:
+                    cand_relevance.append(float(relevance[position]))
         if not cand_vec_idx:
             return []
 
@@ -390,29 +404,38 @@ class VectorStore:
 
         similarities = normed @ query
 
+        # Relevance term: cosine by default, or the caller's scores (e.g. RRF
+        # fused) min-max normalised onto the same [0, 1] scale as the cosine
+        # diversity term they are traded off against.
+        if relevance is None:
+            relevance_by_candidate = np.array(
+                [similarities[i] for i in cand_vec_idx], dtype=np.float64
+            )
+        else:
+            supplied = np.array(cand_relevance, dtype=np.float64)
+            span = float(supplied.max() - supplied.min())
+            relevance_by_candidate = (
+                (supplied - supplied.min()) / span
+                if span > 0
+                else np.full(len(supplied), 0.5)
+            )
+
         pool = list(range(len(cand_vec_idx)))
         selected: list[int] = []
         per_file: dict[str, int] = {}
 
         while pool and len(selected) < top_n:
+            rel = relevance_by_candidate[pool]
             if not selected:
-                # Seed with the highest-cosine candidate, not whatever
-                # came first in the caller's pool. In the hybrid path
-                # the input is RRF-ranked, not similarity-ranked, so
-                # picking pool[0] would let RRF order leak into the
-                # MMR seed and skew downstream diversity decisions.
-                rel = np.array(
-                    [similarities[cand_vec_idx[p]] for p in pool]
-                )
+                # Seed with the most relevant candidate rather than whatever
+                # came first in the caller's pool, so pool order never leaks
+                # into the MMR seed.
                 best_pos = int(np.argmax(rel))
             else:
                 sel_vec = normed[[cand_vec_idx[p] for p in selected]]
                 pool_vec = normed[[cand_vec_idx[p] for p in pool]]
                 cross = pool_vec @ sel_vec.T
                 max_sim = cross.max(axis=1)
-                rel = np.array(
-                    [similarities[cand_vec_idx[p]] for p in pool]
-                )
                 mmr_scores = mmr_lambda * rel - (1 - mmr_lambda) * max_sim
                 best_pos = int(np.argmax(mmr_scores))
 
@@ -1681,12 +1704,16 @@ class SearchEngine:
                     merged["score"] = r.get("score", 0.0)
                     hydrated.append(merged)
                 if self.mmr_enabled:
+                    # Rank on the fused score, not cosine: otherwise MMR
+                    # re-sorts by the dense signal alone and BM25 can only
+                    # widen the pool, never change the order.
                     raw_results = self.store.mmr_rerank(
                         query_embedding,
                         hydrated,
                         top_n=fetch_n,
                         mmr_lambda=self.mmr_lambda,
                         max_per_file=self.max_per_file,
+                        relevance=[r.get("score", 0.0) for r in hydrated],
                     )
                 else:
                     raw_results = hydrated[:fetch_n]

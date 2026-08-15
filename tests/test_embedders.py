@@ -31,7 +31,7 @@ class TestModelPrefix:
 
     def test_default_model_uses_onnx_prefix(self):
         assert ONNX_PREFIX == "onnx:"
-        assert DEFAULT_EMBEDDER_MODEL == f"onnx:{MINILM}"
+        assert DEFAULT_EMBEDDER_MODEL == f"onnx:{BGE_SMALL}"
 
     def test_is_onnx_model_true_for_prefix(self):
         assert is_onnx_model(f"onnx:{MINILM}") is True

@@ -26,8 +26,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 ONNX_PREFIX = "onnx:"
-DEFAULT_ONNX_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_ONNX_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_EMBEDDER_MODEL = f"{ONNX_PREFIX}{DEFAULT_ONNX_MODEL}"
+MINILM_ONNX_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Token limits applied after loading, keyed by lower-cased fastembed model
 # name. fastembed's packaging of all-MiniLM-L6-v2 (qdrant/all-MiniLM-L6-v2-onnx)
@@ -39,7 +40,7 @@ DEFAULT_EMBEDDER_MODEL = f"{ONNX_PREFIX}{DEFAULT_ONNX_MODEL}"
 # embedding only the first half of each chunk. Models not listed here keep
 # fastembed's configuration.
 _KNOWN_MAX_TOKENS: dict[str, int] = {
-    DEFAULT_ONNX_MODEL.lower(): 256,
+    MINILM_ONNX_MODEL.lower(): 256,
 }
 
 _INSTALL_HINT = (

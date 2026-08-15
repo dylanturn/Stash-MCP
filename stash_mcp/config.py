@@ -1,5 +1,6 @@
 """Configuration for Stash-MCP server."""
 
+import importlib.util
 import os
 from pathlib import Path
 
@@ -56,8 +57,13 @@ class Config:
     # Runtime (default, no torch); "openai:", "cohere:" and
     # "sentence-transformers:" (torch, needs the search-torch extra) go
     # through Pydantic AI.
+    #
+    # bge-small-en-v1.5 is the default: same 384 dimensions as the older
+    # all-MiniLM-L6-v2 (so the index is the same size) but a much stronger
+    # retriever (MTEB retrieval 51.7 vs ~42) and a 512-token window, which
+    # fits a default 1000-character chunk whole.
     SEARCH_EMBEDDER_MODEL: str = os.getenv(
-        "STASH_SEARCH_EMBEDDER_MODEL", "onnx:sentence-transformers/all-MiniLM-L6-v2"
+        "STASH_SEARCH_EMBEDDER_MODEL", "onnx:BAAI/bge-small-en-v1.5"
     )
     # onnxruntime thread count for the onnx: backend. Unset = onnxruntime's
     # default (one thread per host core); set explicitly under container CPU
@@ -109,9 +115,17 @@ class Config:
         os.getenv("STASH_SEARCH_RECENCY_HALF_LIFE_DAYS", "180")
     )
 
-    # Search retrieval — hybrid BM25 + dense via Reciprocal Rank Fusion
+    # Search retrieval — hybrid BM25 + dense via Reciprocal Rank Fusion.
+    # On by default when bm25s is installed (it ships with every search
+    # extra): agent queries are full of literal tokens — env var names,
+    # function names, paths, error strings — which lexical matching handles
+    # far better than embeddings. Falls back to dense-only rather than
+    # failing when the dependency is absent, so a hand-rolled install of
+    # numpy + fastembed still works.
     SEARCH_HYBRID_ENABLED: bool = (
-        os.getenv("STASH_SEARCH_HYBRID_ENABLED", "false").lower() == "true"
+        os.getenv("STASH_SEARCH_HYBRID_ENABLED").lower() == "true"
+        if os.getenv("STASH_SEARCH_HYBRID_ENABLED")
+        else importlib.util.find_spec("bm25s") is not None
     )
     SEARCH_RRF_K: int = int(os.getenv("STASH_SEARCH_RRF_K", "60"))
     SEARCH_BM25_CANDIDATE_POOL: int = int(
