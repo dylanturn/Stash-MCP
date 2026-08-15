@@ -5,6 +5,7 @@ The adapter is exercised against the fake ``fastembed`` module from
 network access happens in CI.
 """
 
+import asyncio
 import sys
 import threading
 
@@ -18,8 +19,9 @@ from stash_mcp.embedders import (
     onnx_model_name,
 )
 
-from .conftest import FAKE_BGE_SMALL as BGE_SMALL
-from .conftest import FAKE_MINILM as MINILM
+# Model names known to the fake fastembed module (see conftest.fake_fastembed)
+MINILM = "sentence-transformers/all-MiniLM-L6-v2"
+BGE_SMALL = "BAAI/bge-small-en-v1.5"
 
 # --- Prefix parsing -------------------------------------------------------
 
@@ -140,14 +142,25 @@ class TestFastEmbedAdapter:
         with pytest.raises(RuntimeError, match=r"stash-mcp\[search\]"):
             FastEmbedAdapter(MINILM)
 
+    async def test_concurrent_first_use_loads_model_once(self, fake_fastembed):
+        fake_fastembed.TextEmbedding.init_delay = 0.05
+        adapter = FastEmbedAdapter(MINILM)
+        results = await asyncio.gather(*(adapter([f"text {i}"]) for i in range(5)))
+        assert len(fake_fastembed.calls["init"]) == 1
+        assert [r[0][0] for r in results] == [6.0] * 5  # len("text 0") == 6
+
     async def test_minilm_truncation_restored_to_256_tokens(self, fake_fastembed):
         adapter = FastEmbedAdapter(MINILM)
         await adapter(["x"])
         tokenizer = adapter._model.model.tokenizer
         assert tokenizer.truncation["max_length"] == 256
-        # Fixed-length padding must become dynamic so batches stay rectangular
+        # The model's other truncation settings survive the override
+        assert tokenizer.truncation["strategy"] == "only_second"
+        # Fixed-length padding must become dynamic so batches stay rectangular,
+        # while the model's pad token/id are kept (not reset to library defaults)
         assert tokenizer.padding["length"] is None
-        assert tokenizer.padding["pad_token"] == "[PAD]"
+        assert tokenizer.padding["pad_id"] == 1
+        assert tokenizer.padding["pad_token"] == "<pad>"
 
     async def test_other_models_keep_fastembed_truncation(self, fake_fastembed):
         adapter = FastEmbedAdapter(BGE_SMALL)
@@ -174,4 +187,28 @@ class TestFastEmbedAdapter:
         with caplog.at_level("WARNING", logger="stash_mcp.embedders"):
             vectors = await adapter(["x"])
         assert vectors == [[1.0, 1.0, 0.5]]
+        assert any("truncation" in rec.message.lower() for rec in caplog.records)
+
+    async def test_partial_override_failure_restores_original_truncation(
+        self, fake_fastembed, caplog
+    ):
+        # Truncation succeeds but padding fails: leave the tokenizer as we found
+        # it rather than truncating at 256 with fixed 128 padding (ragged batches).
+        original_init = fake_fastembed.TextEmbedding.__init__
+
+        def init_with_broken_padding(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+
+            def broken(**kwargs):
+                raise TypeError("unexpected keyword")
+
+            self.model.tokenizer.enable_padding = broken
+
+        fake_fastembed.TextEmbedding.__init__ = init_with_broken_padding
+        adapter = FastEmbedAdapter(MINILM)
+        with caplog.at_level("WARNING", logger="stash_mcp.embedders"):
+            await adapter(["x"])
+        tokenizer = adapter._model.model.tokenizer
+        assert tokenizer.truncation["max_length"] == 128
+        assert tokenizer.padding["length"] == 128
         assert any("truncation" in rec.message.lower() for rec in caplog.records)

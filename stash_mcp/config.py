@@ -59,6 +59,14 @@ class Config:
     SEARCH_EMBEDDER_MODEL: str = os.getenv(
         "STASH_SEARCH_EMBEDDER_MODEL", "onnx:sentence-transformers/all-MiniLM-L6-v2"
     )
+    # onnxruntime thread count for the onnx: backend. Unset = onnxruntime's
+    # default (one thread per host core); set explicitly under container CPU
+    # limits to avoid oversubscription.
+    SEARCH_ONNX_THREADS: int | None = (
+        int(os.getenv("STASH_SEARCH_ONNX_THREADS"))
+        if os.getenv("STASH_SEARCH_ONNX_THREADS")
+        else None
+    )
     CONTEXTUAL_RETRIEVAL: bool = (
         os.getenv("STASH_CONTEXTUAL_RETRIEVAL", "false").lower() == "true"
     )

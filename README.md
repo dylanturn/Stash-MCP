@@ -375,6 +375,7 @@ Semantic search is **disabled by default**. To enable:
 - `STASH_SEARCH_INDEX_DIR` — Directory for search index persistence (default: `/data/.stash-index`)
 - `STASH_SEARCH_EMBEDDER_MODEL` — Embedder model string (default: `onnx:sentence-transformers/all-MiniLM-L6-v2`), see below
 - `STASH_MODEL_CACHE_DIR` — Where locally downloaded model weights are cached (default: `/data/models`; mount a volume there so the download happens once)
+- `STASH_SEARCH_ONNX_THREADS` — onnxruntime thread count for the `onnx:` backend (default: onnxruntime's, one per host core; set e.g. `2` under container CPU limits)
 - `STASH_CONTEXTUAL_RETRIEVAL` — Enable Claude-powered contextual chunk enrichment (default: `false`)
 - `STASH_CONTEXTUAL_MODEL` — Model for contextual retrieval (default: `claude-haiku-4-5-20251001`)
 - `ANTHROPIC_API_KEY` — Required when contextual retrieval is enabled
@@ -451,6 +452,7 @@ What is collected:
 | `STASH_SEARCH_INDEX_DIR` | `/data/.stash-index` | Search index directory |
 | `STASH_SEARCH_EMBEDDER_MODEL` | `onnx:sentence-transformers/all-MiniLM-L6-v2` | Embedder model: `onnx:` (local, ONNX Runtime), `openai:`, `cohere:`, or `sentence-transformers:` (local, PyTorch; needs `search-torch`) |
 | `STASH_MODEL_CACHE_DIR` | `/data/models` | Cache for locally downloaded model weights (`onnx:` models go in a `fastembed/` subdir) |
+| `STASH_SEARCH_ONNX_THREADS` | — | onnxruntime thread count for the `onnx:` backend (default: one per host core; set under container CPU limits) |
 | `STASH_CONTEXTUAL_RETRIEVAL` | `false` | Enable Claude-powered contextual chunk enrichment |
 | `STASH_CONTEXTUAL_MODEL` | `claude-haiku-4-5-20251001` | Model for contextual retrieval |
 | `ANTHROPIC_API_KEY` | — | Required when contextual retrieval is enabled |

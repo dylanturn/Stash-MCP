@@ -26,21 +26,40 @@ def fake_fastembed(monkeypatch):
     calls = {"init": [], "embed": [], "embed_threads": []}
 
     class FakeTokenizer:
+        """Mimics ``tokenizers.Tokenizer``: enable_* replace the whole config
+        (unspecified kwargs fall back to library defaults, like the real thing).
+
+        Deliberately non-default pad_id/pad_token/strategy so tests can prove
+        the adapter carries the model's values over rather than the defaults.
+        """
+
         def __init__(self):
             self.truncation = {
                 "max_length": 128, "stride": 0,
-                "strategy": "longest_first", "direction": "right",
+                "strategy": "only_second", "direction": "right",
             }
             self.padding = {
-                "length": 128, "pad_to_multiple_of": None, "pad_id": 0,
-                "pad_token": "[PAD]", "pad_type_id": 0, "direction": "right",
+                "length": 128, "pad_to_multiple_of": None, "pad_id": 1,
+                "pad_token": "<pad>", "pad_type_id": 0, "direction": "right",
             }
 
-        def enable_truncation(self, max_length, **kwargs):
-            self.truncation = {**self.truncation, "max_length": max_length, **kwargs}
+        def enable_truncation(
+            self, max_length, stride=0, strategy="longest_first", direction="right"
+        ):
+            self.truncation = {
+                "max_length": max_length, "stride": stride,
+                "strategy": strategy, "direction": direction,
+            }
 
-        def enable_padding(self, **kwargs):
-            self.padding = {**self.padding, **kwargs}
+        def enable_padding(
+            self, direction="right", pad_id=0, pad_type_id=0, pad_token="[PAD]",
+            length=None, pad_to_multiple_of=None,
+        ):
+            self.padding = {
+                "length": length, "pad_to_multiple_of": pad_to_multiple_of,
+                "pad_id": pad_id, "pad_token": pad_token, "pad_type_id": pad_type_id,
+                "direction": direction,
+            }
 
     class FakeInnerModel:
         def __init__(self):
@@ -48,10 +67,15 @@ def fake_fastembed(monkeypatch):
 
     class FakeTextEmbedding:
         SUPPORTED = [FAKE_MINILM, FAKE_BGE_SMALL]
+        init_delay = 0.0  # tests can set this to simulate a slow download/load
 
         def __init__(self, model_name=FAKE_BGE_SMALL, cache_dir=None, threads=None, **kwargs):
             if model_name.lower() not in [m.lower() for m in self.SUPPORTED]:
                 raise ValueError(f"Model {model_name} is not supported in TextEmbedding.")
+            if self.init_delay:
+                import time
+
+                time.sleep(self.init_delay)
             calls["init"].append(
                 {"model_name": model_name, "cache_dir": cache_dir, "threads": threads, **kwargs}
             )

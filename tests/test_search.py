@@ -917,6 +917,64 @@ class TestOnnxBackendWiring:
                 embedder_model=self.ONNX_MODEL,
             )
 
+    def test_torch_model_string_without_pydantic_ai_points_at_search_torch(
+        self, monkeypatch, tmp_path
+    ):
+        """The old default on the torch-free image explains how to get it back."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "pydantic_ai", None)
+        with pytest.raises(RuntimeError) as exc_info:
+            SearchEngine(
+                content_dir=tmp_path / "content",
+                index_dir=tmp_path / "index",
+                embedder_model="sentence-transformers:all-MiniLM-L6-v2",
+            )
+        message = str(exc_info.value)
+        assert "sentence-transformers:" in message
+        assert "stash-mcp[search-torch]" in message
+        assert "onnx:sentence-transformers/all-MiniLM-L6-v2" in message
+
+    async def test_invalid_model_string_does_not_wipe_existing_index(
+        self, fake_fastembed, tmp_path
+    ):
+        """Backend validation must run before the model-changed index clear."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        (content_dir / "test.md").write_text("# Test\n\nContent here.")
+
+        engine = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-a", embed_fn=mock_embed,
+        )
+        await engine.build_index(["test.md"])
+        assert engine.store.count > 0
+
+        # A typo in the new model string must fail fast without touching disk
+        with pytest.raises(ValueError, match="not-a-model"):
+            SearchEngine(
+                content_dir=content_dir, index_dir=index_dir,
+                embedder_model="onnx:nope/not-a-model",
+            )
+
+        # Coming back with the original model finds the index intact
+        engine_again = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-a", embed_fn=mock_embed,
+        )
+        assert engine_again.store.count > 0
+        assert engine_again.ready
+
+    def test_onnx_threads_are_passed_to_adapter(self, fake_fastembed, tmp_path):
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embedder_model=self.ONNX_MODEL,
+            onnx_threads=2,
+        )
+        assert engine._embed_fn.threads == 2
+
     async def test_switching_torch_to_onnx_model_string_clears_index(self, tmp_path):
         """Upgrading from the torch default to the ONNX default triggers a rebuild."""
         content_dir = tmp_path / "content"

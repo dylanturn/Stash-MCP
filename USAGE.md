@@ -341,7 +341,9 @@ export STASH_SEARCH_ENABLED=true
 | `cohere:embed-english-v3.0` | Cohere API | Requires `CO_API_KEY` and the `search-cohere` extra |
 | `sentence-transformers:all-mpnet-base-v2` | PyTorch | Requires the `search-torch` extra |
 
-Local model files are downloaded on first use into `STASH_MODEL_CACHE_DIR` (default `/data/models`; ONNX models under a `fastembed/` subdirectory). Mount a volume there so the download happens once. Downloads happen in the background during the first index build, so the server starts and answers health checks immediately.
+Local model files are downloaded on first use into `STASH_MODEL_CACHE_DIR` (default `/data/models`; ONNX models under a `fastembed/` subdirectory). Mount a volume there so the download happens once. With the HTTP server the download happens in the background during the first index build, so the server starts and answers health checks immediately (the stdio server, `stash-mcp-stdio`, builds the index before it starts serving, as before).
+
+The `onnx:` backend embeds queries and documents through the same path, which is what symmetric models such as `all-MiniLM-L6-v2` and the `bge-*` family expect; models that want a special query prefix or a separate query encoder are not special-cased. Set `STASH_SEARCH_ONNX_THREADS` (e.g. `2`) to cap onnxruntime's thread pool when the container runs under a CPU limit — by default onnxruntime sizes it from the host's core count.
 
 > **CPU requirement:** numpy ≥ 2.4 wheels are built for the x86-64-v2 baseline (SSE4.2/POPCNT). On Proxmox/QEMU VMs using the generic `kvm64` CPU type the process dies with `Illegal instruction` when search is enabled, whichever backend you pick — use CPU type `host` (or `x86-64-v2-AES`) for the VM.
 
@@ -430,6 +432,7 @@ Environment variables:
 | `STASH_SEARCH_INDEX_DIR` | Search index directory | `/data/.stash-index` |
 | `STASH_SEARCH_EMBEDDER_MODEL` | Embedder model string (`onnx:`, `openai:`, `cohere:`, `sentence-transformers:` prefix selects the backend) | `onnx:sentence-transformers/all-MiniLM-L6-v2` |
 | `STASH_MODEL_CACHE_DIR` | Cache directory for locally downloaded model weights | `/data/models` |
+| `STASH_SEARCH_ONNX_THREADS` | onnxruntime thread count for the `onnx:` backend | *(onnxruntime default)* |
 | `STASH_CONTEXTUAL_RETRIEVAL` | Enable contextual chunk enrichment | `false` |
 | `STASH_CONTEXTUAL_MODEL` | Model for contextual retrieval | `claude-haiku-4-5-20251001` |
 | `ANTHROPIC_API_KEY` | API key for contextual retrieval | *(none)* |

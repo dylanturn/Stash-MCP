@@ -42,7 +42,10 @@ _KNOWN_MAX_TOKENS: dict[str, int] = {
     DEFAULT_ONNX_MODEL.lower(): 256,
 }
 
-_INSTALL_HINT = "Install with: pip install 'stash-mcp[search]'"
+_INSTALL_HINT = (
+    "Install with: pip install 'stash-mcp[search]' "
+    "(Docker: build with --build-arg SEARCH_EXTRA=search)"
+)
 
 
 def is_onnx_model(model: str) -> bool:
@@ -201,15 +204,17 @@ class FastEmbedAdapter:
     def _apply_max_tokens(self, model, max_tokens: int) -> None:
         """Re-enable truncation at *max_tokens* with dynamic (batch-longest) padding.
 
-        Reaches into ``TextEmbedding.model.tokenizer`` (a ``tokenizers.Tokenizer``).
-        If fastembed's internals change, log a warning and keep its defaults.
+        Reaches into ``TextEmbedding.model.tokenizer`` (a ``tokenizers.Tokenizer``)
+        and keeps every other truncation/padding parameter the model shipped
+        with (stride, strategy, pad token/id, ...). If fastembed's internals
+        change, log a warning and leave the tokenizer exactly as it was —
+        never half-configured (truncating longer than the fixed padding length
+        would produce ragged batches).
         """
         try:
             tokenizer = model.model.tokenizer
-            tokenizer.enable_truncation(max_length=max_tokens)
+            truncation = dict(tokenizer.truncation or {})
             padding = dict(tokenizer.padding or {})
-            padding["length"] = None
-            tokenizer.enable_padding(**padding)
         except Exception as e:  # never let a tuning step break embedding
             logger.warning(
                 "Could not set truncation to %d tokens for %s (%s); "
@@ -219,7 +224,33 @@ class FastEmbedAdapter:
                 e,
             )
             return
-        logger.debug("Set truncation to %d tokens for %s", max_tokens, self.model_name)
+        try:
+            tokenizer.enable_truncation(**{**truncation, "max_length": max_tokens})
+            tokenizer.enable_padding(**{**padding, "length": None})
+        except Exception as e:
+            logger.warning(
+                "Could not set truncation to %d tokens for %s (%s); "
+                "using fastembed's default tokenizer settings",
+                max_tokens,
+                self.model_name,
+                e,
+            )
+            # Best-effort rollback so truncation and padding stay consistent.
+            try:
+                if truncation:
+                    tokenizer.enable_truncation(**truncation)
+                if padding:
+                    tokenizer.enable_padding(**padding)
+            except Exception:
+                logger.debug("Tokenizer rollback failed for %s", self.model_name)
+            return
+        logger.info(
+            "Truncating inputs at %d tokens for %s (fastembed's packaging "
+            "configured %s)",
+            max_tokens,
+            self.model_name,
+            truncation.get("max_length", "no truncation"),
+        )
 
     def embed_sync(self, texts: Iterable[str]) -> list[list[float]]:
         """Embed *texts* synchronously (blocking). Prefer awaiting the adapter."""
