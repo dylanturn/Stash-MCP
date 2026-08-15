@@ -17,6 +17,7 @@ from stash_mcp.embedders import (
     FastEmbedAdapter,
     is_onnx_model,
     onnx_model_name,
+    prefixes_for_model,
 )
 
 # Model names known to the fake fastembed module (see conftest.fake_fastembed)
@@ -64,6 +65,65 @@ class TestModelPrefix:
     def test_onnx_model_name_rejects_other_prefix(self):
         with pytest.raises(ValueError, match="onnx:"):
             onnx_model_name("openai:text-embedding-3-small")
+
+
+# --- Query / document prefixes -------------------------------------------
+
+
+class TestModelPrefixes:
+    """Asymmetric models need their documented query/passage instructions;
+    symmetric ones must be left alone."""
+
+    @pytest.mark.parametrize(
+        ("model", "query", "document"),
+        [
+            # e5 family: "query: " / "passage: "
+            ("intfloat/multilingual-e5-large", "query: ", "passage: "),
+            # nomic: task instruction prefixes are mandatory
+            ("nomic-ai/nomic-embed-text-v1.5", "search_query: ", "search_document: "),
+            ("nomic-ai/nomic-embed-text-v1.5-Q", "search_query: ", "search_document: "),
+            # arctic / mxbai / bge v1: query instruction only
+            (
+                "snowflake/snowflake-arctic-embed-s",
+                "Represent this sentence for searching relevant passages: ",
+                "",
+            ),
+            (
+                "mixedbread-ai/mxbai-embed-large-v1",
+                "Represent this sentence for searching relevant passages: ",
+                "",
+            ),
+            (
+                "BAAI/bge-small-en",
+                "Represent this sentence for searching relevant passages: ",
+                "",
+            ),
+        ],
+    )
+    def test_asymmetric_models_get_their_documented_prefixes(
+        self, model, query, document
+    ):
+        assert prefixes_for_model(model) == (query, document)
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            # bge v1.5 explicitly retrieves better WITHOUT the instruction
+            "BAAI/bge-small-en-v1.5",
+            "BAAI/bge-base-en-v1.5",
+            MINILM,
+            "thenlper/gte-base",
+            "some/unknown-model",
+        ],
+    )
+    def test_symmetric_and_unknown_models_get_no_prefix(self, model):
+        assert prefixes_for_model(model) == ("", "")
+
+    def test_lookup_is_case_insensitive(self):
+        assert prefixes_for_model("NOMIC-AI/Nomic-Embed-Text-v1.5") == (
+            "search_query: ",
+            "search_document: ",
+        )
 
 
 # --- FastEmbedAdapter (uses the `fake_fastembed` fixture from conftest) ---
@@ -141,6 +201,49 @@ class TestFastEmbedAdapter:
         monkeypatch.setitem(sys.modules, "fastembed", None)  # makes `import fastembed` fail
         with pytest.raises(RuntimeError, match=r"stash-mcp\[search\]"):
             FastEmbedAdapter(MINILM)
+
+    async def test_document_prefix_is_applied_to_embedded_text(self, fake_fastembed):
+        adapter = FastEmbedAdapter(MINILM, document_prefix="passage: ")
+        await adapter(["hello"])
+        assert fake_fastembed.calls["embed"] == [["passage: hello"]]
+
+    async def test_query_prefix_is_applied_only_to_queries(self, fake_fastembed):
+        adapter = FastEmbedAdapter(
+            MINILM, query_prefix="query: ", document_prefix="passage: "
+        )
+        await adapter(["a document"])
+        vector = await adapter.embed_query("a question")
+        assert fake_fastembed.calls["embed"] == [
+            ["passage: a document"],
+            ["query: a question"],
+        ]
+        assert vector == [float(len("query: a question")), 1.0, 0.5]
+
+    async def test_embed_query_without_prefixes_matches_document_path(
+        self, fake_fastembed
+    ):
+        adapter = FastEmbedAdapter(MINILM)
+        assert await adapter.embed_query("text") == (await adapter(["text"]))[0]
+
+    async def test_prefixes_default_to_the_model_table(self, fake_fastembed):
+        fake_fastembed.TextEmbedding.SUPPORTED.append("nomic-ai/nomic-embed-text-v1.5")
+        adapter = FastEmbedAdapter("nomic-ai/nomic-embed-text-v1.5")
+        assert adapter.query_prefix == "search_query: "
+        assert adapter.document_prefix == "search_document: "
+        await adapter(["doc"])
+        await adapter.embed_query("q")
+        assert fake_fastembed.calls["embed"] == [
+            ["search_document: doc"],
+            ["search_query: q"],
+        ]
+
+    async def test_explicit_prefix_overrides_the_table(self, fake_fastembed):
+        fake_fastembed.TextEmbedding.SUPPORTED.append("nomic-ai/nomic-embed-text-v1.5")
+        adapter = FastEmbedAdapter(
+            "nomic-ai/nomic-embed-text-v1.5", query_prefix="", document_prefix=""
+        )
+        await adapter(["doc"])
+        assert fake_fastembed.calls["embed"] == [["doc"]]
 
     async def test_concurrent_first_use_loads_model_once(self, fake_fastembed):
         fake_fastembed.TextEmbedding.init_delay = 0.05

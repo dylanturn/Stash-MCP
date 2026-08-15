@@ -904,6 +904,8 @@ class SearchEngine:
         embed_fn=None,
         model_cache_dir: Path | str | None = None,
         onnx_threads: int | None = None,
+        query_prefix: str | None = None,
+        document_prefix: str | None = None,
         filesystem=None,
         git_backend=None,
         chunk_size: int = 1000,
@@ -942,6 +944,10 @@ class SearchEngine:
                 ``onnx:`` backend (``STASH_SEARCH_ONNX_THREADS``). None keeps
                 onnxruntime's default (one thread per host core, which can
                 oversubscribe under container CPU limits).
+            query_prefix: Instruction prepended to queries for the ``onnx:``
+                backend (``STASH_SEARCH_QUERY_PREFIX``). None uses the model's
+                documented prefix; ``""`` forces none.
+            document_prefix: Same for documents (``STASH_SEARCH_DOCUMENT_PREFIX``).
             filesystem: Optional FileSystem instance for content path filtering.
             git_backend: Optional GitBackend instance for blame-enriched results.
             chunk_size: Number of characters per chunk for the sliding window.
@@ -1033,6 +1039,8 @@ class SearchEngine:
                 onnx_model_name(embedder_model),
                 cache_dir=cache_dir,
                 threads=onnx_threads,
+                query_prefix=query_prefix,
+                document_prefix=document_prefix,
             )
 
         # Remote / torch providers go through Pydantic AI's Embedder
@@ -1134,6 +1142,12 @@ class SearchEngine:
             Single embedding vector.
         """
         if self._embed_fn is not None:
+            # Backends that distinguish queries from documents (the ONNX
+            # adapter's instruction prefixes) expose embed_query; a plain
+            # async callable — the documented embed_fn contract — does not.
+            embed_query = getattr(self._embed_fn, "embed_query", None)
+            if embed_query is not None:
+                return await embed_query(text)
             result = await self._embed_fn([text])
             return result[0]
 

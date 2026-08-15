@@ -1116,6 +1116,33 @@ class TestOnnxBackendWiring:
         assert engine_again.store.count > 0
         assert engine_again.ready
 
+    async def test_query_uses_the_adapter_query_path(self, fake_fastembed, tmp_path):
+        """Queries must go through embed_query so query prefixes are applied."""
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embedder_model=self.ONNX_MODEL,
+            query_prefix="query: ",
+            document_prefix="passage: ",
+        )
+        assert engine._embed_fn.query_prefix == "query: "
+        assert engine._embed_fn.document_prefix == "passage: "
+        await engine._embed(["a document"])
+        await engine._embed_query("a question")
+        assert fake_fastembed.calls["embed"] == [
+            ["passage: a document"],
+            ["query: a question"],
+        ]
+
+    async def test_plain_embed_fn_without_embed_query_still_works(self, tmp_path):
+        """A bare async callable (the documented embed_fn contract) is enough."""
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embed_fn=mock_embed,
+        )
+        assert len(await engine._embed_query("authentication")) == 16
+
     def test_onnx_threads_are_passed_to_adapter(self, fake_fastembed, tmp_path):
         engine = SearchEngine(
             content_dir=tmp_path / "content",

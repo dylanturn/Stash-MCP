@@ -67,6 +67,12 @@ class Config:
         if os.getenv("STASH_SEARCH_ONNX_THREADS")
         else None
     )
+    # Instruction prefixes for asymmetric embedding models. Unset = use the
+    # model's documented prefix (e5 "query: "/"passage: ", nomic
+    # "search_query: "/"search_document: ", ...); set to an empty string to
+    # force none. Changing these re-indexes, since document vectors change.
+    SEARCH_QUERY_PREFIX: str | None = os.getenv("STASH_SEARCH_QUERY_PREFIX")
+    SEARCH_DOCUMENT_PREFIX: str | None = os.getenv("STASH_SEARCH_DOCUMENT_PREFIX")
     CONTEXTUAL_RETRIEVAL: bool = (
         os.getenv("STASH_CONTEXTUAL_RETRIEVAL", "false").lower() == "true"
     )

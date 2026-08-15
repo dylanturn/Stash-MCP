@@ -47,6 +47,48 @@ _INSTALL_HINT = (
     "(Docker: build with --build-arg SEARCH_EXTRA=search)"
 )
 
+# Query/document instruction prefixes, keyed by lower-cased model name prefix
+# (longest match wins). Asymmetric models are trained with these and lose a
+# lot of retrieval quality without them; symmetric models (all-MiniLM, gte,
+# and the bge *v1.5* family) are deliberately absent.
+#
+# Sources: model cards for intfloat/*e5*, nomic-ai/nomic-embed-text*,
+# Snowflake/snowflake-arctic-embed-*, mixedbread-ai/mxbai-embed-large-v1 and
+# BAAI/bge-*-en (v1). BAAI's bge v1.5 card states retrieval improves *without*
+# the instruction, which a side-by-side check on this corpus confirmed, so
+# v1.5 models are left bare.
+_BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
+_MODEL_PREFIXES: dict[str, tuple[str, str]] = {
+    # (query prefix, document prefix)
+    "intfloat/e5-": ("query: ", "passage: "),
+    "intfloat/multilingual-e5-": ("query: ", "passage: "),
+    "nomic-ai/nomic-embed-text": ("search_query: ", "search_document: "),
+    "snowflake/snowflake-arctic-embed": (_BGE_QUERY_INSTRUCTION, ""),
+    "mixedbread-ai/mxbai-embed-large": (_BGE_QUERY_INSTRUCTION, ""),
+    "baai/bge-small-en": (_BGE_QUERY_INSTRUCTION, ""),
+    "baai/bge-base-en": (_BGE_QUERY_INSTRUCTION, ""),
+    "baai/bge-large-en": (_BGE_QUERY_INSTRUCTION, ""),
+    # v1.5 retrieves better with no instruction — override the v1 entries above
+    "baai/bge-small-en-v1.5": ("", ""),
+    "baai/bge-base-en-v1.5": ("", ""),
+    "baai/bge-large-en-v1.5": ("", ""),
+    "baai/bge-small-zh-v1.5": ("", ""),
+}
+
+
+def prefixes_for_model(model_name: str) -> tuple[str, str]:
+    """Return the ``(query_prefix, document_prefix)`` a model was trained with.
+
+    Unknown models get ``("", "")`` — no prefix is the safe default, since a
+    wrong instruction hurts more than a missing one on symmetric models.
+    """
+    name = model_name.strip().lower()
+    match = ""
+    for key in _MODEL_PREFIXES:
+        if name.startswith(key) and len(key) > len(match):
+            match = key
+    return _MODEL_PREFIXES[match] if match else ("", "")
+
 
 def is_onnx_model(model: str) -> bool:
     """Return True if *model* selects the ONNX Runtime (fastembed) backend."""
@@ -133,6 +175,10 @@ class FastEmbedAdapter:
             per-model correction table (see ``_KNOWN_MAX_TOKENS``); pass an int
             to force a value, or leave None for models not in the table to keep
             fastembed's configuration.
+        query_prefix: Instruction prepended to queries. None uses the model's
+            documented prefix (see :func:`prefixes_for_model`); pass ``""`` to
+            force none.
+        document_prefix: Instruction prepended to documents, same defaulting.
 
     Raises:
         RuntimeError: If fastembed is not installed.
@@ -146,6 +192,8 @@ class FastEmbedAdapter:
         cache_dir: Path | str | None = None,
         threads: int | None = None,
         max_tokens: int | None = None,
+        query_prefix: str | None = None,
+        document_prefix: str | None = None,
     ):
         self._text_embedding_cls = _import_text_embedding()
         self.model_name = model_name
@@ -155,6 +203,11 @@ class FastEmbedAdapter:
             max_tokens
             if max_tokens is not None
             else _KNOWN_MAX_TOKENS.get(model_name.lower())
+        )
+        default_query, default_document = prefixes_for_model(model_name)
+        self.query_prefix = default_query if query_prefix is None else query_prefix
+        self.document_prefix = (
+            default_document if document_prefix is None else document_prefix
         )
         self._model = None
         self._load_lock = threading.Lock()
@@ -252,16 +305,38 @@ class FastEmbedAdapter:
             truncation.get("max_length", "no truncation"),
         )
 
-    def embed_sync(self, texts: Iterable[str]) -> list[list[float]]:
-        """Embed *texts* synchronously (blocking). Prefer awaiting the adapter."""
+    def embed_sync(
+        self, texts: Iterable[str], *, prefix: str | None = None
+    ) -> list[list[float]]:
+        """Embed *texts* synchronously (blocking). Prefer awaiting the adapter.
+
+        Args:
+            texts: Texts to embed.
+            prefix: Instruction to prepend. None uses ``document_prefix``.
+        """
         texts = list(texts)
         if not texts:
             return []
+        prefix = self.document_prefix if prefix is None else prefix
+        if prefix:
+            texts = [f"{prefix}{text}" for text in texts]
         model = self._get_model()
-        return [[float(x) for x in vector] for vector in model.embed(texts)]
+        return [vector.tolist() for vector in model.embed(texts)]
 
     async def __call__(self, texts: list[str]) -> list[list[float]]:
-        """Embed *texts* in a worker thread, returning one vector per text."""
+        """Embed *texts* as documents in a worker thread, one vector per text."""
         if not texts:
             return []
         return await asyncio.to_thread(self.embed_sync, texts)
+
+    async def embed_query(self, text: str) -> list[float]:
+        """Embed a search query, applying the model's query instruction.
+
+        Asymmetric models (e5, nomic, arctic, ...) are trained with different
+        instructions for queries and passages; using the document path for a
+        query measurably degrades retrieval on those models.
+        """
+        vectors = await asyncio.to_thread(
+            self.embed_sync, [text], prefix=self.query_prefix
+        )
+        return vectors[0]
