@@ -30,7 +30,7 @@
 - **File-first design** — Files on disk are the source of truth. No database layer. Inspect, edit, or manage content directly on the filesystem
 - **MCP native** — Content is exposed as MCP resources (read path) and MCP tools (write path), so agents can both consume and update documentation
 - **Rich rendering** — Markdown with Mermaid diagrams, syntax-highlighted code, and a built-in OpenAPI viewer for `.json` specs
-- **Semantic search** *(opt-in)* — Vector-based search across all stashed content, with pluggable embedding providers
+- **Semantic search** *(opt-in)* — Vector-based search across all stashed content; local embeddings run on ONNX Runtime (no PyTorch/CUDA in the image), with pluggable remote providers
 - **Git tracking** *(opt-in)* — File history, diffs, and blame are exposed as MCP tools; writes are gated behind atomic git-committed transactions
 - **Read-only mode** — Serve reference docs to agents without allowing any modifications
 - **Simple deployment** — Single Docker container with a volume mount. No external dependencies
@@ -70,7 +70,7 @@ Stash-MCP ships with a browser UI so humans can curate the same content their ag
 | MCP server | FastMCP |
 | REST API | FastAPI |
 | Content UI | HTML/CSS (FastAPI) |
-| Semantic search | numpy + Pydantic AI (optional) |
+| Semantic search | numpy + fastembed/ONNX Runtime (local models); Pydantic AI (remote providers) — optional |
 | Containerization | Docker + Compose |
 | Persistence | Filesystem (volume mount) |
 
@@ -373,10 +373,22 @@ Semantic search is **disabled by default**. To enable:
 
 - `STASH_SEARCH_ENABLED` — Enable semantic search (default: `false`)
 - `STASH_SEARCH_INDEX_DIR` — Directory for search index persistence (default: `/data/.stash-index`)
-- `STASH_SEARCH_EMBEDDER_MODEL` — Pydantic AI embedder model (default: `sentence-transformers:all-MiniLM-L6-v2`)
+- `STASH_SEARCH_EMBEDDER_MODEL` — Embedder model string (default: `onnx:sentence-transformers/all-MiniLM-L6-v2`), see below
+- `STASH_MODEL_CACHE_DIR` — Where locally downloaded model weights are cached (default: `/data/models`; mount a volume there so the download happens once)
 - `STASH_CONTEXTUAL_RETRIEVAL` — Enable Claude-powered contextual chunk enrichment (default: `false`)
 - `STASH_CONTEXTUAL_MODEL` — Model for contextual retrieval (default: `claude-haiku-4-5-20251001`)
 - `ANTHROPIC_API_KEY` — Required when contextual retrieval is enabled
+
+**Embedding backends.** The model string's prefix selects the backend:
+
+| Prefix | Backend | Install extra | Example |
+|---|---|---|---|
+| `onnx:` | Local, ONNX Runtime via [fastembed](https://github.com/qdrant/fastembed) — no PyTorch, no CUDA libraries (**default**) | `search` | `onnx:sentence-transformers/all-MiniLM-L6-v2` (fp32, 384-dim, ~90 MB — the default), `onnx:BAAI/bge-small-en-v1.5` (int8-quantised, ~67 MB, faster), `onnx:BAAI/bge-base-en-v1.5` (768-dim, higher quality). Any model in `fastembed.TextEmbedding.list_supported_models()` works. |
+| `openai:` | OpenAI embeddings API via Pydantic AI | `search-openai` | `openai:text-embedding-3-small` |
+| `cohere:` | Cohere embeddings API via Pydantic AI | `search-cohere` | `cohere:embed-english-v3.0` |
+| `sentence-transformers:` | Local, PyTorch via sentence-transformers (opt-in; ~5 GB of torch + CUDA wheels) | `search-torch` | `sentence-transformers:all-mpnet-base-v2` |
+
+The default `onnx:` model is the same fp32 `all-MiniLM-L6-v2` weights that the torch backend used, so vectors match the previous default to ~1e-7 (cosine similarities agree to ~1e-6). Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACHE_DIR/fastembed`.
 
 When search is enabled, the server exposes:
 
@@ -384,7 +396,9 @@ When search is enabled, the server exposes:
 - REST endpoints at `/api/search`, `/api/search/status`, and `/api/search/reindex`
 - Vector-based search in the Web UI sidebar
 
-Changing `STASH_SEARCH_EMBEDDER_MODEL` between restarts automatically clears the stale index and triggers a full rebuild with the new model.
+Changing `STASH_SEARCH_EMBEDDER_MODEL` between restarts automatically clears the stale index and triggers a full rebuild with the new model — the index records the model string, and vectors from different models or runtimes are never mixed. **Upgrading from an image whose index was built with `sentence-transformers:all-MiniLM-L6-v2` therefore triggers one full re-index on the first start with the new `onnx:` default.** To keep the torch backend instead, build with `--build-arg SEARCH_EXTRA=search-torch` and set `STASH_SEARCH_EMBEDDER_MODEL=sentence-transformers:all-MiniLM-L6-v2` explicitly.
+
+> **CPU requirement:** numpy ≥ 2.4 wheels (a dependency of every search extra; `uv.lock` pins 2.4.x) are built for the x86-64-v2 baseline (SSE4.2/POPCNT) and fail with `Illegal instruction` on older or generic virtual CPUs. On Proxmox/QEMU VMs with the `kvm64` CPU type, search cannot start regardless of backend — set the VM CPU type to `host` (or `x86-64-v2-AES`) or leave `STASH_SEARCH_ENABLED=false`.
 
 See [USAGE.md](USAGE.md) for detailed search setup instructions.
 
@@ -435,7 +449,8 @@ What is collected:
 | `STASH_TRANSACTION_LOCK_WAIT` | `120` | Seconds a queued agent waits for the transaction lock |
 | `STASH_SEARCH_ENABLED` | `false` | Enable semantic search |
 | `STASH_SEARCH_INDEX_DIR` | `/data/.stash-index` | Search index directory |
-| `STASH_SEARCH_EMBEDDER_MODEL` | `sentence-transformers:all-MiniLM-L6-v2` | Pydantic AI embedder model |
+| `STASH_SEARCH_EMBEDDER_MODEL` | `onnx:sentence-transformers/all-MiniLM-L6-v2` | Embedder model: `onnx:` (local, ONNX Runtime), `openai:`, `cohere:`, or `sentence-transformers:` (local, PyTorch; needs `search-torch`) |
+| `STASH_MODEL_CACHE_DIR` | `/data/models` | Cache for locally downloaded model weights (`onnx:` models go in a `fastembed/` subdir) |
 | `STASH_CONTEXTUAL_RETRIEVAL` | `false` | Enable Claude-powered contextual chunk enrichment |
 | `STASH_CONTEXTUAL_MODEL` | `claude-haiku-4-5-20251001` | Model for contextual retrieval |
 | `ANTHROPIC_API_KEY` | — | Required when contextual retrieval is enabled |
