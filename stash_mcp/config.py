@@ -87,9 +87,13 @@ class Config:
     )
     SEARCH_CHUNK_SIZE: int = int(os.getenv("STASH_SEARCH_CHUNK_SIZE", "1000"))
     SEARCH_CHUNK_OVERLAP: int = int(os.getenv("STASH_SEARCH_CHUNK_OVERLAP", "100"))
-    # Prepend "path > heading > subheading" to each chunk before embedding
+    # Fold the "path > heading > subheading" breadcrumb into the embedded
+    # text as well as showing it with results. Off by default: measured worse
+    # than leaving it out on both corpora tested (-0.03 to -0.07 MRR), since
+    # it dilutes the chunk's own wording. The breadcrumb is recorded and
+    # displayed either way.
     SEARCH_HEADING_CONTEXT: bool = (
-        os.getenv("STASH_SEARCH_HEADING_CONTEXT", "true").lower() == "true"
+        os.getenv("STASH_SEARCH_HEADING_CONTEXT", "false").lower() == "true"
     )
 
     # Find tool settings

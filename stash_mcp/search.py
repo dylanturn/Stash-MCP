@@ -1043,7 +1043,7 @@ class SearchEngine:
         git_backend=None,
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
-        heading_context: bool = True,
+        heading_context: bool = False,
         mmr_enabled: bool = True,
         mmr_lambda: float = 0.7,
         max_per_file: int = 2,
@@ -1089,11 +1089,13 @@ class SearchEngine:
             git_backend: Optional GitBackend instance for blame-enriched results.
             chunk_size: Number of characters per chunk for the sliding window.
             chunk_overlap: Number of characters to overlap between adjacent chunks.
-            heading_context: Prepend a ``path > H1 > H2`` breadcrumb to each
-                chunk before embedding (and store it as the chunk's context)
-                so sliding-window chunks keep their document/section identity.
-                Ignored when ``contextual_retrieval`` is on — the LLM-generated
-                context takes its place.
+            heading_context: Fold each chunk's ``path > H1 > H2`` breadcrumb
+                into the text that gets embedded. Off by default — it measured
+                worse than leaving it out on both corpora tested, because the
+                breadcrumb's words dilute the chunk's own. The breadcrumb is
+                recorded as the chunk's context and returned with results
+                either way. Ignored when ``contextual_retrieval`` is on: the
+                LLM-generated context takes its place and is always embedded.
             mmr_enabled: Apply MMR diversification + per-file cap to the
                 cosine candidate pool before truncating to max_results.
             mmr_lambda: MMR relevance/diversity balance (1.0 = relevance-only,
@@ -1621,15 +1623,15 @@ class SearchEngine:
         metadata_list: list[dict] = []
         texts_to_embed: list[str] = []
 
-        # Cheap stand-in for contextual retrieval: tell the embedding which
-        # document and section each chunk came from. Computed for the whole
-        # file in one pass over the text.
+        # Where each chunk sits in the document, computed for the whole file
+        # in one pass. Always recorded so results can show it; only folded
+        # into the embedding when heading_context asks for it.
         breadcrumbs = (
-            _heading_breadcrumbs(
+            [None] * len(windows)
+            if self.contextual_retrieval
+            else _heading_breadcrumbs(
                 normalized_path, content, [offset for offset, _ in windows]
             )
-            if self.heading_context and not self.contextual_retrieval
-            else [None] * len(windows)
         )
 
         for i, ((_offset, chunk), breadcrumb) in enumerate(zip(windows, breadcrumbs)):
@@ -1637,7 +1639,11 @@ class SearchEngine:
             if self.contextual_retrieval:
                 context = await self._contextualise_chunk(chunk, content)
 
-            embed_text = f"{context}\n\n{chunk}" if context else chunk
+            embed_text = (
+                f"{context}\n\n{chunk}"
+                if context and (self.contextual_retrieval or self.heading_context)
+                else chunk
+            )
             texts_to_embed.append(embed_text)
 
             meta = ChunkMetadata(

@@ -353,7 +353,7 @@ Set `STASH_SEARCH_ONNX_THREADS` (e.g. `2`) to cap onnxruntime's thread pool when
 
 When search is enabled, the server:
 
-1. **Indexes content at startup** — Files are split into overlapping windows, each window is prefixed with a `path > heading > subheading` breadcrumb so it keeps its place in the document, and the result is embedded into a vector
+1. **Indexes content at startup** — Files are split into overlapping windows and embedded into vectors. Each chunk also records a `path > heading > subheading` breadcrumb, returned with the result so you can see where a snippet came from (`STASH_SEARCH_HEADING_CONTEXT=true` additionally folds it into the embedded text; measured worse on both corpora tested, so it is off by default)
 2. **Never truncates silently** — A window that would overflow the embedding model's token limit is split into evenly-sized pieces first, so no text goes unembedded (`STASH_SEARCH_CHUNK_SIZE` is in characters, models cap tokens)
 3. **Keeps the index up-to-date** — File creates, updates, and deletes automatically update the search index
 4. **Persists the index to disk** — The vector index and the BM25 index are saved to `STASH_SEARCH_INDEX_DIR` and reloaded on restart
@@ -370,12 +370,13 @@ At query time:
 
 ### Reranking
 
-Vector search compares a query vector with chunk vectors that were made without ever seeing the query. A cross-encoder reads both together and scores the pair directly. Measured over 24 queries against this repository's own docs and code (MRR):
+Vector search compares a query vector with chunk vectors that were made without ever seeing the query. A cross-encoder reads both together and scores the pair directly. Measured over 42 queries against a 52-document (~305 KB) technical-documentation corpus (MRR):
 
-| Configuration | Overall | Prose questions | Literal identifiers | Code questions |
+| Configuration | Overall | Prose questions | Literal identifiers | Concept questions |
 |---|---|---|---|---|
-| Default (hybrid, no reranking) | 0.868 | 0.792 | 1.000 | 0.833 |
-| `STASH_SEARCH_RERANK_ENABLED=true` | **0.917** | **1.000** | 1.000 | 0.778 |
+| Previous defaults (all-MiniLM-L6-v2, dense) | 0.740 | 0.841 | 0.646 | 0.604 |
+| Current defaults | 0.825 | 0.811 | **1.000** | 0.604 |
+| `STASH_SEARCH_RERANK_ENABLED=true` | **0.863** | **0.886** | 0.917 | **0.719** |
 
 ```bash
 export STASH_SEARCH_RERANK_ENABLED=true      # ~80 MB extra download
@@ -464,7 +465,7 @@ Environment variables:
 | `STASH_SEARCH_ONNX_THREADS` | onnxruntime thread count for the `onnx:` backend | *(onnxruntime default)* |
 | `STASH_SEARCH_QUERY_PREFIX` | Instruction prepended to queries (`""` to disable) | *(model default)* |
 | `STASH_SEARCH_DOCUMENT_PREFIX` | Instruction prepended to documents (`""` to disable) | *(model default)* |
-| `STASH_SEARCH_HEADING_CONTEXT` | Prepend `path > heading` breadcrumbs to chunks | `true` |
+| `STASH_SEARCH_HEADING_CONTEXT` | Also embed the `path > heading` breadcrumb (always recorded and returned regardless) | `false` |
 | `STASH_SEARCH_HYBRID_ENABLED` | Fuse BM25 keyword search with vector search | *(on if `bm25s` installed)* |
 | `STASH_SEARCH_RERANK_ENABLED` | Rescore top results with a cross-encoder | `false` |
 | `STASH_SEARCH_RERANK_MODEL` | Cross-encoder used for reranking | `Xenova/ms-marco-MiniLM-L-6-v2` |

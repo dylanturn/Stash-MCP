@@ -377,7 +377,7 @@ Semantic search is **disabled by default**. To enable:
 - `STASH_MODEL_CACHE_DIR` — Where locally downloaded model weights are cached (default: `/data/models`; mount a volume there so the download happens once)
 - `STASH_SEARCH_ONNX_THREADS` — onnxruntime thread count for the `onnx:` backend (default: onnxruntime's, one per host core; set e.g. `2` under container CPU limits)
 - `STASH_SEARCH_HYBRID_ENABLED` — Fuse BM25 keyword matching with vector search (default: on when `bm25s` is installed — the `search`, `search-contextual` and `search-hybrid` extras include it; the API-provider and torch extras do not)
-- `STASH_SEARCH_HEADING_CONTEXT` — Prepend `path > heading > subheading` to each chunk before embedding (default: `true`)
+- `STASH_SEARCH_HEADING_CONTEXT` — Also fold each chunk's `path > heading > subheading` breadcrumb into the embedded text (default: `false` — the breadcrumb is returned with results either way; embedding it measured worse on both corpora tested)
 - `STASH_SEARCH_RERANK_ENABLED` — Rescore the top results with a cross-encoder (default: `false`, see [Reranking](#reranking))
 - `STASH_CONTEXTUAL_RETRIEVAL` — Enable Claude-powered contextual chunk enrichment (default: `false`)
 - `STASH_CONTEXTUAL_MODEL` — Model for contextual retrieval (default: `claude-haiku-4-5-20251001`)
@@ -396,20 +396,27 @@ Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACH
 
 > The default model's published MTEB retrieval score (51.7, against ~42 for `all-MiniLM-L6-v2`) is measured on the full-precision weights; fastembed ships a half-precision ONNX export, which reproduced the PyTorch vectors to within 8e-4 cosine in a side-by-side check here.
 
-**How retrieval works.** Chunks are embedded with a `path > heading > subheading` breadcrumb so a sliding-window chunk keeps its section identity, and any chunk that would overflow the model's token window is split rather than silently truncated. Queries run against both the vector index and a BM25 keyword index; the two rankings are fused with Reciprocal Rank Fusion, diversified with MMR, and optionally rescored by a cross-encoder.
+**How retrieval works.** Any chunk that would overflow the embedding model's token window is split rather than silently truncated, and each chunk records a `path > heading > subheading` breadcrumb that comes back with the result. Queries run against both the vector index and a BM25 keyword index; the two rankings are fused with Reciprocal Rank Fusion, diversified with MMR, and optionally rescored by a cross-encoder.
+
+Measured over 42 queries against a 52-document (~305 KB) technical-documentation corpus, MRR:
+
+| | Overall | Prose questions | Literal identifiers | Concept questions |
+|---|---|---|---|---|
+| Previous defaults (all-MiniLM-L6-v2, dense only) | 0.740 | 0.841 | 0.646 | 0.604 |
+| **Current defaults** | **0.825** | 0.811 | **1.000** | 0.604 |
+| Current defaults + reranking | **0.863** | **0.886** | 0.917 | 0.719 |
+
+Most of that comes from two places: BM25 fusion takes literal-identifier queries from 0.646 to 1.000, and the 512-token window means chunks stop being truncated — 82% of default 1000-character chunks exceeded the old model's 256-token limit on this corpus, so roughly a seventh of the text was never embedded at all.
+
+The same benchmark run against a deliberately code-heavy corpus (this repository: 14 files, 24 queries) prefers the old configuration, 0.938 to 0.875. These defaults are tuned for the prose that Stash is meant to hold; if your content is mostly source code, `STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2` may serve you better.
 
 #### Reranking
 
-A cross-encoder reads the query and the chunk together instead of comparing two independently-made vectors, which reorders the shortlist much more accurately — for prose. Measured over 24 queries against this repository's own docs and code (MRR, higher is better; 8 prose questions, 7 literal identifiers, 9 code questions):
+A cross-encoder reads the query and the chunk together instead of comparing two independently-made vectors, which reorders the shortlist much more accurately. On the documentation corpus above it is the single biggest remaining lever — overall MRR 0.825 → 0.863, and prose questions 0.811 → 0.886.
 
-| Configuration | Overall | Prose questions | Literal identifiers | Code questions |
-|---|---|---|---|---|
-| Default (hybrid, no reranking) | 0.868 | 0.792 | 1.000 | 0.833 |
-| `STASH_SEARCH_RERANK_ENABLED=true` | **0.917** | **1.000** | 1.000 | 0.778 |
+Reranking costs an extra ~80 MB model download and takes a query from ~3 ms to ~190 ms (CPU, 20 candidates), so it is **off by default**. Turn it on for documentation- and notes-heavy stashes; leave it off if the Web UI's live search needs to stay instant.
 
-Reranking costs an extra ~80 MB model download and takes a query from ~3 ms to ~190 ms (CPU, 20 candidates), so it is **off by default**. Turn it on for documentation- and notes-heavy stashes; leave it off if your content is mostly code or if the Web UI's live search needs to stay instant.
-
-> These figures come from one 24-query set over a single, code-heavy corpus, where one query is worth ~0.04 MRR overall. Treat them as direction, not precision, and prefer measuring on your own content.
+> Both benchmarks are small (42 and 24 queries), hand-labelled, and run on one corpus each — one query moves overall MRR by ~0.02–0.04. Treat them as direction, not precision, and prefer measuring on your own content.
 
 - `STASH_SEARCH_RERANK_MODEL` — cross-encoder to use (default: `Xenova/ms-marco-MiniLM-L-6-v2`)
 - `STASH_SEARCH_RERANK_CANDIDATES` — how many results to rescore (default: `20`; ~10 ms each)
@@ -482,7 +489,7 @@ What is collected:
 | `STASH_SEARCH_ONNX_THREADS` | — | onnxruntime thread count for the `onnx:` backend (default: one per host core; set under container CPU limits) |
 | `STASH_SEARCH_QUERY_PREFIX` | *(model default)* | Instruction prepended to queries; `""` disables |
 | `STASH_SEARCH_DOCUMENT_PREFIX` | *(model default)* | Instruction prepended to documents; `""` disables |
-| `STASH_SEARCH_HEADING_CONTEXT` | `true` | Prepend `path > heading` breadcrumbs to chunks before embedding |
+| `STASH_SEARCH_HEADING_CONTEXT` | `false` | Also embed each chunk's `path > heading` breadcrumb (always recorded and returned regardless) |
 | `STASH_SEARCH_HYBRID_ENABLED` | *(on if `bm25s` installed)* | Fuse BM25 keyword search with vector search |
 | `STASH_SEARCH_RERANK_ENABLED` | `false` | Rescore top results with a cross-encoder |
 | `STASH_SEARCH_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Cross-encoder used for reranking |
