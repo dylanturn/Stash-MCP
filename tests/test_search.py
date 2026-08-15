@@ -15,6 +15,7 @@ from stash_mcp.search import (
     _chunk_text_sliding_window,
     _chunk_text_sliding_window_with_offsets,
     _content_hash,
+    _even_split_params,
     _heading_breadcrumb,
     _normalize_path,
     _rrf_fuse,
@@ -843,6 +844,117 @@ class TestSearchConfig:
         from stash_mcp.config import Config
 
         assert Config.MODEL_CACHE_DIR == Path("/data/models")
+
+
+# --- Token-aware chunk splitting ---
+
+
+class TestChunkFitting:
+    """Chunks longer than the model's context window get re-split instead of
+    having their tail silently dropped by the tokenizer."""
+
+    @staticmethod
+    def _engine(tmp_path, visible, **kwargs):
+        """Engine whose embed_fn reports only *visible* chars per text."""
+
+        class Backend:
+            def __init__(self):
+                self.embedded: list[str] = []
+
+            async def __call__(self, texts):
+                self.embedded.extend(texts)
+                return await mock_embed(texts)
+
+            async def measure_visible_chars(self, texts):
+                return [min(len(t), visible) for t in texts]
+
+        backend = Backend()
+        content_dir = tmp_path / "content"
+        content_dir.mkdir(exist_ok=True)
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=backend,
+            heading_context=False,
+            **kwargs,
+        )
+        return engine, backend, content_dir
+
+    async def test_oversized_chunk_is_split_not_truncated(self, tmp_path):
+        engine, backend, content_dir = self._engine(
+            tmp_path, visible=100, chunk_size=400, chunk_overlap=0
+        )
+        (content_dir / "a.md").write_text("word " * 160)  # 800 chars -> 2 windows
+
+        chunks = await engine.index_file("a.md")
+
+        # Every embedded text is within what the model can actually read
+        assert all(len(t) <= 100 for t in backend.embedded)
+        assert chunks == len(backend.embedded) > 2
+        # Chunk indices stay sequential after splitting
+        assert [m["chunk_index"] for m in engine.store._metadata] == list(range(chunks))
+        # And the whole document is still covered
+        joined = " ".join(m["content"] for m in engine.store._metadata)
+        assert joined.count("word") >= 160
+
+    async def test_chunks_that_fit_are_left_alone(self, tmp_path):
+        engine, backend, content_dir = self._engine(
+            tmp_path, visible=10_000, chunk_size=400, chunk_overlap=0
+        )
+        (content_dir / "a.md").write_text("word " * 160)
+
+        chunks = await engine.index_file("a.md")
+        assert chunks == 2
+        assert [len(t) for t in backend.embedded] == [399, 399]
+
+    async def test_backend_without_measurement_keeps_old_behaviour(self, tmp_path):
+        content_dir = tmp_path / "content"
+        content_dir.mkdir()
+        (content_dir / "a.md").write_text("word " * 160)
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=mock_embed,  # plain callable, no measure_visible_chars
+            chunk_size=400,
+            chunk_overlap=0,
+            heading_context=False,
+        )
+        assert await engine.index_file("a.md") == 2
+
+    async def test_split_accounts_for_the_heading_breadcrumb(self, tmp_path):
+        engine, backend, content_dir = self._engine(
+            tmp_path, visible=120, chunk_size=400, chunk_overlap=0
+        )
+        engine.heading_context = True
+        (content_dir / "a.md").write_text("# Title\n\n" + "word " * 160)
+
+        await engine.index_file("a.md")
+        # The breadcrumb is part of the embedded text, so it counts against
+        # the window too
+        assert all(len(t) <= 120 for t in backend.embedded)
+
+    @pytest.mark.parametrize(
+        ("length", "budget", "overlap"),
+        [(1000, 864, 100), (1000, 500, 100), (399, 100, 0), (1500, 700, 250), (10, 5, 9)],
+    )
+    def test_even_split_params_cover_the_text_without_runts(
+        self, length, budget, overlap
+    ):
+        size, step_overlap = _even_split_params(length, budget, overlap)
+        assert size <= budget
+        pieces = _chunk_text_sliding_window("x" * length, size, step_overlap)
+        assert all(len(p) <= budget for p in pieces)
+        # No piece is dramatically smaller than the others
+        assert min(len(p) for p in pieces) >= 0.5 * max(len(p) for p in pieces)
+
+    async def test_pathological_backend_still_terminates(self, tmp_path):
+        """A backend that always reports a tiny window must not loop forever."""
+        engine, backend, content_dir = self._engine(
+            tmp_path, visible=1, chunk_size=400, chunk_overlap=0
+        )
+        (content_dir / "a.md").write_text("word " * 160)
+        chunks = await engine.index_file("a.md")
+        assert chunks > 0  # gives up at a sane floor rather than hanging
 
 
 # --- Heading breadcrumbs ---

@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import pickle
 import re
 from dataclasses import asdict, dataclass, field
@@ -777,6 +778,41 @@ def _chunk_text(text: str, max_chunk_size: int = 1500) -> list[str]:
     return chunks if chunks else [text.strip()]
 
 
+def _even_split_params(
+    length: int, budget: int, preferred_overlap: int
+) -> tuple[int, int]:
+    """Pick ``(chunk_size, chunk_overlap)`` that split *length* evenly under *budget*.
+
+    Taking budget-sized bites out of an oversized chunk leaves a runt at the
+    end (1000 chars with an 864 budget → 864 + 136), and a runt embeds to a
+    weak, noisy vector. Solving for the number of pieces first — and then for
+    the window that, *including its overlap*, covers the text in exactly that
+    many pieces — gives evenly-sized chunks instead.
+
+    Args:
+        length: Characters to cover.
+        budget: Maximum characters per piece.
+        preferred_overlap: Overlap to use if the budget can afford it.
+
+    Returns:
+        ``(chunk_size, chunk_overlap)`` for the sliding window, with
+        ``chunk_size <= budget``.
+    """
+    budget = max(1, budget)
+    overlap = max(0, min(preferred_overlap, budget // 10))
+    pieces = max(1, math.ceil(length / budget))
+    # The window advances by (size - overlap) per piece and emits another
+    # window whenever the next start is still inside the text, so `pieces`
+    # windows cover the text only when pieces * step >= length. Solving for
+    # size gives ceil(length / pieces) + overlap; step the piece count up if
+    # that no longer fits the budget.
+    while True:
+        target = math.ceil(length / pieces) + overlap
+        if target <= budget:
+            return target, overlap
+        pieces += 1
+
+
 def _content_hash(content: str) -> str:
     """Compute SHA-256 hash of content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -787,6 +823,14 @@ _MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdx"}
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 MAX_BREADCRUMB_CHARS = 200
+
+# Bounds for re-splitting chunks that overflow the embedding model's context
+# window: how many split passes to attempt, and the smallest window worth
+# splitting for. A real window is hundreds of characters (256 tokens ≈ 700+
+# chars); anything under this floor means the backend is misreporting, so we
+# let the tokenizer truncate rather than emit a chunk per word.
+_MAX_FIT_PASSES = 3
+_MIN_FIT_CHARS = 64
 
 
 def _heading_breadcrumb(file_path: str, text: str, offset: int) -> str:
@@ -1287,6 +1331,86 @@ class SearchEngine:
             await asyncio.to_thread(self.bm25_store.rebuild, snapshot)
             await self.bm25_store.save_async()
 
+    async def _fit_windows_to_context(
+        self,
+        windows: list[tuple[int, str]],
+        normalized_path: str,
+        content: str,
+    ) -> list[tuple[int, str]]:
+        """Re-split any window the embedding model would truncate.
+
+        ``chunk_size`` is in characters, but models cap *tokens* — markdown and
+        code tokenize densely enough that the default 1000-character chunk can
+        exceed a 256-token window, and the overflow is dropped silently by the
+        tokenizer. Backends that can report their context window (the ONNX
+        adapter's ``measure_visible_chars``) let us detect that and split the
+        offending window into pieces that fit, so no text goes unembedded.
+
+        No-op for backends without the measurement hook, and for the common
+        case where everything already fits.
+        """
+        measure = getattr(self._embed_fn, "measure_visible_chars", None)
+        if measure is None or not windows:
+            return windows
+
+        pending = list(windows)
+        fitted: list[tuple[int, str]] = []
+        split_count = 0
+        # Each pass either accepts a window or splits it strictly smaller, and
+        # the floor stops a backend that reports an absurdly small window from
+        # looping forever.
+        for _ in range(_MAX_FIT_PASSES):
+            if not pending:
+                break
+            texts = [
+                self._embed_text_for(normalized_path, content, offset, chunk)
+                for offset, chunk in pending
+            ]
+            visible = await measure(texts)
+            if visible is None:
+                return windows
+
+            still_pending: list[tuple[int, str]] = []
+            for (offset, chunk), embed_text, room in zip(pending, texts, visible):
+                # `room` counts characters of the *embedded* text, which may
+                # carry a context prefix; charge that overhead to the chunk.
+                budget = room - (len(embed_text) - len(chunk))
+                if budget >= len(chunk) or budget < _MIN_FIT_CHARS:
+                    fitted.append((offset, chunk))
+                    continue
+                split_count += 1
+                for inner_offset, piece in _chunk_text_sliding_window_with_offsets(
+                    chunk, *_even_split_params(len(chunk), budget, self.chunk_overlap)
+                ):
+                    still_pending.append((offset + inner_offset, piece))
+            pending = still_pending
+
+        fitted.extend(pending)
+        fitted.sort(key=lambda pair: pair[0])
+        if split_count:
+            logger.info(
+                "Split %d oversized chunk(s) in %s to fit the embedding "
+                "model's context window (%d chunks total)",
+                split_count,
+                normalized_path,
+                len(fitted),
+            )
+        return fitted
+
+    def _embed_text_for(
+        self, normalized_path: str, content: str, offset: int, chunk: str
+    ) -> str:
+        """The text that will actually be embedded for a chunk (context + chunk).
+
+        Used when measuring the context window; the contextual-retrieval
+        preamble is not known until it is generated, so its (bounded, ~200
+        token) length is approximated by the heading breadcrumb instead.
+        """
+        if self.contextual_retrieval or self.heading_context:
+            context = _heading_breadcrumb(normalized_path, content, offset)
+            return f"{context}\n\n{chunk}"
+        return chunk
+
     async def _index_file_locked(
         self, relative_path: str, *, content: str | None = None
     ) -> int:
@@ -1325,6 +1449,7 @@ class SearchEngine:
         )
         if not windows:
             return 0
+        windows = await self._fit_windows_to_context(windows, normalized_path, content)
 
         content_h = _content_hash(content)
         metadata_list: list[dict] = []
@@ -1636,7 +1761,6 @@ class SearchEngine:
         if last_changed_at is None:
             return 0.5
         from datetime import datetime, timezone
-        import math
 
         ts = last_changed_at
         if ts.tzinfo is None:

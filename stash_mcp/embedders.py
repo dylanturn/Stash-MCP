@@ -329,6 +329,49 @@ class FastEmbedAdapter:
             return []
         return await asyncio.to_thread(self.embed_sync, texts)
 
+    def measure_visible_chars_sync(self, texts: Iterable[str]) -> list[int] | None:
+        """How many leading characters of each text the model actually reads.
+
+        Tokenizers truncate silently, so a chunk longer than the model's
+        context window is embedded only up to the cut — the tail contributes
+        nothing to the vector and can never be retrieved. Encoding each text
+        (with its document prefix, which consumes part of the window) and
+        taking the largest character offset in the result tells us exactly
+        where that cut lands, without mutating tokenizer state or guessing a
+        characters-per-token ratio.
+
+        Returns:
+            One character count per text (equal to ``len(text)`` when it fits),
+            or None if the tokenizer is not reachable.
+        """
+        texts = list(texts)
+        if not texts:
+            return []
+        try:
+            tokenizer = self._get_model().model.tokenizer
+            prefix_len = len(self.document_prefix)
+            encodings = tokenizer.encode_batch(
+                [f"{self.document_prefix}{text}" for text in texts]
+            )
+            visible: list[int] = []
+            for text, encoding in zip(texts, encodings):
+                # Padding tokens carry (0, 0) offsets, so take the maximum end
+                # rather than the last one.
+                end = max((span[1] for span in encoding.offsets), default=0)
+                visible.append(max(0, min(len(text), end - prefix_len)))
+            return visible
+        except Exception as e:
+            logger.debug(
+                "Could not measure the context window for %s (%s)", self.model_name, e
+            )
+            return None
+
+    async def measure_visible_chars(self, texts: list[str]) -> list[int] | None:
+        """Async wrapper around :meth:`measure_visible_chars_sync`."""
+        if not texts:
+            return []
+        return await asyncio.to_thread(self.measure_visible_chars_sync, texts)
+
     async def embed_query(self, text: str) -> list[float]:
         """Embed a search query, applying the model's query instruction.
 

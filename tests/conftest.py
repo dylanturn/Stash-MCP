@@ -61,6 +61,33 @@ def fake_fastembed(monkeypatch):
                 "direction": direction,
             }
 
+        def encode_batch(self, texts):
+            """Stand-in for real tokenization: one token per whitespace word,
+            truncated to the configured limit and padded to the configured
+            length — both of which the real tokenizer also apply here.
+
+            Encodings expose ``offsets`` (character spans, (0, 0) for padding)
+            like ``tokenizers.Encoding`` does.
+            """
+            limit = self.truncation["max_length"]
+            pad_to = self.padding.get("length")
+            out = []
+            for text in texts:
+                offsets = []
+                position = 0
+                for word in text.split():
+                    start = text.index(word, position)
+                    offsets.append((start, start + len(word)))
+                    position = start + len(word)
+                offsets = offsets[:limit]
+                ids = list(range(len(offsets)))
+                if pad_to:
+                    pad = max(0, pad_to - len(ids))
+                    ids += [0] * pad
+                    offsets += [(0, 0)] * pad
+                out.append(types.SimpleNamespace(ids=ids, offsets=offsets))
+            return out
+
     class FakeInnerModel:
         def __init__(self):
             self.tokenizer = FakeTokenizer()

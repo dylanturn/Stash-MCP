@@ -245,6 +245,47 @@ class TestFastEmbedAdapter:
         await adapter(["doc"])
         assert fake_fastembed.calls["embed"] == [["doc"]]
 
+    async def test_visible_chars_reports_full_length_when_text_fits(
+        self, fake_fastembed
+    ):
+        adapter = FastEmbedAdapter(BGE_SMALL)  # fake limit: 128 "words"
+        text = "word " * 10
+        assert await adapter.measure_visible_chars([text.strip()]) == [len(text.strip())]
+
+    async def test_visible_chars_reports_the_truncation_point(self, fake_fastembed):
+        adapter = FastEmbedAdapter(BGE_SMALL, max_tokens=3)
+        text = "alpha beta gamma delta epsilon"
+        # Only "alpha beta gamma" survives truncation
+        assert await adapter.measure_visible_chars([text]) == [len("alpha beta gamma")]
+
+    async def test_visible_chars_discounts_the_document_prefix(self, fake_fastembed):
+        adapter = FastEmbedAdapter(
+            BGE_SMALL, max_tokens=3, document_prefix="passage: "
+        )
+        text = "alpha beta gamma delta"
+        # "passage:" eats one token, so only "alpha beta" of the text is read
+        assert await adapter.measure_visible_chars([text]) == [len("alpha beta")]
+
+    async def test_visible_chars_empty_input_does_not_load_the_model(
+        self, fake_fastembed
+    ):
+        adapter = FastEmbedAdapter(BGE_SMALL)
+        assert await adapter.measure_visible_chars([]) == []
+        assert fake_fastembed.calls["init"] == []
+
+    async def test_visible_chars_is_none_when_the_tokenizer_is_unavailable(
+        self, fake_fastembed
+    ):
+        original_init = fake_fastembed.TextEmbedding.__init__
+
+        def init_without_tokenizer(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.model = object()
+
+        fake_fastembed.TextEmbedding.__init__ = init_without_tokenizer
+        adapter = FastEmbedAdapter(MINILM)
+        assert await adapter.measure_visible_chars(["a b c"]) is None
+
     async def test_concurrent_first_use_loads_model_once(self, fake_fastembed):
         fake_fastembed.TextEmbedding.init_delay = 0.05
         adapter = FastEmbedAdapter(MINILM)
