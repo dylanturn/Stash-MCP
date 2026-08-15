@@ -13,8 +13,10 @@ import pytest
 
 from stash_mcp.embedders import (
     DEFAULT_EMBEDDER_MODEL,
+    DEFAULT_RERANK_MODEL,
     ONNX_PREFIX,
     FastEmbedAdapter,
+    FastEmbedReranker,
     is_onnx_model,
     onnx_model_name,
     prefixes_for_model,
@@ -23,6 +25,7 @@ from stash_mcp.embedders import (
 # Model names known to the fake fastembed module (see conftest.fake_fastembed)
 MINILM = "sentence-transformers/all-MiniLM-L6-v2"
 BGE_SMALL = "BAAI/bge-small-en-v1.5"
+RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 
 # --- Prefix parsing -------------------------------------------------------
 
@@ -356,3 +359,58 @@ class TestFastEmbedAdapter:
         assert tokenizer.truncation["max_length"] == 128
         assert tokenizer.padding["length"] == 128
         assert any("truncation" in rec.message.lower() for rec in caplog.records)
+
+
+# --- FastEmbedReranker ----------------------------------------------------
+
+
+class TestFastEmbedReranker:
+
+    def test_default_model_is_the_small_ms_marco_cross_encoder(self):
+        assert DEFAULT_RERANK_MODEL == RERANK_MODEL
+
+    async def test_scores_each_document_against_the_query(self, fake_fastembed):
+        reranker = FastEmbedReranker(RERANK_MODEL)
+        scores = await reranker.rerank(
+            "oauth redirect", ["oauth redirect flow", "unrelated text"]
+        )
+        assert scores == [-3.0, -5.0]  # fake: 2 query words vs 0, minus 5
+
+    async def test_loads_lazily_and_only_once(self, fake_fastembed):
+        reranker = FastEmbedReranker(RERANK_MODEL)
+        assert fake_fastembed.calls["rerank_init"] == []
+        assert reranker.loaded is False
+        await reranker.rerank("q", ["a"])
+        await reranker.rerank("q", ["b"])
+        assert len(fake_fastembed.calls["rerank_init"]) == 1
+        assert reranker.loaded is True
+
+    async def test_runs_off_the_event_loop_thread(self, fake_fastembed):
+        reranker = FastEmbedReranker(RERANK_MODEL)
+        await reranker.rerank("q", ["a"])
+        assert all(
+            t is not threading.main_thread()
+            for t in fake_fastembed.calls["rerank_threads"]
+        )
+
+    async def test_empty_documents_short_circuit(self, fake_fastembed):
+        reranker = FastEmbedReranker(RERANK_MODEL)
+        assert await reranker.rerank("q", []) == []
+        assert fake_fastembed.calls["rerank_init"] == []
+
+    async def test_passes_cache_dir_and_threads(self, fake_fastembed, tmp_path):
+        cache = tmp_path / "models" / "fastembed"
+        reranker = FastEmbedReranker(RERANK_MODEL, cache_dir=cache, threads=2)
+        await reranker.rerank("q", ["a"])
+        init = fake_fastembed.calls["rerank_init"][0]
+        assert init["cache_dir"] == str(cache)
+        assert init["threads"] == 2
+
+    def test_unknown_model_fails_fast(self, fake_fastembed):
+        with pytest.raises(ValueError, match="nope/not-a-reranker"):
+            FastEmbedReranker("nope/not-a-reranker")
+
+    def test_missing_fastembed_raises_install_hint(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "fastembed.rerank.cross_encoder", None)
+        with pytest.raises(RuntimeError, match=r"stash-mcp\[search\]"):
+            FastEmbedReranker(RERANK_MODEL)

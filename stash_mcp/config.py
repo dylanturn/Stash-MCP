@@ -132,6 +132,19 @@ class Config:
         os.getenv("STASH_SEARCH_BM25_CANDIDATE_POOL", "30")
     )
 
+    # Search ranking — cross-encoder reranking of the retrieved shortlist.
+    # Off by default: it is the strongest precision lever available but adds
+    # an ~80 MB model download and ~10 ms per candidate to every query.
+    SEARCH_RERANK_ENABLED: bool = (
+        os.getenv("STASH_SEARCH_RERANK_ENABLED", "false").lower() == "true"
+    )
+    SEARCH_RERANK_MODEL: str = os.getenv(
+        "STASH_SEARCH_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2"
+    )
+    SEARCH_RERANK_CANDIDATES: int = int(
+        os.getenv("STASH_SEARCH_RERANK_CANDIDATES", "20")
+    )
+
     # Model cache directory for locally downloaded embedding weights. The ONNX
     # backend stores its files under <dir>/fastembed; the Docker image also
     # points HF_HOME here for the torch (sentence-transformers) path.

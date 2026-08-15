@@ -29,6 +29,9 @@ ONNX_PREFIX = "onnx:"
 DEFAULT_ONNX_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_EMBEDDER_MODEL = f"{ONNX_PREFIX}{DEFAULT_ONNX_MODEL}"
 MINILM_ONNX_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Smallest of fastembed's cross-encoders (~80 MB); the L-12 variant and
+# BAAI/bge-reranker-base are more accurate but 1.5x and 13x the size.
+DEFAULT_RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 
 # Token limits applied after loading, keyed by lower-cased fastembed model
 # name. fastembed's packaging of all-MiniLM-L6-v2 (qdrant/all-MiniLM-L6-v2-onnx)
@@ -126,6 +129,17 @@ def _import_text_embedding():
             f"{_INSTALL_HINT}"
         ) from e
     return TextEmbedding
+
+
+def _import_text_cross_encoder():
+    """Import and return fastembed's ``TextCrossEncoder``, or explain the install."""
+    try:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+    except ImportError as e:
+        raise RuntimeError(
+            f"fastembed is required for cross-encoder reranking. {_INSTALL_HINT}"
+        ) from e
+    return TextCrossEncoder
 
 
 def _resolve_cache_dir(cache_dir: Path | str | None) -> str | None:
@@ -384,3 +398,91 @@ class FastEmbedAdapter:
             self.embed_sync, [text], prefix=self.query_prefix
         )
         return vectors[0]
+
+
+class FastEmbedReranker:
+    """Cross-encoder reranker on ONNX Runtime, via fastembed.
+
+    Bi-encoders embed query and document separately, so the vector never sees
+    the query and the document together. A cross-encoder reads the pair in one
+    forward pass and scores it directly, which reorders a retrieved shortlist
+    much more accurately — at the cost of one model pass per candidate
+    (~10 ms per document on CPU), so it only ever runs over the top handful.
+
+    Same lifecycle as :class:`FastEmbedAdapter`: the model name is validated
+    eagerly, the model itself loads on first use, and scoring happens in a
+    worker thread.
+
+    Args:
+        model_name: A model from ``TextCrossEncoder.list_supported_models()``.
+        cache_dir: Directory for downloaded model files (created if missing).
+        threads: onnxruntime intra/inter-op thread count.
+
+    Raises:
+        RuntimeError: If fastembed is not installed.
+        ValueError: If *model_name* is not a supported cross-encoder.
+    """
+
+    def __init__(
+        self,
+        model_name: str = DEFAULT_RERANK_MODEL,
+        *,
+        cache_dir: Path | str | None = None,
+        threads: int | None = None,
+    ):
+        self._cross_encoder_cls = _import_text_cross_encoder()
+        self.model_name = model_name
+        self.cache_dir = _resolve_cache_dir(cache_dir)
+        self.threads = threads
+        self._model = None
+        self._load_lock = threading.Lock()
+        supported = [
+            str(m.get("model", ""))
+            for m in self._cross_encoder_cls.list_supported_models()
+        ]
+        if model_name.lower() not in {m.lower() for m in supported}:
+            raise ValueError(
+                f"{model_name!r} is not a fastembed-supported reranking model. "
+                f"Supported models: {', '.join(sorted(supported))}"
+            )
+
+    @property
+    def loaded(self) -> bool:
+        """Whether the cross-encoder has been downloaded and loaded."""
+        return self._model is not None
+
+    def _get_model(self):
+        if self._model is None:
+            with self._load_lock:
+                if self._model is None:
+                    kwargs: dict = {}
+                    if self.cache_dir is not None:
+                        kwargs["cache_dir"] = self.cache_dir
+                    if self.threads is not None:
+                        kwargs["threads"] = self.threads
+                    logger.info(
+                        "Loading ONNX reranking model %s (cache_dir=%s)",
+                        self.model_name,
+                        self.cache_dir or "fastembed default",
+                    )
+                    self._model = self._cross_encoder_cls(
+                        model_name=self.model_name, **kwargs
+                    )
+        return self._model
+
+    def rerank_sync(self, query: str, documents: Iterable[str]) -> list[float]:
+        """Score each document against *query* (blocking).
+
+        Scores are unbounded logits: higher is more relevant, and they are
+        only comparable within one call.
+        """
+        documents = list(documents)
+        if not documents:
+            return []
+        return [float(score) for score in self._get_model().rerank(query, documents)]
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        """Score each document against *query* in a worker thread."""
+        if not documents:
+            return []
+        return await asyncio.to_thread(self.rerank_sync, query, documents)

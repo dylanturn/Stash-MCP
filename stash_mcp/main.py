@@ -142,6 +142,9 @@ def _create_search_engine():
             hybrid_enabled=Config.SEARCH_HYBRID_ENABLED,
             rrf_k=Config.SEARCH_RRF_K,
             bm25_candidate_pool=Config.SEARCH_BM25_CANDIDATE_POOL,
+            rerank_enabled=Config.SEARCH_RERANK_ENABLED,
+            rerank_model=Config.SEARCH_RERANK_MODEL,
+            rerank_candidates=Config.SEARCH_RERANK_CANDIDATES,
         )
         logger.info(
             f"Search engine initialised (model={Config.SEARCH_EMBEDDER_MODEL}, "

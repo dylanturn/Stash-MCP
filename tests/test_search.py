@@ -867,6 +867,9 @@ class TestSearchConfig:
         monkeypatch.setattr(Config, "SEARCH_DOCUMENT_PREFIX", "d: ")
         monkeypatch.setattr(Config, "SEARCH_HEADING_CONTEXT", False)
         monkeypatch.setattr(Config, "SEARCH_HYBRID_ENABLED", True)
+        monkeypatch.setattr(Config, "SEARCH_RERANK_ENABLED", True)
+        monkeypatch.setattr(Config, "SEARCH_RERANK_MODEL", "test-reranker")
+        monkeypatch.setattr(Config, "SEARCH_RERANK_CANDIDATES", 7)
 
         create = module._create_search_engine
         engine = create(None) if module_name == "stash_mcp.server" else create()
@@ -879,6 +882,9 @@ class TestSearchConfig:
         assert captured["document_prefix"] == "d: "
         assert captured["heading_context"] is False
         assert captured["hybrid_enabled"] is True
+        assert captured["rerank_enabled"] is True
+        assert captured["rerank_model"] == "test-reranker"
+        assert captured["rerank_candidates"] == 7
 
     def test_hybrid_retrieval_on_by_default_when_bm25s_is_installed(self):
         """BM25 catches the exact-token queries dense retrieval is worst at."""
@@ -894,6 +900,123 @@ class TestSearchConfig:
         from stash_mcp.config import Config
 
         assert Config.MODEL_CACHE_DIR == Path("/data/models")
+
+
+# --- Cross-encoder reranking ---
+
+
+class TestReranking:
+    """A cross-encoder reads query and chunk together, so it can reorder the
+    retrieved candidates far more accurately than vector similarity."""
+
+    class SpyReranker:
+        """Scores by how many query words appear in the document."""
+
+        def __init__(self):
+            self.calls: list[tuple[str, list[str]]] = []
+
+        async def rerank(self, query, documents):
+            documents = list(documents)
+            self.calls.append((query, documents))
+            terms = set(query.lower().split())
+            return [
+                float(sum(w in terms for w in doc.lower().split()))
+                for doc in documents
+            ]
+
+    @staticmethod
+    async def _engine(tmp_path, **kwargs):
+        content_dir = tmp_path / "content"
+        content_dir.mkdir(exist_ok=True)
+        # mock_embed ranks by keyword counts; "auth.md" wins on vectors while
+        # "notes.md" is the better literal answer for the test query.
+        (content_dir / "auth.md").write_text("auth auth auth oauth oauth flow\n")
+        (content_dir / "notes.md").write_text("auth rotation policy explained\n")
+        (content_dir / "other.md").write_text("config database settings\n")
+        kwargs.setdefault("heading_context", False)
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=mock_embed,
+            **kwargs,
+        )
+        await engine.build_index(["auth.md", "notes.md", "other.md"])
+        return engine
+
+    async def test_disabled_by_default(self, tmp_path):
+        engine = await self._engine(tmp_path)
+        assert engine.rerank_enabled is False
+        results = await engine.search("auth", max_results=2)
+        assert results  # unchanged behaviour
+
+    async def test_reranker_reorders_results(self, tmp_path):
+        spy = self.SpyReranker()
+        engine = await self._engine(tmp_path, rerank_enabled=True, reranker=spy)
+        results = await engine.search("rotation policy", max_results=3)
+        assert results[0].file_path == "notes.md"
+        assert spy.calls  # the reranker actually ran
+
+    async def test_reranked_results_expose_the_cross_encoder_score(self, tmp_path):
+        spy = self.SpyReranker()
+        engine = await self._engine(tmp_path, rerank_enabled=True, reranker=spy)
+        results = await engine.search("rotation policy", max_results=1)
+        assert results[0].score == 2.0
+
+    async def test_rerank_sees_the_raw_chunk_without_the_breadcrumb(self, tmp_path):
+        """The heading breadcrumb helps the embedding but hurts the
+        cross-encoder (measured: MRR 0.938 chunk-only vs 0.868 with it)."""
+        spy = self.SpyReranker()
+        engine = await self._engine(
+            tmp_path, rerank_enabled=True, reranker=spy, heading_context=True
+        )
+        await engine.reindex()
+        assert any(m["context"] for m in engine.store._metadata)  # breadcrumbs exist
+
+        await engine.search("rotation policy", max_results=2)
+        _query, documents = spy.calls[-1]
+        assert documents
+        assert not any(doc.startswith("notes.md >") for doc in documents)
+        assert any("rotation policy" in doc for doc in documents)
+
+    async def test_candidate_cap_limits_the_work(self, tmp_path):
+        spy = self.SpyReranker()
+        engine = await self._engine(
+            tmp_path, rerank_enabled=True, reranker=spy, rerank_candidates=2
+        )
+        await engine.search("auth", max_results=3)
+        _query, documents = spy.calls[-1]
+        assert len(documents) == 2
+
+    async def test_file_type_filter_runs_before_reranking(self, tmp_path):
+        spy = self.SpyReranker()
+        engine = await self._engine(tmp_path, rerank_enabled=True, reranker=spy)
+        (engine.content_dir / "code.py").write_text("auth rotation policy in code\n")
+        await engine.index_file("code.py")
+        await engine.search("rotation policy", max_results=3, file_types=[".py"])
+        _query, documents = spy.calls[-1]
+        assert len(documents) == 1  # only the .py chunk was worth scoring
+
+    async def test_reranker_failure_falls_back_to_retrieval_order(
+        self, tmp_path, caplog
+    ):
+        class Broken:
+            async def rerank(self, query, documents):
+                raise RuntimeError("model download failed")
+
+        engine = await self._engine(tmp_path, rerank_enabled=True, reranker=Broken())
+        with caplog.at_level("WARNING", logger="stash_mcp.search"):
+            results = await engine.search("auth", max_results=2)
+        assert results  # search still answers
+        assert any("rerank" in rec.message.lower() for rec in caplog.records)
+
+    async def test_recency_blend_applies_after_reranking(self, tmp_path):
+        """Recency must reorder the cross-encoder's scores, not stale ones."""
+        spy = self.SpyReranker()
+        engine = await self._engine(tmp_path, rerank_enabled=True, reranker=spy)
+        engine.recency_weight = 1.0  # recency only
+        engine._git_backend = None  # no blame -> neutral 0.5 for everything
+        results = await engine.search("rotation policy", max_results=3)
+        assert results  # no crash when both are enabled
 
 
 # --- MMR must not discard the fused ranking ---
