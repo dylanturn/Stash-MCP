@@ -130,6 +130,7 @@ def _create_search_engine():
             onnx_threads=Config.SEARCH_ONNX_THREADS,
             chunk_size=Config.SEARCH_CHUNK_SIZE,
             chunk_overlap=Config.SEARCH_CHUNK_OVERLAP,
+            heading_context=Config.SEARCH_HEADING_CONTEXT,
             mmr_enabled=Config.SEARCH_MMR_ENABLED,
             mmr_lambda=Config.SEARCH_MMR_LAMBDA,
             max_per_file=Config.SEARCH_MAX_PER_FILE,

@@ -13,7 +13,9 @@ from stash_mcp.search import (
     VectorStore,
     _chunk_text,
     _chunk_text_sliding_window,
+    _chunk_text_sliding_window_with_offsets,
     _content_hash,
+    _heading_breadcrumb,
     _normalize_path,
     _rrf_fuse,
 )
@@ -249,6 +251,16 @@ class TestChunking:
         text = "A" * 3000
         chunks = _chunk_text_sliding_window(text, chunk_size=1500, chunk_overlap=200)
         assert all(c for c in chunks)
+
+    def test_offsets_locate_each_chunk_in_the_source(self):
+        """The offset variant reports where each chunk starts in the original text."""
+        text = "START " + "middle " * 250 + "END"
+        pairs = _chunk_text_sliding_window_with_offsets(
+            text, chunk_size=1000, chunk_overlap=100
+        )
+        assert [c for _, c in pairs] == _chunk_text_sliding_window(text, 1000, 100)
+        for offset, chunk in pairs:
+            assert text[offset:offset + len(chunk)] == chunk
 
     def test_backward_compat_chunk_text(self):
         """Test that the legacy _chunk_text function still works."""
@@ -831,6 +843,144 @@ class TestSearchConfig:
         from stash_mcp.config import Config
 
         assert Config.MODEL_CACHE_DIR == Path("/data/models")
+
+
+# --- Heading breadcrumbs ---
+
+
+class TestHeadingBreadcrumb:
+    """Chunks carry a `path > H1 > H2` breadcrumb so the embedding knows
+    where in the document the text came from."""
+
+    DOC = (
+        "# Authentication\n\n"
+        "Intro paragraph.\n\n"
+        "## OAuth2\n\n"
+        "The flow begins with a redirect.\n\n"
+        "### PKCE\n\n"
+        "Public clients must use PKCE.\n\n"
+        "## Sessions\n\n"
+        "Cookies are HttpOnly.\n"
+    )
+
+    def test_offset_before_any_heading_uses_path_only(self):
+        text = "Preamble text\n\n# Title\n\nBody"
+        assert _heading_breadcrumb("docs/a.md", text, 0) == "docs/a.md"
+
+    def test_nested_headings_are_joined(self):
+        offset = self.DOC.index("Public clients")
+        assert (
+            _heading_breadcrumb("docs/auth.md", self.DOC, offset)
+            == "docs/auth.md > Authentication > OAuth2 > PKCE"
+        )
+
+    def test_sibling_heading_replaces_deeper_levels(self):
+        offset = self.DOC.index("Cookies are HttpOnly")
+        assert (
+            _heading_breadcrumb("docs/auth.md", self.DOC, offset)
+            == "docs/auth.md > Authentication > Sessions"
+        )
+
+    def test_heading_on_the_chunk_boundary_is_included(self):
+        offset = self.DOC.index("## OAuth2")
+        assert (
+            _heading_breadcrumb("docs/auth.md", self.DOC, offset)
+            == "docs/auth.md > Authentication > OAuth2"
+        )
+
+    def test_hash_inside_fenced_code_is_not_a_heading(self):
+        text = (
+            "# Real Heading\n\n"
+            "```bash\n"
+            "# not a heading, a shell comment\n"
+            "echo hi\n"
+            "```\n\n"
+            "Body text here.\n"
+        )
+        offset = text.index("Body text here")
+        assert _heading_breadcrumb("a.md", text, offset) == "a.md > Real Heading"
+
+    def test_non_markdown_file_gets_path_only(self):
+        text = "# a python comment\nDB_HOST = 'localhost'\n"
+        offset = text.index("DB_HOST")
+        assert _heading_breadcrumb("config.py", text, offset) == "config.py"
+
+    def test_breadcrumb_is_length_capped(self):
+        text = "# " + "very long heading " * 40 + "\n\nbody\n"
+        crumb = _heading_breadcrumb("a.md", text, text.index("body"))
+        assert len(crumb) <= 200
+
+
+class TestHeadingContextInEngine:
+
+    @pytest.fixture
+    def content_dir(self, tmp_path):
+        d = tmp_path / "content"
+        (d / "docs").mkdir(parents=True)
+        # Long enough (at chunk_size=200) that the second chunk starts inside
+        # the OAuth2 section rather than at the document heading.
+        (d / "docs" / "auth.md").write_text(
+            "# Authentication\n\n"
+            + "Intro paragraph about identity. " * 8
+            + "\n\n## OAuth2\n\n"
+            + "The flow begins with a redirect. " * 8
+        )
+        return d
+
+    async def test_each_chunk_gets_its_own_section_breadcrumb(
+        self, content_dir, tmp_path
+    ):
+        embedded: list[str] = []
+
+        async def spy_embed(texts):
+            embedded.extend(texts)
+            return await mock_embed(texts)
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=spy_embed,
+            chunk_size=200,
+            chunk_overlap=20,
+        )
+        await engine.index_file("docs/auth.md")
+        contexts = [m["context"] for m in engine.store._metadata]
+
+        # The first chunk starts at the document heading...
+        assert contexts[0] == "docs/auth.md > Authentication"
+        # ...and later chunks pick up the section they start in.
+        assert "docs/auth.md > Authentication > OAuth2" in contexts
+        # The breadcrumb is prepended to the embedded text, not to stored content
+        assert embedded[0].startswith("docs/auth.md > Authentication\n\n")
+        assert engine.store._metadata[0]["content"].startswith("# Authentication")
+
+    async def test_can_be_disabled(self, content_dir, tmp_path):
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=mock_embed,
+            heading_context=False,
+        )
+        await engine.index_file("docs/auth.md")
+        assert engine.store._metadata[0]["context"] is None
+
+    async def test_contextual_retrieval_wins_over_breadcrumbs(
+        self, content_dir, tmp_path, monkeypatch
+    ):
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=mock_embed,
+            contextual_retrieval=True,
+            anthropic_api_key="test-key",
+        )
+
+        async def fake_contextualise(chunk, full_document):
+            return "LLM-generated context"
+
+        monkeypatch.setattr(engine, "_contextualise_chunk", fake_contextualise)
+        await engine.index_file("docs/auth.md")
+        assert engine.store._metadata[0]["context"] == "LLM-generated context"
 
 
 # --- ONNX Runtime (fastembed) backend wiring ---

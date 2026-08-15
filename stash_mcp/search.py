@@ -639,6 +639,54 @@ def _rrf_fuse(
     return [{**meta_by_id[key], "score": s} for key, s in fused]
 
 
+def _chunk_text_sliding_window_with_offsets(
+    text: str,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 100,
+) -> list[tuple[int, str]]:
+    """Split text into fixed-size overlapping chunks, keeping source offsets.
+
+    Same windowing as :func:`_chunk_text_sliding_window`; each chunk is
+    returned with the index in *text* where it starts, so callers can work
+    out what section of the document a chunk came from.
+
+    Args:
+        text: The text to chunk.
+        chunk_size: Number of characters per chunk.
+        chunk_overlap: Number of characters to overlap between adjacent chunks.
+
+    Returns:
+        List of ``(offset, chunk)`` pairs. ``text[offset:offset + len(chunk)]``
+        is the chunk.
+    """
+    if not text or not text.strip():
+        return []
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    step = max(1, chunk_size - max(0, chunk_overlap))
+
+    # Offsets are tracked against the original text, so account for the
+    # leading whitespace that the outer strip() would remove.
+    lead = len(text) - len(text.lstrip())
+    stripped = text.strip()
+
+    if len(stripped) <= chunk_size:
+        return [(lead, stripped)]
+
+    chunks: list[tuple[int, str]] = []
+    start = 0
+    while start < len(stripped):
+        window = stripped[start:start + chunk_size]
+        inner = len(window) - len(window.lstrip())
+        chunk = window.strip()
+        if chunk:
+            chunks.append((lead + start + inner, chunk))
+        start += step
+
+    return chunks
+
+
 def _chunk_text_sliding_window(
     text: str,
     chunk_size: int = 1000,
@@ -656,23 +704,12 @@ def _chunk_text_sliding_window(
     Returns:
         List of text chunks.
     """
-    if not text or not text.strip():
-        return []
-
-    text = text.strip()
-
-    if len(text) <= chunk_size:
-        return [text]
-
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end].strip())
-        start += chunk_size - chunk_overlap
-
-    # Drop any trailing empty chunk
-    return [c for c in chunks if c.strip()]
+    return [
+        chunk
+        for _, chunk in _chunk_text_sliding_window_with_offsets(
+            text, chunk_size, chunk_overlap
+        )
+    ]
 
 
 def _chunk_text(text: str, max_chunk_size: int = 1500) -> list[str]:
@@ -745,6 +782,66 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+# Extensions whose '#' lines are markdown headings (elsewhere '#' is a comment)
+_MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdx"}
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+MAX_BREADCRUMB_CHARS = 200
+
+
+def _heading_breadcrumb(file_path: str, text: str, offset: int) -> str:
+    """Build a ``path > H1 > H2`` breadcrumb for the chunk starting at *offset*.
+
+    A sliding-window chunk loses the document title and section it came from,
+    which is exactly the context a search query tends to name ("oauth setup
+    docs"). Prepending the breadcrumb to the embedded text puts that signal
+    back, cheaply and without an LLM call.
+
+    Headings inside fenced code blocks are ignored, so a ``# comment`` in a
+    shell snippet never becomes a section. Only markdown files are scanned;
+    everything else gets the path alone.
+
+    Args:
+        file_path: Normalized relative path of the file.
+        text: Full document text.
+        offset: Index in *text* where the chunk starts.
+
+    Returns:
+        The breadcrumb, truncated to ``MAX_BREADCRUMB_CHARS``.
+    """
+    parts = [file_path]
+    if Path(file_path).suffix.lower() in _MARKDOWN_SUFFIXES:
+        headings: list[tuple[int, str]] = []  # (level, title) stack
+        in_fence = False
+        position = 0
+        for line in text.splitlines(keepends=True):
+            # A heading exactly at the chunk boundary still describes the chunk.
+            if position > offset:
+                break
+            position += len(line)
+            if _FENCE_RE.match(line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            match = _HEADING_RE.match(line.rstrip("\n"))
+            if not match:
+                continue
+            level = len(match.group(1))
+            title = match.group(2).strip()
+            if not title:
+                continue
+            while headings and headings[-1][0] >= level:
+                headings.pop()
+            headings.append((level, title))
+        parts.extend(title for _, title in headings)
+
+    breadcrumb = " > ".join(parts)
+    if len(breadcrumb) > MAX_BREADCRUMB_CHARS:
+        breadcrumb = breadcrumb[:MAX_BREADCRUMB_CHARS - 1].rstrip() + "…"
+    return breadcrumb
+
+
 @dataclass
 class IndexMeta:
     """Tracks file hashes and chunk counts for incremental indexing."""
@@ -811,6 +908,7 @@ class SearchEngine:
         git_backend=None,
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
+        heading_context: bool = True,
         mmr_enabled: bool = True,
         mmr_lambda: float = 0.7,
         max_per_file: int = 2,
@@ -848,6 +946,11 @@ class SearchEngine:
             git_backend: Optional GitBackend instance for blame-enriched results.
             chunk_size: Number of characters per chunk for the sliding window.
             chunk_overlap: Number of characters to overlap between adjacent chunks.
+            heading_context: Prepend a ``path > H1 > H2`` breadcrumb to each
+                chunk before embedding (and store it as the chunk's context)
+                so sliding-window chunks keep their document/section identity.
+                Ignored when ``contextual_retrieval`` is on — the LLM-generated
+                context takes its place.
             mmr_enabled: Apply MMR diversification + per-file cap to the
                 cosine candidate pool before truncating to max_results.
             mmr_lambda: MMR relevance/diversity balance (1.0 = relevance-only,
@@ -880,6 +983,7 @@ class SearchEngine:
         self._git_backend = git_backend
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.heading_context = heading_context
         self.mmr_enabled = mmr_enabled
         self.mmr_lambda = mmr_lambda
         self.max_per_file = max_per_file
@@ -1202,18 +1306,24 @@ class SearchEngine:
                 logger.warning(f"Could not read {normalized_path}: {e}")
                 return 0
 
-        chunks = _chunk_text_sliding_window(content, self.chunk_size, self.chunk_overlap)
-        if not chunks:
+        windows = _chunk_text_sliding_window_with_offsets(
+            content, self.chunk_size, self.chunk_overlap
+        )
+        if not windows:
             return 0
 
         content_h = _content_hash(content)
         metadata_list: list[dict] = []
         texts_to_embed: list[str] = []
 
-        for i, chunk in enumerate(chunks):
+        for i, (offset, chunk) in enumerate(windows):
             context = None
             if self.contextual_retrieval:
                 context = await self._contextualise_chunk(chunk, content)
+            elif self.heading_context:
+                # Cheap stand-in for contextual retrieval: tell the embedding
+                # which document and section this chunk came from.
+                context = _heading_breadcrumb(normalized_path, content, offset)
 
             embed_text = f"{context}\n\n{chunk}" if context else chunk
             texts_to_embed.append(embed_text)
@@ -1232,12 +1342,12 @@ class SearchEngine:
         self.bm25_store.mark_dirty()
 
         self.meta.file_hashes[normalized_path] = content_h
-        self.meta.chunk_counts[normalized_path] = len(chunks)
+        self.meta.chunk_counts[normalized_path] = len(metadata_list)
         # Record which model produced these vectors so a later model change
         # (e.g. switching backends) is detected and the index rebuilt.
         self.meta.embedder_model = self.embedder_model
 
-        return len(chunks)
+        return len(metadata_list)
 
     async def index_file(
         self, relative_path: str, *, content: str | None = None

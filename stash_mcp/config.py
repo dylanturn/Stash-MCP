@@ -75,6 +75,10 @@ class Config:
     )
     SEARCH_CHUNK_SIZE: int = int(os.getenv("STASH_SEARCH_CHUNK_SIZE", "1000"))
     SEARCH_CHUNK_OVERLAP: int = int(os.getenv("STASH_SEARCH_CHUNK_OVERLAP", "100"))
+    # Prepend "path > heading > subheading" to each chunk before embedding
+    SEARCH_HEADING_CONTEXT: bool = (
+        os.getenv("STASH_SEARCH_HEADING_CONTEXT", "true").lower() == "true"
+    )
 
     # Find tool settings
     FIND_MAX_RESULTS_CEILING: int = int(
