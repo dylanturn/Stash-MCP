@@ -384,6 +384,8 @@ export STASH_SEARCH_RERANK_CANDIDATES=20     # ~10 ms per candidate, per query
 
 Queries go from ~3 ms to ~190 ms with 20 candidates on CPU, which is why it is off by default. Recommended for prose-heavy content; skip it for code-heavy stashes and when the Web UI's live search must stay instant.
 
+> With reranking on, the `score` field in search results is the cross-encoder's logit — unbounded, sometimes negative, comparable only within one result set — instead of a 0–1 cosine similarity.
+
 ### Using Search via MCP
 
 When search is enabled, a `search_content` tool is registered in the MCP server:

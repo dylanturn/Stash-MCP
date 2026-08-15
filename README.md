@@ -410,6 +410,8 @@ Reranking costs an extra ~80 MB model download and takes a query from ~3 ms to ~
 - `STASH_SEARCH_RERANK_MODEL` — cross-encoder to use (default: `Xenova/ms-marco-MiniLM-L-6-v2`)
 - `STASH_SEARCH_RERANK_CANDIDATES` — how many results to rescore (default: `20`; ~10 ms each)
 
+> With reranking on, the `score` field returned by `/api/search` and `search_content` is the cross-encoder's logit — unbounded, sometimes negative, and only comparable within a single result set — rather than a 0–1 cosine similarity.
+
 When search is enabled, the server exposes:
 
 - An MCP `search_content` tool for agents
