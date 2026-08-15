@@ -95,6 +95,7 @@ def _create_search_engine(filesystem: FileSystem):
             rerank_enabled=Config.SEARCH_RERANK_ENABLED,
             rerank_model=Config.SEARCH_RERANK_MODEL,
             rerank_candidates=Config.SEARCH_RERANK_CANDIDATES,
+            rerank_margin=Config.SEARCH_RERANK_MARGIN,
         )
         engine._filesystem = filesystem
         logger.info(f"Search engine initialised (model={Config.SEARCH_EMBEDDER_MODEL})")

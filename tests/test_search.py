@@ -873,6 +873,7 @@ class TestSearchConfig:
         monkeypatch.setattr(Config, "SEARCH_RERANK_ENABLED", True)
         monkeypatch.setattr(Config, "SEARCH_RERANK_MODEL", "test-reranker")
         monkeypatch.setattr(Config, "SEARCH_RERANK_CANDIDATES", 7)
+        monkeypatch.setattr(Config, "SEARCH_RERANK_MARGIN", 0.25)
 
         create = module._create_search_engine
         engine = create(None) if module_name == "stash_mcp.server" else create()
@@ -888,6 +889,7 @@ class TestSearchConfig:
         assert captured["rerank_enabled"] is True
         assert captured["rerank_model"] == "test-reranker"
         assert captured["rerank_candidates"] == 7
+        assert captured["rerank_margin"] == 0.25
 
     def test_hybrid_retrieval_on_by_default_when_bm25s_is_installed(self):
         """BM25 catches the exact-token queries dense retrieval is worst at."""
@@ -1039,6 +1041,9 @@ class TestReranking:
         (content_dir / "notes.md").write_text("auth rotation policy explained\n")
         (content_dir / "other.md").write_text("config database settings\n")
         kwargs.setdefault("heading_context", False)
+        # Rerank unconditionally unless a test is specifically exercising the
+        # confidence margin, so "what does the reranker do" stays deterministic.
+        kwargs.setdefault("rerank_margin", 0.0)
         engine = SearchEngine(
             content_dir=content_dir,
             index_dir=tmp_path / "index",
@@ -1100,6 +1105,61 @@ class TestReranking:
         await engine.search("rotation policy", max_results=3, file_types=[".py"])
         _query, documents = spy.calls[-1]
         assert len(documents) == 1  # only the .py chunk was worth scoring
+
+    async def test_default_margin_skips_decided_result_sets(self, tmp_path):
+        """Reranking defaults to running only on contested result sets."""
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embed_fn=mock_embed,
+        )
+        assert engine.rerank_margin == 0.1
+
+    async def test_margin_zero_reranks_unconditionally(self, tmp_path):
+        spy = self.SpyReranker()
+        engine = await self._engine(
+            tmp_path, rerank_enabled=True, reranker=spy, rerank_margin=0.0
+        )
+        engine._decide_rerank_scores = lambda results: [1.0, 0.1, 0.0]
+        await engine.search("rotation policy", max_results=3)
+        assert spy.calls
+
+    async def test_a_confident_result_set_skips_the_cross_encoder(self, tmp_path):
+        """When the top candidate is already well clear of the runner-up,
+        reranking is unlikely to change the answer and not worth ~20 ms
+        per candidate."""
+        spy = self.SpyReranker()
+        engine = await self._engine(
+            tmp_path, rerank_enabled=True, reranker=spy, rerank_margin=0.2
+        )
+        engine._decide_rerank_scores = lambda results: [1.0, 0.5, 0.4]
+
+        results = await engine.search("rotation policy", max_results=3)
+        assert not spy.calls
+        assert results  # still answered, from the retrieval ranking
+
+    async def test_a_close_result_set_still_reranks(self, tmp_path):
+        spy = self.SpyReranker()
+        engine = await self._engine(
+            tmp_path, rerank_enabled=True, reranker=spy, rerank_margin=0.2
+        )
+        engine._decide_rerank_scores = lambda results: [1.0, 0.95, 0.9]
+
+        await engine.search("rotation policy", max_results=3)
+        assert spy.calls
+
+    async def test_margin_uses_the_two_best_scores_not_list_order(self, tmp_path):
+        """MMR returns candidates in diversity order, so the list is not
+        necessarily sorted by score."""
+        spy = self.SpyReranker()
+        engine = await self._engine(
+            tmp_path, rerank_enabled=True, reranker=spy, rerank_margin=0.2
+        )
+        # Best two scores are 1.0 and 0.98 — close — but out of order
+        engine._decide_rerank_scores = lambda results: [1.0, 0.3, 0.98]
+
+        await engine.search("rotation policy", max_results=3)
+        assert spy.calls
 
     async def test_reranker_failure_falls_back_to_retrieval_order(
         self, tmp_path, caplog

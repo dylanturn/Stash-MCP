@@ -383,7 +383,7 @@ export STASH_SEARCH_RERANK_ENABLED=true      # ~120 MB extra download
 export STASH_SEARCH_RERANK_CANDIDATES=10     # ~22 ms per candidate, per query
 ```
 
-Queries go from ~4 ms to ~220 ms at the default 10 candidates, which is why it is off by default. Rescoring 20 instead doubles the latency for no gain (0.880 vs 0.882), and truncating chunks to save time costs more accuracy than it saves (0.845). Worth it when precision matters more than latency — note it is slightly *negative* on exact-identifier queries, which the lexical index already answers perfectly.
+Reranking runs only on contested result sets — when the top two retrieval scores are further apart than `STASH_SEARCH_RERANK_MARGIN` (default `0.1`), retrieval already has a clear winner and the cross-encoder is skipped, which on the benchmark skipped 29% of queries and cut mean latency from 218 ms to 160 ms with no quality change. Queries go from ~4 ms to ~160 ms at the default 10 candidates, which is why it is off by default. Rescoring 20 instead doubles the latency for no gain (0.880 vs 0.882), and truncating chunks to save time costs more accuracy than it saves (0.845). Worth it when precision matters more than latency — note it is slightly *negative* on exact-identifier queries, which the lexical index already answers perfectly.
 
 Model choice matters more than model size. On this corpus `Xenova/ms-marco-MiniLM-L-12-v2` (~120 MB, the default) scored 0.880 and `Xenova/ms-marco-MiniLM-L-6-v2` (~80 MB) scored 0.863 — no better than not reranking — while `jinaai/jina-reranker-v1-tiny-en` (0.824) and `jinaai/jina-reranker-v1-turbo-en` (0.816) both scored *worse than no reranking at all* despite being larger. `BAAI/bge-reranker-base` is stronger again but over 1 GB.
 
@@ -472,6 +472,7 @@ Environment variables:
 | `STASH_SEARCH_RERANK_ENABLED` | Rescore top results with a cross-encoder | `false` |
 | `STASH_SEARCH_RERANK_MODEL` | Cross-encoder used for reranking | `Xenova/ms-marco-MiniLM-L-12-v2` |
 | `STASH_SEARCH_RERANK_CANDIDATES` | How many results to rescore | `10` |
+| `STASH_SEARCH_RERANK_MARGIN` | Rerank only when the top two scores are this close (`0` = always) | `0.1` |
 | `STASH_CONTEXTUAL_RETRIEVAL` | Enable contextual chunk enrichment | `false` |
 | `STASH_CONTEXTUAL_MODEL` | Model for contextual retrieval | `claude-haiku-4-5-20251001` |
 | `ANTHROPIC_API_KEY` | API key for contextual retrieval | *(none)* |

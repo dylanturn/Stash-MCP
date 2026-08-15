@@ -436,10 +436,13 @@ How many candidates to rescore is the latency dial, and more is not better:
 
 Shortening the text sent to the cross-encoder is not a useful economy — truncating chunks to 500 characters cut latency to 200 ms but dropped MRR to 0.845, worse than reranking half as many full chunks.
 
+Reranking also runs **only on contested result sets**. When the two best retrieval scores are further apart than `STASH_SEARCH_RERANK_MARGIN` (default `0.1`), retrieval already has a clear winner and the cross-encoder is skipped. On the benchmark that skipped 29% of queries and cut mean latency from 218 ms to 160 ms with identical ranking quality; a wider margin reranks more often (0.3 → 12% skipped, 194 ms), and `0` reranks unconditionally.
+
 > Both benchmarks are small (42 and 24 queries), hand-labelled, and run on one corpus each — one query moves overall MRR by ~0.02–0.04. Treat them as direction, not precision, and prefer measuring on your own content.
 
 - `STASH_SEARCH_RERANK_MODEL` — cross-encoder to use (default: `Xenova/ms-marco-MiniLM-L-12-v2`)
 - `STASH_SEARCH_RERANK_CANDIDATES` — how many results to rescore (default: `10`; ~22 ms each)
+- `STASH_SEARCH_RERANK_MARGIN` — only rerank when the two best scores are this close (default: `0.1`; `0` reranks every query)
 
 > With reranking on, the `score` field returned by `/api/search` and `search_content` is the cross-encoder's logit — unbounded, sometimes negative, and only comparable within a single result set — rather than a 0–1 cosine similarity.
 
@@ -514,6 +517,7 @@ What is collected:
 | `STASH_SEARCH_RERANK_ENABLED` | `false` | Rescore top results with a cross-encoder |
 | `STASH_SEARCH_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-12-v2` | Cross-encoder used for reranking |
 | `STASH_SEARCH_RERANK_CANDIDATES` | `10` | How many results to rescore |
+| `STASH_SEARCH_RERANK_MARGIN` | `0.1` | Rerank only when the top two scores are this close; `0` = always |
 | `STASH_CONTEXTUAL_RETRIEVAL` | `false` | Enable Claude-powered contextual chunk enrichment |
 | `STASH_CONTEXTUAL_MODEL` | `claude-haiku-4-5-20251001` | Model for contextual retrieval |
 | `ANTHROPIC_API_KEY` | — | Required when contextual retrieval is enabled |
