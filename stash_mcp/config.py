@@ -52,8 +52,12 @@ class Config:
     SEARCH_INDEX_DIR: Path = Path(
         os.getenv("STASH_SEARCH_INDEX_DIR", "/data/.stash-index")
     )
+    # Embedder model string. "onnx:<fastembed model>" runs locally on ONNX
+    # Runtime (default, no torch); "openai:", "cohere:" and
+    # "sentence-transformers:" (torch, needs the search-torch extra) go
+    # through Pydantic AI.
     SEARCH_EMBEDDER_MODEL: str = os.getenv(
-        "STASH_SEARCH_EMBEDDER_MODEL", "sentence-transformers:all-MiniLM-L6-v2"
+        "STASH_SEARCH_EMBEDDER_MODEL", "onnx:sentence-transformers/all-MiniLM-L6-v2"
     )
     CONTEXTUAL_RETRIEVAL: bool = (
         os.getenv("STASH_CONTEXTUAL_RETRIEVAL", "false").lower() == "true"
@@ -96,7 +100,9 @@ class Config:
         os.getenv("STASH_SEARCH_BM25_CANDIDATE_POOL", "30")
     )
 
-    # Model cache directory (for HuggingFace/sentence-transformers weights)
+    # Model cache directory for locally downloaded embedding weights. The ONNX
+    # backend stores its files under <dir>/fastembed; the Docker image also
+    # points HF_HOME here for the torch (sentence-transformers) path.
     MODEL_CACHE_DIR: Path = Path(
         os.getenv("STASH_MODEL_CACHE_DIR", "/data/models")
     )

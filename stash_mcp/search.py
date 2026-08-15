@@ -13,6 +13,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .embedders import DEFAULT_EMBEDDER_MODEL, FastEmbedAdapter, is_onnx_model, onnx_model_name
+
 logger = logging.getLogger(__name__)
 
 # Maximum characters to pass to contextual retrieval model (~200k tokens ≈ 150k chars)
@@ -791,11 +793,12 @@ class SearchEngine:
         content_dir: Path,
         index_dir: Path,
         *,
-        embedder_model: str = "sentence-transformers:all-MiniLM-L6-v2",
+        embedder_model: str = DEFAULT_EMBEDDER_MODEL,
         contextual_retrieval: bool = False,
         contextual_model: str = "claude-haiku-4-5-20251001",
         anthropic_api_key: str | None = None,
         embed_fn=None,
+        model_cache_dir: Path | str | None = None,
         filesystem=None,
         git_backend=None,
         chunk_size: int = 1000,
@@ -815,12 +818,20 @@ class SearchEngine:
         Args:
             content_dir: Root directory for content files.
             index_dir: Directory for index persistence.
-            embedder_model: Pydantic AI embedder model string.
+            embedder_model: Embedder model string. ``onnx:<fastembed model>``
+                selects the local ONNX Runtime backend (default:
+                ``onnx:sentence-transformers/all-MiniLM-L6-v2``); any other
+                prefix (``openai:``, ``cohere:``, ``sentence-transformers:``)
+                is passed to Pydantic AI's ``Embedder``.
             contextual_retrieval: Whether to use Claude-powered chunk enrichment.
             contextual_model: Model string for contextual retrieval.
             anthropic_api_key: API key for contextual retrieval (required if enabled).
             embed_fn: Optional custom embedding function for testing.
                       Signature: async (texts: list[str]) -> list[list[float]]
+                      Takes precedence over ``embedder_model``.
+            model_cache_dir: Root directory for locally cached model weights
+                (``STASH_MODEL_CACHE_DIR``). The ONNX backend stores its files
+                in a ``fastembed`` subdirectory; None lets fastembed pick.
             filesystem: Optional FileSystem instance for content path filtering.
             git_backend: Optional GitBackend instance for blame-enriched results.
             chunk_size: Number of characters per chunk for the sliding window.
@@ -922,14 +933,29 @@ class SearchEngine:
         self._indexing = False
         self._lock = asyncio.Lock()
 
-        # Eagerly initialise the embedder so the first search query is fast
+        # Local ONNX Runtime backend: install the fastembed adapter as the
+        # embed_fn so _embed/_embed_query need no provider-specific branches.
+        # The adapter validates the model name now (fail fast on typos) but
+        # downloads/loads the model on first use, so start-up isn't blocked.
+        if self._embed_fn is None and is_onnx_model(embedder_model):
+            cache_dir = (
+                Path(model_cache_dir) / "fastembed"
+                if model_cache_dir is not None
+                else None
+            )
+            self._embed_fn = FastEmbedAdapter(
+                onnx_model_name(embedder_model), cache_dir=cache_dir
+            )
+
+        # Remote / torch providers go through Pydantic AI's Embedder
         self._embedder = self._create_embedder()
 
     def _create_embedder(self):
-        """Create and return the embedding model instance, or None for custom embed_fn.
+        """Create and return the Pydantic AI embedder, or None when an embed_fn is set.
 
         Returns:
-            Embedder instance, or None if a custom embed_fn is provided.
+            Embedder instance, or None if a custom embed_fn (or the ONNX
+            adapter) is in use.
 
         Raises:
             RuntimeError: If pydantic-ai is not installed.
@@ -942,8 +968,10 @@ class SearchEngine:
             return Embedder(self.embedder_model)
         except ImportError:
             raise RuntimeError(
-                "pydantic-ai is required for semantic search. "
-                "Install with: pip install 'stash-mcp[search]'"
+                "pydantic-ai is required for the "
+                f"'{self.embedder_model.split(':', 1)[0]}:' embedding provider. "
+                "Install with: pip install 'stash-mcp[search-openai]', "
+                "'stash-mcp[search-cohere]' or 'stash-mcp[search-torch]'"
             )
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
@@ -1177,6 +1205,9 @@ class SearchEngine:
 
         self.meta.file_hashes[normalized_path] = content_h
         self.meta.chunk_counts[normalized_path] = len(chunks)
+        # Record which model produced these vectors so a later model change
+        # (e.g. switching backends) is detected and the index rebuilt.
+        self.meta.embedder_model = self.embedder_model
 
         return len(chunks)
 
