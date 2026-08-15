@@ -388,7 +388,7 @@ Semantic search is **disabled by default**. To enable:
 | `cohere:` | Cohere embeddings API via Pydantic AI | `search-cohere` | `cohere:embed-english-v3.0` |
 | `sentence-transformers:` | Local, PyTorch via sentence-transformers (opt-in; ~5 GB of torch + CUDA wheels) | `search-torch` | `sentence-transformers:all-mpnet-base-v2` |
 
-The default `onnx:` model is the same fp32 `all-MiniLM-L6-v2` weights that the torch backend used, so vectors match the previous default to ~1e-7 (cosine similarities agree to ~1e-6). Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACHE_DIR/fastembed`.
+The default `onnx:` model is the same fp32 `all-MiniLM-L6-v2` weights that the torch backend used, so vectors match the previous default to ~1e-7 (cosine similarities agree to ~1e-6), while the default image shrinks from ~12 GB to ~0.7 GB unpacked (4.35 GB → 0.17 GB compressed). Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACHE_DIR/fastembed`.
 
 When search is enabled, the server exposes:
 

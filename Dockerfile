@@ -20,7 +20,8 @@ COPY stash_mcp ./stash_mcp
 
 # Install dependencies with uv
 # Use --extra search to include semantic search support (numpy + fastembed,
-# i.e. ONNX Runtime — no torch/CUDA, ~0.5 GB image instead of ~12 GB).
+# i.e. ONNX Runtime — no torch/CUDA: ~0.7 GB unpacked / ~0.17 GB compressed
+# instead of ~12 GB / ~4.4 GB with the torch + CUDA wheels).
 # Override SEARCH_EXTRA at build time to use a different embedder provider:
 #   search            — local ONNX Runtime via fastembed (default;
 #                       model strings onnx:<model>)
