@@ -374,8 +374,8 @@ Vector search compares a query vector with chunk vectors that were made without 
 
 | Configuration | Overall | Prose questions | Literal identifiers | Code questions |
 |---|---|---|---|---|
-| Default (hybrid, no reranking) | 0.904 | 0.875 | 1.000 | 0.856 |
-| `STASH_SEARCH_RERANK_ENABLED=true` | **0.938** | **1.000** | 1.000 | 0.833 |
+| Default (hybrid, no reranking) | 0.868 | 0.792 | 1.000 | 0.833 |
+| `STASH_SEARCH_RERANK_ENABLED=true` | **0.917** | **1.000** | 1.000 | 0.778 |
 
 ```bash
 export STASH_SEARCH_RERANK_ENABLED=true      # ~80 MB extra download

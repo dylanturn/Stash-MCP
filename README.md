@@ -400,14 +400,16 @@ Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACH
 
 #### Reranking
 
-A cross-encoder reads the query and the chunk together instead of comparing two independently-made vectors, which reorders the shortlist much more accurately — for prose. Measured over 24 queries against this repository's own docs and code (MRR, higher is better):
+A cross-encoder reads the query and the chunk together instead of comparing two independently-made vectors, which reorders the shortlist much more accurately — for prose. Measured over 24 queries against this repository's own docs and code (MRR, higher is better; 8 prose questions, 7 literal identifiers, 9 code questions):
 
 | Configuration | Overall | Prose questions | Literal identifiers | Code questions |
 |---|---|---|---|---|
-| Default (hybrid, no reranking) | 0.904 | 0.875 | 1.000 | 0.856 |
-| `STASH_SEARCH_RERANK_ENABLED=true` | **0.938** | **1.000** | 1.000 | 0.833 |
+| Default (hybrid, no reranking) | 0.868 | 0.792 | 1.000 | 0.833 |
+| `STASH_SEARCH_RERANK_ENABLED=true` | **0.917** | **1.000** | 1.000 | 0.778 |
 
 Reranking costs an extra ~80 MB model download and takes a query from ~3 ms to ~190 ms (CPU, 20 candidates), so it is **off by default**. Turn it on for documentation- and notes-heavy stashes; leave it off if your content is mostly code or if the Web UI's live search needs to stay instant.
+
+> These figures come from one 24-query set over a single, code-heavy corpus, where one query is worth ~0.04 MRR overall. Treat them as direction, not precision, and prefer measuring on your own content.
 
 - `STASH_SEARCH_RERANK_MODEL` — cross-encoder to use (default: `Xenova/ms-marco-MiniLM-L-6-v2`)
 - `STASH_SEARCH_RERANK_CANDIDATES` — how many results to rescore (default: `20`; ~10 ms each)
