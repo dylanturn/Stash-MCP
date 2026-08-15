@@ -1,5 +1,6 @@
 """Tests for semantic search module."""
 
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -844,6 +845,102 @@ class TestSearchConfig:
         from stash_mcp.config import Config
 
         assert Config.MODEL_CACHE_DIR == Path("/data/models")
+
+
+# --- Index fingerprint ---
+
+
+class TestIndexFingerprint:
+    """Every setting that changes the stored vectors must invalidate the index,
+    not just the model string."""
+
+    @staticmethod
+    def _build(tmp_path, **kwargs):
+        content_dir = tmp_path / "content"
+        content_dir.mkdir(exist_ok=True)
+        (content_dir / "a.md").write_text("# Title\n\nSome authentication content.\n")
+        return SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=mock_embed,
+            **kwargs,
+        )
+
+    @pytest.mark.parametrize(
+        "changed",
+        [
+            {"embedder_model": "model-b"},
+            {"chunk_size": 500},
+            {"chunk_overlap": 250},
+            {"heading_context": False},
+            {"document_prefix": "passage: "},
+        ],
+    )
+    async def test_changing_a_vector_affecting_setting_rebuilds(
+        self, tmp_path, changed
+    ):
+        base = {"embedder_model": "model-a", "chunk_size": 1000, "chunk_overlap": 100}
+        engine = self._build(tmp_path, **base)
+        await engine.build_index(["a.md"])
+        assert engine.store.count > 0
+
+        engine2 = self._build(tmp_path, **{**base, **changed})
+        assert engine2.store.count == 0
+        assert engine2.meta.file_hashes == {}
+
+    @pytest.mark.parametrize(
+        "unchanged",
+        [
+            {"max_per_file": 5},
+            {"mmr_lambda": 0.2},
+            {"recency_weight": 0.5},
+            {"candidate_pool_multiplier": 3},
+        ],
+    )
+    async def test_retrieval_only_settings_keep_the_index(self, tmp_path, unchanged):
+        base = {"embedder_model": "model-a"}
+        engine = self._build(tmp_path, **base)
+        await engine.build_index(["a.md"])
+        before = engine.store.count
+
+        engine2 = self._build(tmp_path, **{**base, **unchanged})
+        assert engine2.store.count == before
+        assert engine2.ready
+
+    async def test_status_still_reports_the_model_string(self, tmp_path):
+        engine = self._build(tmp_path, embedder_model="model-a")
+        await engine.build_index(["a.md"])
+        reloaded = IndexMeta.load(tmp_path / "index" / "index_meta.json")
+        assert reloaded.embedder_model == "model-a"
+        assert reloaded.embedder_fingerprint.startswith("model-a|")
+
+    async def test_index_from_before_fingerprints_is_kept_when_model_matches(
+        self, tmp_path
+    ):
+        """An index written by an older version has no fingerprint recorded."""
+        engine = self._build(tmp_path, embedder_model="model-a")
+        await engine.build_index(["a.md"])
+        meta_path = tmp_path / "index" / "index_meta.json"
+        data = json.loads(meta_path.read_text())
+        del data["embedder_fingerprint"]
+        meta_path.write_text(json.dumps(data))
+
+        engine2 = self._build(tmp_path, embedder_model="model-a")
+        assert engine2.store.count > 0
+        assert engine2.ready
+
+    async def test_index_from_before_fingerprints_is_dropped_on_model_change(
+        self, tmp_path
+    ):
+        engine = self._build(tmp_path, embedder_model="model-a")
+        await engine.build_index(["a.md"])
+        meta_path = tmp_path / "index" / "index_meta.json"
+        data = json.loads(meta_path.read_text())
+        del data["embedder_fingerprint"]
+        meta_path.write_text(json.dumps(data))
+
+        engine2 = self._build(tmp_path, embedder_model="model-b")
+        assert engine2.store.count == 0
 
 
 # --- Token-aware chunk splitting ---

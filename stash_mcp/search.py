@@ -888,11 +888,20 @@ def _heading_breadcrumb(file_path: str, text: str, offset: int) -> str:
 
 @dataclass
 class IndexMeta:
-    """Tracks file hashes and chunk counts for incremental indexing."""
+    """Tracks file hashes and chunk counts for incremental indexing.
+
+    ``embedder_fingerprint`` covers every setting that changes the stored
+    vectors — not just the model, but chunking and the text fed to the model
+    — so a config change invalidates the index instead of leaving a mix of
+    incompatible vectors behind. ``embedder_model`` is kept alongside it for
+    display (``/api/search/status``) and to interpret indexes written before
+    fingerprints existed.
+    """
 
     file_hashes: dict[str, str] = field(default_factory=dict)
     chunk_counts: dict[str, int] = field(default_factory=dict)
     embedder_model: str = ""
+    embedder_fingerprint: str = ""
 
     def save(self, path: Path) -> None:
         """Persist to JSON file."""
@@ -903,6 +912,7 @@ class IndexMeta:
                     "file_hashes": self.file_hashes,
                     "chunk_counts": self.chunk_counts,
                     "embedder_model": self.embedder_model,
+                    "embedder_fingerprint": self.embedder_fingerprint,
                 },
                 f,
                 indent=2,
@@ -924,6 +934,7 @@ class IndexMeta:
                 file_hashes=data.get("file_hashes", {}),
                 chunk_counts=data.get("chunk_counts", {}),
                 embedder_model=data.get("embedder_model", ""),
+                embedder_fingerprint=data.get("embedder_fingerprint", ""),
             )
         except Exception as e:
             logger.warning(f"Failed to load index meta: {e}")
@@ -1034,6 +1045,7 @@ class SearchEngine:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.heading_context = heading_context
+        self._document_prefix = document_prefix
         self.mmr_enabled = mmr_enabled
         self.mmr_lambda = mmr_lambda
         self.max_per_file = max_per_file
@@ -1095,14 +1107,12 @@ class SearchEngine:
         self.meta = IndexMeta.load(index_dir / "index_meta.json")
         self.bm25_store = BM25Store(index_dir)
 
-        # If embedder model changed, clear stale index for rebuild —
-        # the BM25 store must be wiped in the same block so the two
-        # indexes don't drift.
-        if self.meta.embedder_model and self.meta.embedder_model != embedder_model:
-            logger.warning(
-                f"Embedder model changed from '{self.meta.embedder_model}' "
-                f"to '{embedder_model}'. Clearing stale index for rebuild."
-            )
+        # If anything that determines the stored vectors changed, clear the
+        # stale index for rebuild — the BM25 store must be wiped in the same
+        # block so the two indexes don't drift.
+        stale_reason = self._stale_index_reason()
+        if stale_reason:
+            logger.warning("%s Clearing stale index for rebuild.", stale_reason)
             self.store.clear()
             self.bm25_store.clear()
             self.meta = IndexMeta()
@@ -1123,6 +1133,53 @@ class SearchEngine:
         self._ready = self.store.count > 0
         self._indexing = False
         self._lock = asyncio.Lock()
+
+    @property
+    def embedder_fingerprint(self) -> str:
+        """Identity of everything that determines the stored vectors.
+
+        Two indexes are interchangeable only if this string matches: the model
+        decides the vector space, and chunking and the document prefix/heading
+        breadcrumb decide what text was fed to it. Retrieval-time settings
+        (MMR, recency, hybrid weights) are deliberately excluded — they change
+        ranking, not vectors, so they must not force a re-index.
+        """
+        # Prefer the backend's resolved prefix (the ONNX adapter fills in the
+        # model's documented one when the caller passed None); fall back to
+        # whatever was configured for backends that don't expose it.
+        document_prefix = getattr(
+            self._embed_fn, "document_prefix", self._document_prefix or ""
+        )
+        return "|".join(
+            [
+                self.embedder_model,
+                f"doc:{document_prefix}",
+                f"head:{int(self.heading_context)}",
+                f"cs:{self.chunk_size}",
+                f"co:{self.chunk_overlap}",
+            ]
+        )
+
+    def _stale_index_reason(self) -> str | None:
+        """Explain why the persisted index can't be reused, or None if it can."""
+        if not self.meta.file_hashes and self.store.count == 0:
+            return None
+        if self.meta.embedder_fingerprint:
+            if self.meta.embedder_fingerprint == self.embedder_fingerprint:
+                return None
+            return (
+                f"Search index settings changed from "
+                f"'{self.meta.embedder_fingerprint}' to "
+                f"'{self.embedder_fingerprint}'."
+            )
+        # Written before fingerprints existed: fall back to the model string,
+        # so upgrading alone does not throw away a usable index.
+        if self.meta.embedder_model and self.meta.embedder_model != self.embedder_model:
+            return (
+                f"Embedder model changed from '{self.meta.embedder_model}' "
+                f"to '{self.embedder_model}'."
+            )
+        return None
 
     def _create_embedder(self):
         """Create and return the Pydantic AI embedder, or None when an embed_fn is set.
@@ -1299,6 +1356,7 @@ class SearchEngine:
 
             # Final save
             self.meta.embedder_model = self.embedder_model
+            self.meta.embedder_fingerprint = self.embedder_fingerprint
             await self.store.save_async()
             await self.meta.save_async(self.index_dir / "index_meta.json")
             await self._rebuild_bm25_if_dirty()
@@ -1482,9 +1540,10 @@ class SearchEngine:
 
         self.meta.file_hashes[normalized_path] = content_h
         self.meta.chunk_counts[normalized_path] = len(metadata_list)
-        # Record which model produced these vectors so a later model change
-        # (e.g. switching backends) is detected and the index rebuilt.
+        # Record what produced these vectors so a later config change (model,
+        # chunking, prefixes, breadcrumbs) is detected and the index rebuilt.
         self.meta.embedder_model = self.embedder_model
+        self.meta.embedder_fingerprint = self.embedder_fingerprint
 
         return len(metadata_list)
 
