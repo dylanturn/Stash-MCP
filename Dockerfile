@@ -23,14 +23,14 @@ COPY stash_mcp ./stash_mcp
 # i.e. ONNX Runtime — no torch/CUDA: ~0.7 GB unpacked / ~0.17 GB compressed
 # instead of ~12 GB / ~4.4 GB with the torch + CUDA wheels).
 # Override SEARCH_EXTRA at build time to use a different embedder provider:
-#   search            — local ONNX Runtime via fastembed (default;
-#                       model strings onnx:<model>)
+#   search            — local ONNX Runtime via fastembed + BM25 hybrid
+#                       retrieval (default; model strings onnx:<model>)
 #   search-torch      — local PyTorch via sentence-transformers (model strings
 #                       sentence-transformers:<model>; pulls torch + CUDA libs)
 #   search-openai     — OpenAI embeddings
 #   search-cohere     — Cohere embeddings
 #   search-contextual — ONNX Runtime + Anthropic contextual retrieval
-#   search-hybrid     — ONNX Runtime + BM25 (bm25s) hybrid retrieval
+#   search-hybrid     — alias of `search` (kept for compatibility)
 # Example: docker build --build-arg SEARCH_EXTRA=search-openai .
 ARG SEARCH_EXTRA=search
 RUN uv sync --frozen --no-dev --extra ${SEARCH_EXTRA}

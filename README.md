@@ -373,9 +373,12 @@ Semantic search is **disabled by default**. To enable:
 
 - `STASH_SEARCH_ENABLED` — Enable semantic search (default: `false`)
 - `STASH_SEARCH_INDEX_DIR` — Directory for search index persistence (default: `/data/.stash-index`)
-- `STASH_SEARCH_EMBEDDER_MODEL` — Embedder model string (default: `onnx:sentence-transformers/all-MiniLM-L6-v2`), see below
+- `STASH_SEARCH_EMBEDDER_MODEL` — Embedder model string (default: `onnx:BAAI/bge-small-en-v1.5`), see below
 - `STASH_MODEL_CACHE_DIR` — Where locally downloaded model weights are cached (default: `/data/models`; mount a volume there so the download happens once)
 - `STASH_SEARCH_ONNX_THREADS` — onnxruntime thread count for the `onnx:` backend (default: onnxruntime's, one per host core; set e.g. `2` under container CPU limits)
+- `STASH_SEARCH_HYBRID_ENABLED` — Fuse BM25 keyword matching with vector search (default: on when `bm25s` is installed, which every search extra provides)
+- `STASH_SEARCH_HEADING_CONTEXT` — Prepend `path > heading > subheading` to each chunk before embedding (default: `true`)
+- `STASH_SEARCH_RERANK_ENABLED` — Rescore the top results with a cross-encoder (default: `false`, see [Reranking](#reranking))
 - `STASH_CONTEXTUAL_RETRIEVAL` — Enable Claude-powered contextual chunk enrichment (default: `false`)
 - `STASH_CONTEXTUAL_MODEL` — Model for contextual retrieval (default: `claude-haiku-4-5-20251001`)
 - `ANTHROPIC_API_KEY` — Required when contextual retrieval is enabled
@@ -384,12 +387,28 @@ Semantic search is **disabled by default**. To enable:
 
 | Prefix | Backend | Install extra | Example |
 |---|---|---|---|
-| `onnx:` | Local, ONNX Runtime via [fastembed](https://github.com/qdrant/fastembed) — no PyTorch, no CUDA libraries (**default**) | `search` | `onnx:sentence-transformers/all-MiniLM-L6-v2` (fp32, 384-dim, ~90 MB — the default), `onnx:BAAI/bge-small-en-v1.5` (int8-quantised, ~67 MB, faster), `onnx:BAAI/bge-base-en-v1.5` (768-dim, higher quality). Any model in `fastembed.TextEmbedding.list_supported_models()` works. |
+| `onnx:` | Local, ONNX Runtime via [fastembed](https://github.com/qdrant/fastembed) — no PyTorch, no CUDA libraries (**default**) | `search` | `onnx:BAAI/bge-small-en-v1.5` (384-dim, 512-token window, ~66 MB — the default), `onnx:BAAI/bge-base-en-v1.5` (768-dim, higher quality, ~210 MB), `onnx:sentence-transformers/all-MiniLM-L6-v2` (fp32, 384-dim, 256-token window, ~90 MB). Any model in `fastembed.TextEmbedding.list_supported_models()` works. |
 | `openai:` | OpenAI embeddings API via Pydantic AI | `search-openai` | `openai:text-embedding-3-small` |
 | `cohere:` | Cohere embeddings API via Pydantic AI | `search-cohere` | `cohere:embed-english-v3.0` |
 | `sentence-transformers:` | Local, PyTorch via sentence-transformers (opt-in; ~5 GB of torch + CUDA wheels) | `search-torch` | `sentence-transformers:all-mpnet-base-v2` |
 
-The default `onnx:` model is the same fp32 `all-MiniLM-L6-v2` weights that the torch backend used, so vectors match the previous default to ~1e-7 (cosine similarities agree to ~1e-6), while the default image shrinks from ~12 GB to ~0.7 GB unpacked (4.35 GB → 0.17 GB compressed). Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACHE_DIR/fastembed`.
+Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACHE_DIR/fastembed`. Models that need instruction prefixes (`intfloat/*e5*`, `nomic-*`, `snowflake-arctic-*`, `mixedbread-*`, `BAAI/bge-*-en` v1) get them automatically; override with `STASH_SEARCH_QUERY_PREFIX` / `STASH_SEARCH_DOCUMENT_PREFIX`.
+
+**How retrieval works.** Chunks are embedded with a `path > heading > subheading` breadcrumb so a sliding-window chunk keeps its section identity, and any chunk that would overflow the model's token window is split rather than silently truncated. Queries run against both the vector index and a BM25 keyword index; the two rankings are fused with Reciprocal Rank Fusion, diversified with MMR, and optionally rescored by a cross-encoder.
+
+#### Reranking
+
+A cross-encoder reads the query and the chunk together instead of comparing two independently-made vectors, which reorders the shortlist much more accurately — for prose. Measured over 24 queries against this repository's own docs and code (MRR, higher is better):
+
+| Configuration | Overall | Prose questions | Literal identifiers | Code questions |
+|---|---|---|---|---|
+| Default (hybrid, no reranking) | 0.904 | 0.875 | 1.000 | 0.856 |
+| `STASH_SEARCH_RERANK_ENABLED=true` | **0.938** | **1.000** | 1.000 | 0.833 |
+
+Reranking costs an extra ~80 MB model download and takes a query from ~3 ms to ~190 ms (CPU, 20 candidates), so it is **off by default**. Turn it on for documentation- and notes-heavy stashes; leave it off if your content is mostly code or if the Web UI's live search needs to stay instant.
+
+- `STASH_SEARCH_RERANK_MODEL` — cross-encoder to use (default: `Xenova/ms-marco-MiniLM-L-6-v2`)
+- `STASH_SEARCH_RERANK_CANDIDATES` — how many results to rescore (default: `20`; ~10 ms each)
 
 When search is enabled, the server exposes:
 
@@ -397,7 +416,7 @@ When search is enabled, the server exposes:
 - REST endpoints at `/api/search`, `/api/search/status`, and `/api/search/reindex`
 - Vector-based search in the Web UI sidebar
 
-Changing `STASH_SEARCH_EMBEDDER_MODEL` between restarts automatically clears the stale index and triggers a full rebuild with the new model — the index records the model string, and vectors from different models or runtimes are never mixed. **Upgrading from an image whose index was built with `sentence-transformers:all-MiniLM-L6-v2` therefore triggers one full re-index on the first start with the new `onnx:` default.** To keep the torch backend instead, build with `--build-arg SEARCH_EXTRA=search-torch` and set `STASH_SEARCH_EMBEDDER_MODEL=sentence-transformers:all-MiniLM-L6-v2` explicitly.
+The index records a fingerprint of everything that determines its vectors — the embedder model, chunk size and overlap, the heading-breadcrumb setting and any document prefix. Change one of those and the stale index is cleared and rebuilt automatically on the next start; retrieval-only settings (MMR, recency, hybrid, reranking) never force a rebuild. **Upgrading an existing deployment therefore triggers one full re-index**, since the default model changed. To keep the previous model, set `STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2`; for the PyTorch backend, build with `--build-arg SEARCH_EXTRA=search-torch` and use `sentence-transformers:all-MiniLM-L6-v2`.
 
 > **CPU requirement:** numpy ≥ 2.4 wheels (a dependency of every search extra; `uv.lock` pins 2.4.x) are built for the x86-64-v2 baseline (SSE4.2/POPCNT) and fail with `Illegal instruction` on older or generic virtual CPUs. On Proxmox/QEMU VMs with the `kvm64` CPU type, search cannot start regardless of backend — set the VM CPU type to `host` (or `x86-64-v2-AES`) or leave `STASH_SEARCH_ENABLED=false`.
 
@@ -450,9 +469,16 @@ What is collected:
 | `STASH_TRANSACTION_LOCK_WAIT` | `120` | Seconds a queued agent waits for the transaction lock |
 | `STASH_SEARCH_ENABLED` | `false` | Enable semantic search |
 | `STASH_SEARCH_INDEX_DIR` | `/data/.stash-index` | Search index directory |
-| `STASH_SEARCH_EMBEDDER_MODEL` | `onnx:sentence-transformers/all-MiniLM-L6-v2` | Embedder model: `onnx:` (local, ONNX Runtime), `openai:`, `cohere:`, or `sentence-transformers:` (local, PyTorch; needs `search-torch`) |
+| `STASH_SEARCH_EMBEDDER_MODEL` | `onnx:BAAI/bge-small-en-v1.5` | Embedder model: `onnx:` (local, ONNX Runtime), `openai:`, `cohere:`, or `sentence-transformers:` (local, PyTorch; needs `search-torch`) |
 | `STASH_MODEL_CACHE_DIR` | `/data/models` | Cache for locally downloaded model weights (`onnx:` models go in a `fastembed/` subdir) |
 | `STASH_SEARCH_ONNX_THREADS` | — | onnxruntime thread count for the `onnx:` backend (default: one per host core; set under container CPU limits) |
+| `STASH_SEARCH_QUERY_PREFIX` | *(model default)* | Instruction prepended to queries; `""` disables |
+| `STASH_SEARCH_DOCUMENT_PREFIX` | *(model default)* | Instruction prepended to documents; `""` disables |
+| `STASH_SEARCH_HEADING_CONTEXT` | `true` | Prepend `path > heading` breadcrumbs to chunks before embedding |
+| `STASH_SEARCH_HYBRID_ENABLED` | *(on if `bm25s` installed)* | Fuse BM25 keyword search with vector search |
+| `STASH_SEARCH_RERANK_ENABLED` | `false` | Rescore top results with a cross-encoder |
+| `STASH_SEARCH_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Cross-encoder used for reranking |
+| `STASH_SEARCH_RERANK_CANDIDATES` | `20` | How many results to rescore |
 | `STASH_CONTEXTUAL_RETRIEVAL` | `false` | Enable Claude-powered contextual chunk enrichment |
 | `STASH_CONTEXTUAL_MODEL` | `claude-haiku-4-5-20251001` | Model for contextual retrieval |
 | `ANTHROPIC_API_KEY` | — | Required when contextual retrieval is enabled |

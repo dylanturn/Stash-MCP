@@ -15,12 +15,15 @@ services:
       - STASH_SEARCH_ENABLED=true
       # Local embeddings on ONNX Runtime (fastembed) — the default image, no torch.
       # Other local options:
-      #   onnx:BAAI/bge-small-en-v1.5   int8-quantised, smaller/faster (384-dim)
-      #   onnx:BAAI/bge-base-en-v1.5    higher quality (768-dim)
+      #   onnx:BAAI/bge-base-en-v1.5                      higher quality (768-dim, ~210 MB)
+      #   onnx:sentence-transformers/all-MiniLM-L6-v2     the pre-0.2 default
       # For sentence-transformers models on PyTorch (e.g. all-mpnet-base-v2)
       # build with `--build-arg SEARCH_EXTRA=search-torch` and use
       # STASH_SEARCH_EMBEDDER_MODEL=sentence-transformers:all-mpnet-base-v2
-      - STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2
+      - STASH_SEARCH_EMBEDDER_MODEL=onnx:BAAI/bge-small-en-v1.5
+      # Cross-encoder reranking: sharper results on prose (measured MRR
+      # 0.904 -> 0.938), ~80 MB more to download and ~190 ms per query.
+      # - STASH_SEARCH_RERANK_ENABLED=true
     restart: unless-stopped
 volumes:
   stash-models:
