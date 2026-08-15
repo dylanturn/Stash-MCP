@@ -1099,7 +1099,7 @@ class SearchEngine:
         bm25_candidate_pool: int = 30,
         rerank_enabled: bool = False,
         rerank_model: str = DEFAULT_RERANK_MODEL,
-        rerank_candidates: int = 20,
+        rerank_candidates: int = 10,
         reranker=None,
     ):
         """Initialize the search engine.

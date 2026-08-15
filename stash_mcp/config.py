@@ -147,8 +147,9 @@ class Config:
     SEARCH_RERANK_MODEL: str = os.getenv(
         "STASH_SEARCH_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2"
     )
+    # 10 measured as good as 20 (MRR 0.882 vs 0.880) at half the latency
     SEARCH_RERANK_CANDIDATES: int = int(
-        os.getenv("STASH_SEARCH_RERANK_CANDIDATES", "20")
+        os.getenv("STASH_SEARCH_RERANK_CANDIDATES", "10")
     )
 
     # Model cache directory for locally downloaded embedding weights. The ONNX

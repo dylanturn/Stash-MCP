@@ -22,8 +22,8 @@ services:
       # STASH_SEARCH_EMBEDDER_MODEL=sentence-transformers:all-mpnet-base-v2
       - STASH_SEARCH_EMBEDDER_MODEL=onnx:BAAI/bge-small-en-v1.5
       # Cross-encoder reranking: sharper results on prose (measured MRR
-      # 0.865 -> 0.880 on a 52-document docs corpus, prose subset
-      # 0.856 -> 0.895), ~120 MB more to download and ~470 ms per query.
+      # 0.865 -> 0.882 on a 52-document docs corpus, prose subset
+      # 0.856 -> 0.895), ~120 MB more to download and ~220 ms per query.
       # - STASH_SEARCH_RERANK_ENABLED=true
     restart: unless-stopped
 volumes:

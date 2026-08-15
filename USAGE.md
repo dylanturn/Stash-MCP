@@ -376,14 +376,14 @@ Vector search compares a query vector with chunk vectors that were made without 
 |---|---|---|---|---|
 | Previous defaults (all-MiniLM-L6-v2, dense) | 0.740 | 0.841 | 0.646 | 0.604 |
 | Current defaults | 0.865 | 0.856 | **1.000** | 0.688 |
-| `STASH_SEARCH_RERANK_ENABLED=true` | **0.880** | **0.895** | 0.958 | **0.719** |
+| `STASH_SEARCH_RERANK_ENABLED=true` | **0.882** | **0.895** | 0.958 | **0.719** |
 
 ```bash
 export STASH_SEARCH_RERANK_ENABLED=true      # ~120 MB extra download
-export STASH_SEARCH_RERANK_CANDIDATES=20     # ~24 ms per candidate, per query
+export STASH_SEARCH_RERANK_CANDIDATES=10     # ~22 ms per candidate, per query
 ```
 
-Queries go from ~4 ms to ~470 ms with 20 candidates on CPU, which is why it is off by default; `STASH_SEARCH_RERANK_CANDIDATES=10` halves that. Worth it when precision matters more than latency — note it is slightly *negative* on exact-identifier queries, which the lexical index already answers perfectly.
+Queries go from ~4 ms to ~220 ms at the default 10 candidates, which is why it is off by default. Rescoring 20 instead doubles the latency for no gain (0.880 vs 0.882), and truncating chunks to save time costs more accuracy than it saves (0.845). Worth it when precision matters more than latency — note it is slightly *negative* on exact-identifier queries, which the lexical index already answers perfectly.
 
 Model choice matters more than model size. On this corpus `Xenova/ms-marco-MiniLM-L-12-v2` (~120 MB, the default) scored 0.880 and `Xenova/ms-marco-MiniLM-L-6-v2` (~80 MB) scored 0.863 — no better than not reranking — while `jinaai/jina-reranker-v1-tiny-en` (0.824) and `jinaai/jina-reranker-v1-turbo-en` (0.816) both scored *worse than no reranking at all* despite being larger. `BAAI/bge-reranker-base` is stronger again but over 1 GB.
 
@@ -471,7 +471,7 @@ Environment variables:
 | `STASH_SEARCH_HYBRID_ENABLED` | Fuse BM25 keyword search with vector search | *(on if `bm25s` installed)* |
 | `STASH_SEARCH_RERANK_ENABLED` | Rescore top results with a cross-encoder | `false` |
 | `STASH_SEARCH_RERANK_MODEL` | Cross-encoder used for reranking | `Xenova/ms-marco-MiniLM-L-12-v2` |
-| `STASH_SEARCH_RERANK_CANDIDATES` | How many results to rescore | `20` |
+| `STASH_SEARCH_RERANK_CANDIDATES` | How many results to rescore | `10` |
 | `STASH_CONTEXTUAL_RETRIEVAL` | Enable contextual chunk enrichment | `false` |
 | `STASH_CONTEXTUAL_MODEL` | Model for contextual retrieval | `claude-haiku-4-5-20251001` |
 | `ANTHROPIC_API_KEY` | API key for contextual retrieval | *(none)* |
