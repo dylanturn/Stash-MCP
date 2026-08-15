@@ -42,7 +42,15 @@ dev = [
     "numpy>=1.26.0",
     "bm25s>=0.2.0",
 ]
+# Local embeddings on ONNX Runtime via fastembed (default; no torch/CUDA).
+# Model strings: onnx:<fastembed model>, e.g. onnx:sentence-transformers/all-MiniLM-L6-v2
 search = [
+    "numpy>=1.26.0",
+    "fastembed>=0.7.0",
+]
+# Local embeddings on PyTorch via sentence-transformers (opt-in; ~5 GB of
+# torch + CUDA wheels on Linux). Model strings: sentence-transformers:<model>
+search-torch = [
     "numpy>=1.26.0",
     "pydantic-ai-slim[sentence-transformers]>=0.1.0",
 ]
@@ -58,12 +66,12 @@ search-cohere = [
 ]
 search-contextual = [
     "numpy>=1.26.0",
-    "pydantic-ai-slim[sentence-transformers]>=0.1.0",
+    "fastembed>=0.7.0",
     "anthropic>=0.40.0",
 ]
 search-hybrid = [
     "numpy>=1.26.0",
-    "pydantic-ai-slim[sentence-transformers]>=0.1.0",
+    "fastembed>=0.7.0",
     "bm25s>=0.2.0",
 ]
 
