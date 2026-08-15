@@ -116,8 +116,9 @@ class Config:
     )
 
     # Search retrieval — hybrid BM25 + dense via Reciprocal Rank Fusion.
-    # On by default when bm25s is installed (it ships with every search
-    # extra): agent queries are full of literal tokens — env var names,
+    # On by default when bm25s is installed (the search, search-contextual
+    # and search-hybrid extras include it; the API-provider and torch extras
+    # do not): agent queries are full of literal tokens — env var names,
     # function names, paths, error strings — which lexical matching handles
     # far better than embeddings. Falls back to dense-only rather than
     # failing when the dependency is absent, so a hand-rolled install of

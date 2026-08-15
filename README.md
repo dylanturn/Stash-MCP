@@ -376,7 +376,7 @@ Semantic search is **disabled by default**. To enable:
 - `STASH_SEARCH_EMBEDDER_MODEL` — Embedder model string (default: `onnx:BAAI/bge-small-en-v1.5`), see below
 - `STASH_MODEL_CACHE_DIR` — Where locally downloaded model weights are cached (default: `/data/models`; mount a volume there so the download happens once)
 - `STASH_SEARCH_ONNX_THREADS` — onnxruntime thread count for the `onnx:` backend (default: onnxruntime's, one per host core; set e.g. `2` under container CPU limits)
-- `STASH_SEARCH_HYBRID_ENABLED` — Fuse BM25 keyword matching with vector search (default: on when `bm25s` is installed, which every search extra provides)
+- `STASH_SEARCH_HYBRID_ENABLED` — Fuse BM25 keyword matching with vector search (default: on when `bm25s` is installed — the `search`, `search-contextual` and `search-hybrid` extras include it; the API-provider and torch extras do not)
 - `STASH_SEARCH_HEADING_CONTEXT` — Prepend `path > heading > subheading` to each chunk before embedding (default: `true`)
 - `STASH_SEARCH_RERANK_ENABLED` — Rescore the top results with a cross-encoder (default: `false`, see [Reranking](#reranking))
 - `STASH_CONTEXTUAL_RETRIEVAL` — Enable Claude-powered contextual chunk enrichment (default: `false`)
@@ -393,6 +393,8 @@ Semantic search is **disabled by default**. To enable:
 | `sentence-transformers:` | Local, PyTorch via sentence-transformers (opt-in; ~5 GB of torch + CUDA wheels) | `search-torch` | `sentence-transformers:all-mpnet-base-v2` |
 
 Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACHE_DIR/fastembed`. Models that need instruction prefixes (`intfloat/*e5*`, `nomic-*`, `snowflake-arctic-*`, `mixedbread-*`, `BAAI/bge-*-en` v1) get them automatically; override with `STASH_SEARCH_QUERY_PREFIX` / `STASH_SEARCH_DOCUMENT_PREFIX`.
+
+> The default model's published MTEB retrieval score (51.7, against ~42 for `all-MiniLM-L6-v2`) is measured on the full-precision weights; fastembed ships a half-precision ONNX export, which reproduced the PyTorch vectors to within 8e-4 cosine in a side-by-side check here.
 
 **How retrieval works.** Chunks are embedded with a `path > heading > subheading` breadcrumb so a sliding-window chunk keeps its section identity, and any chunk that would overflow the model's token window is split rather than silently truncated. Queries run against both the vector index and a BM25 keyword index; the two rankings are fused with Reciprocal Rank Fusion, diversified with MMR, and optionally rescored by a cross-encoder.
 
@@ -418,7 +420,9 @@ When search is enabled, the server exposes:
 - REST endpoints at `/api/search`, `/api/search/status`, and `/api/search/reindex`
 - Vector-based search in the Web UI sidebar
 
-The index records a fingerprint of everything that determines its vectors — the embedder model, chunk size and overlap, the heading-breadcrumb setting and any document prefix. Change one of those and the stale index is cleared and rebuilt automatically on the next start; retrieval-only settings (MMR, recency, hybrid, reranking) never force a rebuild. **Upgrading an existing deployment therefore triggers one full re-index**, since the default model changed. To keep the previous model, set `STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2`; for the PyTorch backend, build with `--build-arg SEARCH_EXTRA=search-torch` and use `sentence-transformers:all-MiniLM-L6-v2`.
+The index records a fingerprint of everything that determines its vectors — the embedder model, chunk size and overlap, the heading-breadcrumb setting, contextual retrieval and any document prefix. Change one of those and the stale index is cleared and rebuilt automatically on the next start; retrieval-only settings (MMR, recency, hybrid, reranking) never force a rebuild.
+
+**Upgrading an existing deployment triggers one full re-index**, even if you pin the previous model: this release changes the text that gets embedded (heading breadcrumbs, context-window splitting), and an index written before those existed carries no fingerprint to prove otherwise. The first start after the upgrade also builds the BM25 index for hybrid retrieval. Both happen in the background — the server answers immediately, and `GET /api/search/status` reports progress. To keep the previous model, set `STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2`; for the PyTorch backend, build with `--build-arg SEARCH_EXTRA=search-torch` and use `sentence-transformers:all-MiniLM-L6-v2`.
 
 > **CPU requirement:** numpy ≥ 2.4 wheels (a dependency of every search extra; `uv.lock` pins 2.4.x) are built for the x86-64-v2 baseline (SSE4.2/POPCNT) and fail with `Illegal instruction` on older or generic virtual CPUs. On Proxmox/QEMU VMs with the `kvm64` CPU type, search cannot start regardless of backend — set the VM CPU type to `host` (or `x86-64-v2-AES`) or leave `STASH_SEARCH_ENABLED=false`.
 

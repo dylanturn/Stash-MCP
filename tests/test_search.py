@@ -1,6 +1,7 @@
 """Tests for semantic search module."""
 
 import json
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -18,6 +19,7 @@ from stash_mcp.search import (
     _content_hash,
     _even_split_params,
     _heading_breadcrumb,
+    _heading_breadcrumbs,
     _normalize_path,
     _rrf_fuse,
 )
@@ -902,6 +904,25 @@ class TestSearchConfig:
         assert Config.MODEL_CACHE_DIR == Path("/data/models")
 
 
+class _StubBlameLine:
+    """Minimal stand-in for git_backend.blame() output."""
+
+    def __init__(self, line_number=1, author="a@example.com", summary="commit"):
+        from datetime import UTC, datetime
+
+        self.line_number = line_number
+        self.author = author
+        self.summary = summary
+        self.timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+class _StubGitBackend:
+    """Reports the same age for every file, so recency is a constant."""
+
+    def blame(self, path):
+        return [_StubBlameLine()]
+
+
 # --- Cross-encoder reranking ---
 
 
@@ -1010,13 +1031,31 @@ class TestReranking:
         assert any("rerank" in rec.message.lower() for rec in caplog.records)
 
     async def test_recency_blend_applies_after_reranking(self, tmp_path):
-        """Recency must reorder the cross-encoder's scores, not stale ones."""
+        """Recency must adjust the cross-encoder's ranking, not a stale one."""
         spy = self.SpyReranker()
         engine = await self._engine(tmp_path, rerank_enabled=True, reranker=spy)
-        engine.recency_weight = 1.0  # recency only
-        engine._git_backend = None  # no blame -> neutral 0.5 for everything
+        engine._git_backend = _StubGitBackend()  # every file equally old
+        engine.recency_weight = 0.3
+
         results = await engine.search("rotation policy", max_results=3)
-        assert results  # no crash when both are enabled
+        # With recency identical for every file it must not change the order
+        assert results[0].file_path == "notes.md"
+
+    async def test_unreranked_tail_cannot_outrank_the_shortlist(self, tmp_path):
+        """Only `rerank_candidates` results are rescored; the rest must stay
+        below them rather than competing on an unrelated score scale."""
+        spy = self.SpyReranker()
+        engine = await self._engine(
+            tmp_path, rerank_enabled=True, reranker=spy, rerank_candidates=1
+        )
+        engine._git_backend = _StubGitBackend()
+        engine.recency_weight = 0.5
+
+        results = await engine.search("rotation policy", max_results=3)
+        _query, documents = spy.calls[-1]
+        assert len(documents) == 1
+        # The one reranked candidate stays first despite the recency blend
+        assert results[0].content == documents[0]
 
 
 # --- MMR must not discard the fused ranking ---
@@ -1128,6 +1167,43 @@ class TestMMRRelevanceSource:
         assert [r.file_path for r in results][0] == "b.md"
         # a.md is still retrieved — fusion reorders, it does not exclude
         assert "a.md" in [r.file_path for r in results]
+        # The reported score must agree with the order it was ranked in,
+        # otherwise the top hit shows a lower number than the runner-up.
+        assert [r.score for r in results] == sorted(
+            (r.score for r in results), reverse=True
+        )
+
+    async def test_recency_blend_preserves_the_fused_winner(self, tmp_path):
+        """The recency blend must not re-sort on a signal fusion discarded."""
+
+        async def embed_by_topic(texts):
+            return [
+                [1.0, 0.0]
+                if ("alpha" in t.lower() or "primary" in t.lower())
+                else [0.2, 0.98]
+                for t in texts
+            ]
+
+        content_dir = tmp_path / "content"
+        content_dir.mkdir()
+        (content_dir / "a.md").write_text("alpha alpha alpha topical prose\n")
+        (content_dir / "b.md").write_text(
+            "STASH_GIT_SYNC_INTERVAL controls the pull cadence\n"
+        )
+        (content_dir / "c.md").write_text("beta gamma delta filler\n")
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=embed_by_topic,
+            hybrid_enabled=True,
+            heading_context=False,
+            recency_weight=0.3,
+            git_backend=_StubGitBackend(),  # same age everywhere
+        )
+        await engine.build_index(["a.md", "b.md", "c.md"])
+        results = await engine.search("primary STASH_GIT_SYNC_INTERVAL", max_results=3)
+        assert results[0].file_path == "b.md"
 
 
 # --- Index fingerprint ---
@@ -1157,6 +1233,7 @@ class TestIndexFingerprint:
             {"chunk_overlap": 250},
             {"heading_context": False},
             {"document_prefix": "passage: "},
+            {"contextual_retrieval": True, "anthropic_api_key": "k"},
         ],
     )
     async def test_changing_a_vector_affecting_setting_rebuilds(
@@ -1197,10 +1274,10 @@ class TestIndexFingerprint:
         assert reloaded.embedder_model == "model-a"
         assert reloaded.embedder_fingerprint.startswith("model-a|")
 
-    async def test_index_from_before_fingerprints_is_kept_when_model_matches(
-        self, tmp_path
-    ):
-        """An index written by an older version has no fingerprint recorded."""
+    async def test_index_from_before_fingerprints_is_rebuilt(self, tmp_path):
+        """An index written by an older version predates heading breadcrumbs
+        and overflow splitting, so its vectors no longer match what we would
+        produce — rebuild rather than mix two encodings in one index."""
         engine = self._build(tmp_path, embedder_model="model-a")
         await engine.build_index(["a.md"])
         meta_path = tmp_path / "index" / "index_meta.json"
@@ -1209,21 +1286,17 @@ class TestIndexFingerprint:
         meta_path.write_text(json.dumps(data))
 
         engine2 = self._build(tmp_path, embedder_model="model-a")
-        assert engine2.store.count > 0
-        assert engine2.ready
+        assert engine2.store.count == 0
+        assert engine2.meta.file_hashes == {}
 
-    async def test_index_from_before_fingerprints_is_dropped_on_model_change(
-        self, tmp_path
-    ):
+    async def test_matching_fingerprint_keeps_the_index(self, tmp_path):
         engine = self._build(tmp_path, embedder_model="model-a")
         await engine.build_index(["a.md"])
-        meta_path = tmp_path / "index" / "index_meta.json"
-        data = json.loads(meta_path.read_text())
-        del data["embedder_fingerprint"]
-        meta_path.write_text(json.dumps(data))
+        before = engine.store.count
 
-        engine2 = self._build(tmp_path, embedder_model="model-b")
-        assert engine2.store.count == 0
+        engine2 = self._build(tmp_path, embedder_model="model-a")
+        assert engine2.store.count == before
+        assert engine2.ready
 
 
 # --- Token-aware chunk splitting ---
@@ -1401,6 +1474,36 @@ class TestHeadingBreadcrumb:
         text = "# " + "very long heading " * 40 + "\n\nbody\n"
         crumb = _heading_breadcrumb("a.md", text, text.index("body"))
         assert len(crumb) <= 200
+
+    def test_batch_matches_single_lookups(self):
+        offsets = [0, self.DOC.index("## OAuth2"), self.DOC.index("Cookies")]
+        assert _heading_breadcrumbs("docs/auth.md", self.DOC, offsets) == [
+            _heading_breadcrumb("docs/auth.md", self.DOC, o) for o in offsets
+        ]
+
+    def test_batch_is_a_single_pass_over_the_document(self):
+        """One walk for all offsets, not one walk per chunk — a 1.7 MB file
+        with ~2000 chunks took seconds under the per-chunk version."""
+        section = "## Section {}\n\n" + ("filler text " * 60) + "\n\n"
+        doc = "# Title\n\n" + "".join(section.format(i) for i in range(4000))
+        offsets = list(range(0, len(doc), 500))
+
+        start = time.perf_counter()
+        crumbs = _heading_breadcrumbs("big.md", doc, offsets)
+        elapsed = time.perf_counter() - start
+
+        assert len(crumbs) == len(offsets)
+        assert crumbs[-1].startswith("big.md > Title > Section ")
+        assert elapsed < 2.0, f"breadcrumbs took {elapsed:.1f}s for {len(offsets)} chunks"
+
+    def test_batch_handles_unsorted_and_duplicate_offsets(self):
+        offsets = [self.DOC.index("Cookies"), 0, self.DOC.index("Cookies")]
+        crumbs = _heading_breadcrumbs("docs/auth.md", self.DOC, offsets)
+        assert crumbs[0] == crumbs[2] == "docs/auth.md > Authentication > Sessions"
+        assert crumbs[1] == "docs/auth.md > Authentication"
+
+    def test_batch_with_no_offsets(self):
+        assert _heading_breadcrumbs("a.md", self.DOC, []) == []
 
 
 class TestHeadingContextInEngine:

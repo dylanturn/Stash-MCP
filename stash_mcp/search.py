@@ -377,6 +377,11 @@ class VectorStore:
             return []
         if top_n <= 0:
             return []
+        if relevance is not None and len(relevance) != len(candidates):
+            raise ValueError(
+                "relevance must have one entry per candidate "
+                f"({len(relevance)} != {len(candidates)})"
+            )
 
         import numpy as np
 
@@ -458,15 +463,15 @@ class VectorStore:
             per_file[fp] = per_file.get(fp, 0) + 1
             pool.pop(best_pos)
 
-        # Overwrite score with cosine similarity to the query so the
-        # returned items carry a consistent, interpretable relevance
-        # signal (matching VectorStore.search_mmr's behaviour). This
-        # is especially important in the hybrid path, where the input
-        # `score` was the RRF fused score — not the cosine similarity.
+        # Report the value the list was actually ordered by, so the top hit
+        # never shows a lower number than the runner-up. Without a supplied
+        # relevance that is the cosine similarity (unchanged behaviour); with
+        # one — the hybrid path's fused scores — it is that relevance,
+        # normalised to [0, 1] within this result set.
         out: list[dict] = []
         for p in selected:
             item = dict(cand_meta[p])
-            item["score"] = float(similarities[cand_vec_idx[p]])
+            item["score"] = float(relevance_by_candidate[p])
             out.append(item)
         return out
 
@@ -830,6 +835,8 @@ def _even_split_params(
     """
     budget = max(1, budget)
     overlap = max(0, min(preferred_overlap, budget // 10))
+    if length <= 0:
+        return budget, 0
     pieces = max(1, math.ceil(length / budget))
     # The window advances by (size - overlap) per piece and emits another
     # window whenever the next start is still inside the text, so `pieces`
@@ -861,59 +868,100 @@ MAX_BREADCRUMB_CHARS = 200
 # let the tokenizer truncate rather than emit a chunk per word.
 _MAX_FIT_PASSES = 3
 _MIN_FIT_CHARS = 64
+# Characters of slack before a chunk counts as overflowing. Tokenizer
+# normalisation silently drops a few trailing characters — a variation
+# selector (the invisible half of ⚠️), a zero-width space, a BOM — which
+# shortens the reported window by 1-2 characters with no truncation at all.
+# Without slack those chunks would be split for nothing.
+_FIT_SLACK_CHARS = 4
 
 
-def _heading_breadcrumb(file_path: str, text: str, offset: int) -> str:
-    """Build a ``path > H1 > H2`` breadcrumb for the chunk starting at *offset*.
+def _format_breadcrumb(file_path: str, headings: list[str]) -> str:
+    """Join a path and its heading stack, capped at ``MAX_BREADCRUMB_CHARS``."""
+    breadcrumb = " > ".join([file_path, *headings])
+    if len(breadcrumb) > MAX_BREADCRUMB_CHARS:
+        breadcrumb = breadcrumb[:MAX_BREADCRUMB_CHARS - 1].rstrip() + "…"
+    return breadcrumb
+
+
+def _heading_breadcrumbs(
+    file_path: str, text: str, offsets: list[int]
+) -> list[str]:
+    """Build a ``path > H1 > H2`` breadcrumb for each chunk offset.
 
     A sliding-window chunk loses the document title and section it came from,
     which is exactly the context a search query tends to name ("oauth setup
     docs"). Prepending the breadcrumb to the embedded text puts that signal
     back, cheaply and without an LLM call.
 
-    Headings inside fenced code blocks are ignored, so a ``# comment`` in a
-    shell snippet never becomes a section. Only markdown files are scanned;
-    everything else gets the path alone.
+    All offsets are answered in a single walk of the document — a file with
+    2000 chunks would otherwise re-scan itself 2000 times, which cost seconds
+    per megabyte. Headings inside fenced code blocks are ignored, so a
+    ``# comment`` in a shell snippet never becomes a section. Only markdown
+    files are scanned; everything else gets the path alone.
 
     Args:
         file_path: Normalized relative path of the file.
         text: Full document text.
-        offset: Index in *text* where the chunk starts.
+        offsets: Indices in *text* where chunks start; any order, duplicates
+            allowed.
 
     Returns:
-        The breadcrumb, truncated to ``MAX_BREADCRUMB_CHARS``.
+        One breadcrumb per entry in *offsets*, in the same order.
     """
-    parts = [file_path]
-    if Path(file_path).suffix.lower() in _MARKDOWN_SUFFIXES:
-        headings: list[tuple[int, str]] = []  # (level, title) stack
-        in_fence = False
-        position = 0
-        for line in text.splitlines(keepends=True):
-            # A heading exactly at the chunk boundary still describes the chunk.
-            if position > offset:
-                break
-            position += len(line)
-            if _FENCE_RE.match(line):
-                in_fence = not in_fence
-                continue
-            if in_fence:
-                continue
-            match = _HEADING_RE.match(line.rstrip("\n"))
-            if not match:
-                continue
-            level = len(match.group(1))
-            title = match.group(2).strip()
-            if not title:
-                continue
-            while headings and headings[-1][0] >= level:
-                headings.pop()
-            headings.append((level, title))
-        parts.extend(title for _, title in headings)
+    if not offsets:
+        return []
+    if Path(file_path).suffix.lower() not in _MARKDOWN_SUFFIXES:
+        return [_format_breadcrumb(file_path, [])] * len(offsets)
 
-    breadcrumb = " > ".join(parts)
-    if len(breadcrumb) > MAX_BREADCRUMB_CHARS:
-        breadcrumb = breadcrumb[:MAX_BREADCRUMB_CHARS - 1].rstrip() + "…"
-    return breadcrumb
+    # Walk the document once, emitting the heading stack as each requested
+    # offset is passed. A heading exactly at a chunk's start still describes
+    # that chunk, hence "position > offset" rather than ">=".
+    pending = sorted(range(len(offsets)), key=lambda i: offsets[i])
+    result: list[str] = [""] * len(offsets)
+    next_pending = 0
+
+    headings: list[tuple[int, str]] = []  # (level, title) stack
+    in_fence = False
+    position = 0
+    for line in text.splitlines(keepends=True):
+        while (
+            next_pending < len(pending)
+            and position > offsets[pending[next_pending]]
+        ):
+            result[pending[next_pending]] = _format_breadcrumb(
+                file_path, [title for _, title in headings]
+            )
+            next_pending += 1
+        if next_pending >= len(pending):
+            break
+        position += len(line)
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = _HEADING_RE.match(line.rstrip("\n"))
+        if not match:
+            continue
+        level = len(match.group(1))
+        title = match.group(2).strip()
+        if not title:
+            continue
+        while headings and headings[-1][0] >= level:
+            headings.pop()
+        headings.append((level, title))
+
+    # Offsets at or past the end of the document see the final heading stack.
+    final = _format_breadcrumb(file_path, [title for _, title in headings])
+    for index in pending[next_pending:]:
+        result[index] = final
+    return result
+
+
+def _heading_breadcrumb(file_path: str, text: str, offset: int) -> str:
+    """Breadcrumb for a single chunk offset (see :func:`_heading_breadcrumbs`)."""
+    return _heading_breadcrumbs(file_path, text, [offset])[0]
 
 
 @dataclass
@@ -1213,6 +1261,7 @@ class SearchEngine:
                 self.embedder_model,
                 f"doc:{document_prefix}",
                 f"head:{int(self.heading_context)}",
+                f"ctx:{int(self.contextual_retrieval)}",
                 f"cs:{self.chunk_size}",
                 f"co:{self.chunk_overlap}",
             ]
@@ -1230,14 +1279,14 @@ class SearchEngine:
                 f"'{self.meta.embedder_fingerprint}' to "
                 f"'{self.embedder_fingerprint}'."
             )
-        # Written before fingerprints existed: fall back to the model string,
-        # so upgrading alone does not throw away a usable index.
-        if self.meta.embedder_model and self.meta.embedder_model != self.embedder_model:
-            return (
-                f"Embedder model changed from '{self.meta.embedder_model}' "
-                f"to '{self.embedder_model}'."
-            )
-        return None
+        # Written before fingerprints existed, i.e. before heading breadcrumbs
+        # and context-window splitting changed what text gets embedded. The
+        # model string alone can't tell us those vectors are still current, and
+        # keeping them would mix two encodings in one index forever, so rebuild.
+        return (
+            "Search index predates the current indexing pipeline "
+            "(no fingerprint recorded)."
+        )
 
     def _create_embedder(self):
         """Create and return the Pydantic AI embedder, or None when an embed_fn is set.
@@ -1478,10 +1527,7 @@ class SearchEngine:
         for _ in range(_MAX_FIT_PASSES):
             if not pending:
                 break
-            texts = [
-                self._embed_text_for(normalized_path, content, offset, chunk)
-                for offset, chunk in pending
-            ]
+            texts = self._embed_texts_for(normalized_path, content, pending)
             visible = await measure(texts)
             if visible is None:
                 return windows
@@ -1491,7 +1537,7 @@ class SearchEngine:
                 # `room` counts characters of the *embedded* text, which may
                 # carry a context prefix; charge that overhead to the chunk.
                 budget = room - (len(embed_text) - len(chunk))
-                if budget >= len(chunk) or budget < _MIN_FIT_CHARS:
+                if budget >= len(chunk) - _FIT_SLACK_CHARS or budget < _MIN_FIT_CHARS:
                     fitted.append((offset, chunk))
                     continue
                 split_count += 1
@@ -1513,19 +1559,23 @@ class SearchEngine:
             )
         return fitted
 
-    def _embed_text_for(
-        self, normalized_path: str, content: str, offset: int, chunk: str
-    ) -> str:
-        """The text that will actually be embedded for a chunk (context + chunk).
+    def _embed_texts_for(
+        self, normalized_path: str, content: str, windows: list[tuple[int, str]]
+    ) -> list[str]:
+        """The texts that will actually be embedded for these windows.
 
-        Used when measuring the context window; the contextual-retrieval
+        Used when measuring the context window. The contextual-retrieval
         preamble is not known until it is generated, so its (bounded, ~200
-        token) length is approximated by the heading breadcrumb instead.
+        token) length is approximated by the heading breadcrumb instead —
+        with ``STASH_CONTEXTUAL_RETRIEVAL=true`` the budget is therefore
+        optimistic and long chunks may still be truncated.
         """
-        if self.contextual_retrieval or self.heading_context:
-            context = _heading_breadcrumb(normalized_path, content, offset)
-            return f"{context}\n\n{chunk}"
-        return chunk
+        if not (self.contextual_retrieval or self.heading_context):
+            return [chunk for _, chunk in windows]
+        crumbs = _heading_breadcrumbs(
+            normalized_path, content, [offset for offset, _ in windows]
+        )
+        return [f"{crumb}\n\n{chunk}" for crumb, (_, chunk) in zip(crumbs, windows)]
 
     async def _index_file_locked(
         self, relative_path: str, *, content: str | None = None
@@ -1571,14 +1621,21 @@ class SearchEngine:
         metadata_list: list[dict] = []
         texts_to_embed: list[str] = []
 
-        for i, (offset, chunk) in enumerate(windows):
-            context = None
+        # Cheap stand-in for contextual retrieval: tell the embedding which
+        # document and section each chunk came from. Computed for the whole
+        # file in one pass over the text.
+        breadcrumbs = (
+            _heading_breadcrumbs(
+                normalized_path, content, [offset for offset, _ in windows]
+            )
+            if self.heading_context and not self.contextual_retrieval
+            else [None] * len(windows)
+        )
+
+        for i, ((_offset, chunk), breadcrumb) in enumerate(zip(windows, breadcrumbs)):
+            context = breadcrumb
             if self.contextual_retrieval:
                 context = await self._contextualise_chunk(chunk, content)
-            elif self.heading_context:
-                # Cheap stand-in for contextual retrieval: tell the embedding
-                # which document and section this chunk came from.
-                context = _heading_breadcrumb(normalized_path, content, offset)
 
             embed_text = f"{context}\n\n{chunk}" if context else chunk
             texts_to_embed.append(embed_text)
@@ -1900,7 +1957,18 @@ class SearchEngine:
             item["score"] = float(score)
             rescored.append(item)
         rescored.sort(key=lambda d: d["score"], reverse=True)
-        return rescored + tail
+
+        # The tail was never scored by the cross-encoder, and its retrieval
+        # scores live on a different scale (cosine or normalised fusion).
+        # Restate them strictly below the shortlist, preserving retrieval
+        # order among themselves, so a downstream stage that compares scores
+        # (the recency blend) can never float an unscored item to the top.
+        floor = min((item["score"] for item in rescored), default=0.0)
+        demoted = [
+            {**item, "score": floor - 1.0 - position}
+            for position, item in enumerate(tail)
+        ]
+        return rescored + demoted
 
     async def _fetch_blame_batch(
         self, file_paths: list[str]
