@@ -29,9 +29,12 @@ ONNX_PREFIX = "onnx:"
 DEFAULT_ONNX_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_EMBEDDER_MODEL = f"{ONNX_PREFIX}{DEFAULT_ONNX_MODEL}"
 MINILM_ONNX_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-# Smallest of fastembed's cross-encoders (~80 MB); the L-12 variant and
-# BAAI/bge-reranker-base are more accurate but 1.5x and 13x the size.
-DEFAULT_RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+# Best accuracy-per-megabyte of fastembed's cross-encoders on the corpora
+# measured here (~120 MB). The L-6 variant is 80 MB and ~2x faster but scored
+# no better than not reranking at all; jina's tiny/turbo rerankers are a
+# similar size to L-12 and scored *worse* than no reranking; and
+# BAAI/bge-reranker-base is stronger still but over 1 GB.
+DEFAULT_RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-12-v2"
 
 # Token limits applied after loading, keyed by lower-cased fastembed model
 # name. fastembed's packaging of all-MiniLM-L6-v2 (qdrant/all-MiniLM-L6-v2-onnx)

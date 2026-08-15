@@ -366,8 +366,9 @@ class TestFastEmbedAdapter:
 
 class TestFastEmbedReranker:
 
-    def test_default_model_is_the_small_ms_marco_cross_encoder(self):
-        assert DEFAULT_RERANK_MODEL == RERANK_MODEL
+    def test_default_model_is_the_ms_marco_l12_cross_encoder(self):
+        """L-12 measured best per megabyte of the small cross-encoders."""
+        assert DEFAULT_RERANK_MODEL == "Xenova/ms-marco-MiniLM-L-12-v2"
 
     async def test_scores_each_document_against_the_query(self, fake_fastembed):
         reranker = FastEmbedReranker(RERANK_MODEL)

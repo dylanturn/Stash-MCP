@@ -504,6 +504,13 @@ class BM25Store:
 
     INDEX_SUBDIR = "bm25_index"
     IDS_FILE = "chunk_ids.json"
+    META_FILE = "bm25_meta.json"
+    # Bump when the text fed to the index changes, so an index built from
+    # different text is discarded and rebuilt instead of silently serving
+    # results the current code would never produce.
+    #   1: chunk content only
+    #   2: heading breadcrumb + chunk content
+    CORPUS_VERSION = 2
 
     def __init__(self, store_path: Path):
         """Initialize the store; load from disk if available.
@@ -524,11 +531,36 @@ class BM25Store:
     def _ids_path(self) -> Path:
         return self.store_path / self.IDS_FILE
 
+    def _meta_path(self) -> Path:
+        return self.store_path / self.META_FILE
+
+    def _persisted_corpus_version(self) -> int:
+        """Corpus version of the index on disk (1 for pre-versioning indexes)."""
+        try:
+            with open(self._meta_path()) as f:
+                return int(json.load(f).get("corpus_version", 1))
+        except FileNotFoundError:
+            return 1
+        except Exception as e:
+            logger.warning("Unreadable BM25 metadata (%s); rebuilding", e)
+            return -1
+
     def _load(self) -> None:
         """Load the persisted BM25 index, or start empty."""
         index_dir = self._index_dir()
         ids_path = self._ids_path()
         if not index_dir.exists() or not ids_path.exists():
+            return
+        persisted = self._persisted_corpus_version()
+        if persisted != self.CORPUS_VERSION:
+            # Leaving the store empty makes the engine's existing
+            # rebuild-from-vector-metadata path pick it up on start-up.
+            logger.info(
+                "BM25 index was built from a different corpus (v%s, expected v%s); "
+                "it will be rebuilt",
+                persisted,
+                self.CORPUS_VERSION,
+            )
             return
         try:
             import bm25s
@@ -567,7 +599,17 @@ class BM25Store:
             self._dirty = False
             return
 
-        corpus = [m.get("content", "") for m in chunks]
+        # Index the breadcrumb alongside the chunk. Unlike the dense vector —
+        # where the breadcrumb's words dilute the chunk's own and measurably
+        # hurt — BM25 scores each term independently with IDF, so this only
+        # adds ways to match. It also makes file paths searchable at all:
+        # without it, no keyword query can reach a document by its name.
+        corpus = [
+            f"{m['context']}\n{m.get('content', '')}"
+            if m.get("context")
+            else m.get("content", "")
+            for m in chunks
+        ]
         self._chunk_ids = [
             (m.get("file_path", ""), int(m.get("chunk_index", 0)))
             for m in chunks
@@ -618,9 +660,9 @@ class BM25Store:
         self.store_path.mkdir(parents=True, exist_ok=True)
         if self._retriever is None or not self._chunk_ids:
             # Empty state — remove any stale on-disk files.
-            ids_path = self._ids_path()
-            if ids_path.exists():
-                ids_path.unlink()
+            for path in (self._ids_path(), self._meta_path()):
+                if path.exists():
+                    path.unlink()
             index_dir = self._index_dir()
             if index_dir.exists():
                 import shutil
@@ -629,6 +671,8 @@ class BM25Store:
         self._retriever.save(str(self._index_dir()), corpus=None)
         with open(self._ids_path(), "w") as f:
             json.dump(self._chunk_ids, f)
+        with open(self._meta_path(), "w") as f:
+            json.dump({"corpus_version": self.CORPUS_VERSION}, f)
 
     async def save_async(self) -> None:
         await asyncio.to_thread(self.save)

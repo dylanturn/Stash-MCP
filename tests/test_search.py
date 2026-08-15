@@ -924,6 +924,89 @@ class _StubGitBackend:
         return [_StubBlameLine()]
 
 
+# --- BM25 indexes the breadcrumb as well as the chunk ---
+
+
+class TestBM25Breadcrumbs:
+    """The heading breadcrumb is kept out of the *dense* vector (it dilutes
+    the chunk's wording) but belongs in the *lexical* index, where terms are
+    matched independently — a file path is otherwise unsearchable by keyword.
+    """
+
+    CHUNKS = [
+        {
+            "file_path": "_reports/frogpilot-deviations-ui.md",
+            "chunk_index": 0,
+            "content": "A diff scoped to the interface alone is misleading.",
+            "context": "_reports/frogpilot-deviations-ui.md > Feature inventory",
+        },
+        {
+            "file_path": "primitives/cereal.md",
+            "chunk_index": 0,
+            "content": "The message bus schema and its publish subscribe client.",
+            "context": "primitives/cereal.md > Purpose",
+        },
+    ]
+
+    def test_path_words_become_searchable(self, tmp_path):
+        store = BM25Store(tmp_path)
+        store.rebuild(self.CHUNKS)
+        # None of these words appear in the chunk body — only in the path
+        hits = store.search("frogpilot deviations", top_n=5)
+        assert hits
+        assert hits[0][0] == "_reports/frogpilot-deviations-ui.md"
+
+    def test_heading_words_become_searchable(self, tmp_path):
+        store = BM25Store(tmp_path)
+        store.rebuild(self.CHUNKS)
+        hits = store.search("feature inventory", top_n=5)
+        assert hits
+        assert hits[0][0] == "_reports/frogpilot-deviations-ui.md"
+
+    def test_body_matches_still_win_for_body_queries(self, tmp_path):
+        store = BM25Store(tmp_path)
+        store.rebuild(self.CHUNKS)
+        hits = store.search("publish subscribe client", top_n=5)
+        assert hits[0][0] == "primitives/cereal.md"
+
+    def test_chunks_without_context_still_index(self, tmp_path):
+        store = BM25Store(tmp_path)
+        store.rebuild([{**c, "context": None} for c in self.CHUNKS])
+        assert store.search("misleading", top_n=5)
+
+    def test_index_built_by_an_older_corpus_version_is_discarded(self, tmp_path):
+        store = BM25Store(tmp_path)
+        store.rebuild(self.CHUNKS)
+        store.save()
+        assert BM25Store(tmp_path).count == 2
+
+        meta_path = tmp_path / BM25Store.META_FILE
+        meta_path.write_text(json.dumps({"corpus_version": 0}))
+
+        # Reloading must not silently serve an index built from different text
+        reloaded = BM25Store(tmp_path)
+        assert reloaded.count == 0
+
+    async def test_hybrid_search_can_find_a_document_by_its_filename(self, tmp_path):
+        content_dir = tmp_path / "content"
+        (content_dir / "_reports").mkdir(parents=True)
+        (content_dir / "_reports" / "frogpilot-deviations-ui.md").write_text(
+            "# Feature inventory\n\nA diff scoped to the interface alone misleads.\n"
+        )
+        (content_dir / "other.md").write_text("Unrelated prose about something else.\n")
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=mock_embed,
+            hybrid_enabled=True,
+        )
+        await engine.build_index(["_reports/frogpilot-deviations-ui.md", "other.md"])
+
+        results = await engine.search("frogpilot deviations", max_results=2)
+        assert results[0].file_path == "_reports/frogpilot-deviations-ui.md"
+
+
 # --- Cross-encoder reranking ---
 
 

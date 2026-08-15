@@ -403,23 +403,33 @@ Measured over 42 queries against a 52-document (~305 KB) technical-documentation
 | | Overall | Prose questions | Literal identifiers | Concept questions |
 |---|---|---|---|---|
 | Previous defaults (all-MiniLM-L6-v2, dense only) | 0.740 | 0.841 | 0.646 | 0.604 |
-| **Current defaults** | **0.825** | 0.811 | **1.000** | 0.604 |
-| Current defaults + reranking | **0.863** | **0.886** | 0.917 | 0.719 |
+| **Current defaults** | **0.865** | 0.856 | **1.000** | 0.688 |
+| Current defaults + reranking | **0.880** | **0.895** | 0.958 | **0.719** |
 
-Most of that comes from two places: BM25 fusion takes literal-identifier queries from 0.646 to 1.000, and the 512-token window means chunks stop being truncated — 82% of default 1000-character chunks exceeded the old model's 256-token limit on this corpus, so roughly a seventh of the text was never embedded at all.
+Three things account for that. BM25 fusion takes literal-identifier queries from 0.646 to 1.000. The 512-token window stops chunks being truncated — 82% of default 1000-character chunks exceeded the old model's 256-token limit on this corpus, so roughly a seventh of the text was never embedded at all. And the lexical index covers each chunk's breadcrumb as well as its text, which makes headings and file paths keyword-searchable: worth +0.040 MRR on its own, at no runtime cost.
 
 The same benchmark run against a deliberately code-heavy corpus (this repository: 14 files, 24 queries) prefers the old configuration, 0.938 to 0.875. These defaults are tuned for the prose that Stash is meant to hold; if your content is mostly source code, `STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2` may serve you better.
 
 #### Reranking
 
-A cross-encoder reads the query and the chunk together instead of comparing two independently-made vectors, which reorders the shortlist much more accurately. On the documentation corpus above it is the single biggest remaining lever — overall MRR 0.825 → 0.863, and prose questions 0.811 → 0.886.
+A cross-encoder reads the query and the chunk together instead of comparing two independently-made vectors, which reorders the shortlist more accurately. It is **off by default**: on the corpus above it is worth +0.015 MRR (0.865 → 0.880) but takes a query from ~4 ms to ~470 ms on CPU and adds a ~120 MB download. Enable it when precision matters more than latency — it is strongest on prose questions (0.856 → 0.895) and slightly *negative* on exact-identifier queries (1.000 → 0.958), which the lexical index already answers perfectly.
 
-Reranking costs an extra ~80 MB model download and takes a query from ~3 ms to ~190 ms (CPU, 20 candidates), so it is **off by default**. Turn it on for documentation- and notes-heavy stashes; leave it off if the Web UI's live search needs to stay instant.
+Model choice matters more than size here:
+
+| `STASH_SEARCH_RERANK_MODEL` | Download | Overall MRR | ms/query |
+|---|---|---|---|
+| *(reranking off)* | — | 0.865 | 4 |
+| **`Xenova/ms-marco-MiniLM-L-12-v2`** (default) | ~120 MB | **0.880** | 471 |
+| `Xenova/ms-marco-MiniLM-L-6-v2` | ~80 MB | 0.863 | 254 |
+| `jinaai/jina-reranker-v1-tiny-en` | ~130 MB | 0.824 | — |
+| `jinaai/jina-reranker-v1-turbo-en` | ~150 MB | 0.816 | — |
+
+Both jina rerankers scored *worse than not reranking at all* on this corpus despite being larger than the L-6 model, so pick by measurement rather than by parameter count. `STASH_SEARCH_RERANK_CANDIDATES=10` halves the latency (219 ms) if 20 is too slow.
 
 > Both benchmarks are small (42 and 24 queries), hand-labelled, and run on one corpus each — one query moves overall MRR by ~0.02–0.04. Treat them as direction, not precision, and prefer measuring on your own content.
 
-- `STASH_SEARCH_RERANK_MODEL` — cross-encoder to use (default: `Xenova/ms-marco-MiniLM-L-6-v2`)
-- `STASH_SEARCH_RERANK_CANDIDATES` — how many results to rescore (default: `20`; ~10 ms each)
+- `STASH_SEARCH_RERANK_MODEL` — cross-encoder to use (default: `Xenova/ms-marco-MiniLM-L-12-v2`)
+- `STASH_SEARCH_RERANK_CANDIDATES` — how many results to rescore (default: `20`; ~24 ms each)
 
 > With reranking on, the `score` field returned by `/api/search` and `search_content` is the cross-encoder's logit — unbounded, sometimes negative, and only comparable within a single result set — rather than a 0–1 cosine similarity.
 
@@ -492,7 +502,7 @@ What is collected:
 | `STASH_SEARCH_HEADING_CONTEXT` | `false` | Also embed each chunk's `path > heading` breadcrumb (always recorded and returned regardless) |
 | `STASH_SEARCH_HYBRID_ENABLED` | *(on if `bm25s` installed)* | Fuse BM25 keyword search with vector search |
 | `STASH_SEARCH_RERANK_ENABLED` | `false` | Rescore top results with a cross-encoder |
-| `STASH_SEARCH_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Cross-encoder used for reranking |
+| `STASH_SEARCH_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-12-v2` | Cross-encoder used for reranking |
 | `STASH_SEARCH_RERANK_CANDIDATES` | `20` | How many results to rescore |
 | `STASH_CONTEXTUAL_RETRIEVAL` | `false` | Enable Claude-powered contextual chunk enrichment |
 | `STASH_CONTEXTUAL_MODEL` | `claude-haiku-4-5-20251001` | Model for contextual retrieval |

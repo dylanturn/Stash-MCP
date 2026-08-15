@@ -138,13 +138,14 @@ class Config:
     )
 
     # Search ranking — cross-encoder reranking of the retrieved shortlist.
-    # Off by default: it is the strongest precision lever available but adds
-    # an ~80 MB model download and ~10 ms per candidate to every query.
+    # Off by default: it adds a ~120 MB model download and takes a query from
+    # ~4 ms to ~470 ms (20 candidates, CPU) for a modest gain now that the
+    # lexical index also covers headings and paths.
     SEARCH_RERANK_ENABLED: bool = (
         os.getenv("STASH_SEARCH_RERANK_ENABLED", "false").lower() == "true"
     )
     SEARCH_RERANK_MODEL: str = os.getenv(
-        "STASH_SEARCH_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2"
+        "STASH_SEARCH_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2"
     )
     SEARCH_RERANK_CANDIDATES: int = int(
         os.getenv("STASH_SEARCH_RERANK_CANDIDATES", "20")
