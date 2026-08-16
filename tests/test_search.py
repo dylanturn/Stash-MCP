@@ -841,8 +841,8 @@ class TestSearchConfig:
         assert Config.CONTEXTUAL_MODEL == "claude-haiku-4-5-20251001"
         assert Config.SEARCH_CHUNK_SIZE == 1000
         assert Config.SEARCH_CHUNK_OVERLAP == 100
-        # Breadcrumbs are displayed but not embedded unless asked for
-        assert Config.SEARCH_HEADING_CONTEXT is False
+        # Breadcrumbs join the embedded text; small stashes should opt out
+        assert Config.SEARCH_HEADING_CONTEXT is True
 
     @pytest.mark.parametrize("module_name", ["stash_mcp.main", "stash_mcp.server"])
     def test_entrypoints_pass_search_settings_from_config(
@@ -1375,7 +1375,7 @@ class TestIndexFingerprint:
             {"embedder_model": "model-b"},
             {"chunk_size": 500},
             {"chunk_overlap": 250},
-            {"heading_context": True},
+            {"heading_context": False},
             {"document_prefix": "passage: "},
             {"contextual_retrieval": True, "anthropic_api_key": "k"},
         ],
@@ -1685,9 +1685,9 @@ class TestHeadingContextInEngine:
         assert "docs/auth.md > Authentication > OAuth2" in contexts
         assert engine.store._metadata[0]["content"].startswith("# Authentication")
 
-    async def test_breadcrumb_is_not_embedded_by_default(self, content_dir, tmp_path):
-        """Breadcrumbs are shown with results but kept out of the vector:
-        embedding them measured worse on every corpus tried."""
+    async def test_breadcrumb_is_embedded_by_default(self, content_dir, tmp_path):
+        """Telling the embedding which document and section a chunk came from
+        pays off in proportion to how many documents must be told apart."""
         embedded: list[str] = []
 
         async def spy_embed(texts):
@@ -1698,29 +1698,33 @@ class TestHeadingContextInEngine:
             content_dir=content_dir,
             index_dir=tmp_path / "index",
             embed_fn=spy_embed,
-        )
-        await engine.index_file("docs/auth.md")
-
-        assert engine.store._metadata[0]["context"] == "docs/auth.md > Authentication"
-        assert embedded[0].startswith("# Authentication")
-
-    async def test_breadcrumb_is_embedded_when_opted_in(self, content_dir, tmp_path):
-        embedded: list[str] = []
-
-        async def spy_embed(texts):
-            embedded.extend(texts)
-            return await mock_embed(texts)
-
-        engine = SearchEngine(
-            content_dir=content_dir,
-            index_dir=tmp_path / "index",
-            embed_fn=spy_embed,
-            heading_context=True,
         )
         await engine.index_file("docs/auth.md")
 
         assert engine.store._metadata[0]["context"] == "docs/auth.md > Authentication"
         assert embedded[0].startswith("docs/auth.md > Authentication\n\n")
+
+    async def test_breadcrumb_can_be_kept_out_of_the_embedding(
+        self, content_dir, tmp_path
+    ):
+        """Small collections do better without it — but it is still recorded,
+        still returned with results, and still indexed lexically."""
+        embedded: list[str] = []
+
+        async def spy_embed(texts):
+            embedded.extend(texts)
+            return await mock_embed(texts)
+
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embed_fn=spy_embed,
+            heading_context=False,
+        )
+        await engine.index_file("docs/auth.md")
+
+        assert engine.store._metadata[0]["context"] == "docs/auth.md > Authentication"
+        assert embedded[0].startswith("# Authentication")
 
     async def test_contextual_retrieval_wins_over_breadcrumbs(
         self, content_dir, tmp_path, monkeypatch

@@ -1087,7 +1087,7 @@ class SearchEngine:
         git_backend=None,
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
-        heading_context: bool = False,
+        heading_context: bool = True,
         mmr_enabled: bool = True,
         mmr_lambda: float = 0.7,
         max_per_file: int = 2,
@@ -1135,12 +1135,15 @@ class SearchEngine:
             chunk_size: Number of characters per chunk for the sliding window.
             chunk_overlap: Number of characters to overlap between adjacent chunks.
             heading_context: Fold each chunk's ``path > H1 > H2`` breadcrumb
-                into the text that gets embedded. Off by default — it measured
-                worse than leaving it out on both corpora tested, because the
-                breadcrumb's words dilute the chunk's own. The breadcrumb is
-                recorded as the chunk's context and returned with results
-                either way. Ignored when ``contextual_retrieval`` is on: the
-                LLM-generated context takes its place and is always embedded.
+                into the text that gets embedded. Worth it in proportion to
+                how many documents there are to tell apart — measured +0.056
+                MRR over 1,097 documents but -0.055 over 52, where a chunk's
+                own wording already identifies its source. On by default; turn
+                it off for small collections. The breadcrumb is recorded as
+                the chunk's context, returned with results, and indexed by
+                BM25 regardless of this setting. Ignored when
+                ``contextual_retrieval`` is on: the LLM-generated context
+                takes its place and is always embedded.
             mmr_enabled: Apply MMR diversification + per-file cap to the
                 cosine candidate pool before truncating to max_results.
             mmr_lambda: MMR relevance/diversity balance (1.0 = relevance-only,

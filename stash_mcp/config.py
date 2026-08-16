@@ -88,12 +88,15 @@ class Config:
     SEARCH_CHUNK_SIZE: int = int(os.getenv("STASH_SEARCH_CHUNK_SIZE", "1000"))
     SEARCH_CHUNK_OVERLAP: int = int(os.getenv("STASH_SEARCH_CHUNK_OVERLAP", "100"))
     # Fold the "path > heading > subheading" breadcrumb into the embedded
-    # text as well as showing it with results. Off by default: measured worse
-    # than leaving it out on both corpora tested (-0.03 to -0.07 MRR), since
-    # it dilutes the chunk's own wording. The breadcrumb is recorded and
-    # displayed either way.
+    # text as well as showing it with results. The benefit scales with how
+    # many documents there are to tell apart: +0.056 MRR over a 1,097-document
+    # corpus, but -0.055 over a 52-document one, where a chunk's own wording
+    # already identifies its source and the extra tokens only dilute it.
+    # On by default for the larger case; set false for small stashes (roughly
+    # under a hundred documents). The breadcrumb is recorded and returned with
+    # results either way, and indexed by BM25 either way.
     SEARCH_HEADING_CONTEXT: bool = (
-        os.getenv("STASH_SEARCH_HEADING_CONTEXT", "false").lower() == "true"
+        os.getenv("STASH_SEARCH_HEADING_CONTEXT", "true").lower() == "true"
     )
 
     # Find tool settings

@@ -377,7 +377,7 @@ Semantic search is **disabled by default**. To enable:
 - `STASH_MODEL_CACHE_DIR` — Where locally downloaded model weights are cached (default: `/data/models`; mount a volume there so the download happens once)
 - `STASH_SEARCH_ONNX_THREADS` — onnxruntime thread count for the `onnx:` backend (default: onnxruntime's, one per host core; set e.g. `2` under container CPU limits)
 - `STASH_SEARCH_HYBRID_ENABLED` — Fuse BM25 keyword matching with vector search (default: on when `bm25s` is installed — the `search`, `search-contextual` and `search-hybrid` extras include it; the API-provider and torch extras do not)
-- `STASH_SEARCH_HEADING_CONTEXT` — Also fold each chunk's `path > heading > subheading` breadcrumb into the embedded text (default: `false` — the breadcrumb is returned with results either way; embedding it measured worse on both corpora tested)
+- `STASH_SEARCH_HEADING_CONTEXT` — Also fold each chunk's `path > heading > subheading` breadcrumb into the embedded text (default: `true`; set `false` for collections under roughly a hundred documents — see [Breadcrumbs](#breadcrumbs))
 - `STASH_SEARCH_RERANK_ENABLED` — Rescore the top results with a cross-encoder (default: `false`, see [Reranking](#reranking))
 - `STASH_CONTEXTUAL_RETRIEVAL` — Enable Claude-powered contextual chunk enrichment (default: `false`)
 - `STASH_CONTEXTUAL_MODEL` — Model for contextual retrieval (default: `claude-haiku-4-5-20251001`)
@@ -398,17 +398,29 @@ Model files are downloaded from Hugging Face on first use into `STASH_MODEL_CACH
 
 **How retrieval works.** Any chunk that would overflow the embedding model's token window is split rather than silently truncated, and each chunk records a `path > heading > subheading` breadcrumb that comes back with the result. Queries run against both the vector index and a BM25 keyword index; the two rankings are fused with Reciprocal Rank Fusion, diversified with MMR, and optionally rescored by a cross-encoder.
 
-Measured over 42 queries against a 52-document (~305 KB) technical-documentation corpus, MRR:
+Measured against three corpora — a large public documentation tree, a standard IR benchmark with human relevance judgments, and a small private stash:
 
-| | Overall | Prose questions | Literal identifiers | Concept questions |
-|---|---|---|---|---|
-| Previous defaults (all-MiniLM-L6-v2, dense only) | 0.740 | 0.841 | 0.646 | 0.604 |
-| **Current defaults** | **0.865** | 0.856 | **1.000** | 0.688 |
-| Current defaults + reranking | **0.882** | **0.895** | 0.958 | **0.719** |
+| corpus | metric | previous defaults | current defaults |
+|---|---|---|---|
+| Kubernetes docs — 1,097 documents, 54 queries | MRR | 0.380 | **0.592** |
+| BEIR SciFact — 5,183 documents, 300 human-judged queries | nDCG@10 | 0.625 | **0.703** |
+| Small documentation stash — 52 documents, 42 queries | MRR | 0.740 | **0.810** |
 
-Three things account for that. BM25 fusion takes literal-identifier queries from 0.646 to 1.000. The 512-token window stops chunks being truncated — 82% of default 1000-character chunks exceeded the old model's 256-token limit on this corpus, so roughly a seventh of the text was never embedded at all. And the lexical index covers each chunk's breadcrumb as well as its text, which makes headings and file paths keyword-searchable: worth +0.040 MRR on its own, at no runtime cost.
+Most of the gain is lexical. Hybrid BM25 fusion is the single largest contributor everywhere — on the Kubernetes corpus it accounts for essentially all of it (+0.152 of +0.156, taking literal-identifier queries from 0.567 to 0.790) — and it only started working at all once a bug that discarded the fused ranking was fixed. The lexical index also covers each chunk's breadcrumb, making headings and file paths keyword-searchable: +0.040 MRR on its own, at no runtime cost. Finally, the 512-token window stops chunks being silently truncated — 82% of default 1000-character chunks exceeded the old model's 256-token limit — which also cuts the index 42% because the splitter no longer has to fragment every document.
 
-The same benchmark run against a deliberately code-heavy corpus (this repository: 14 files, 24 queries) prefers the old configuration, 0.938 to 0.875. These defaults are tuned for the prose that Stash is meant to hold; if your content is mostly source code, `STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2` may serve you better.
+Two caveats worth knowing. The embedding model change is the weakest-supported part: it wins clearly on SciFact (+0.040 dense-to-dense) but is roughly neutral on the Kubernetes corpus and *loses* on prose-only subsets there and on a deliberately code-heavy corpus (this repository: 0.938 for the old configuration against 0.875). If your content is mostly source code, `STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2` may serve you better. And the small-stash row above would read 0.865 rather than 0.810 with `STASH_SEARCH_HEADING_CONTEXT=false` — see [Breadcrumbs](#breadcrumbs).
+
+#### Breadcrumbs
+
+Every chunk records where it came from — `path > heading > subheading`. That breadcrumb is always returned with the result, and always indexed by BM25 so a document can be found by its own name. Whether it *also* joins the embedded text is `STASH_SEARCH_HEADING_CONTEXT`, and the right answer depends on how many documents you have:
+
+| corpus | documents | breadcrumb embedded |
+|---|---|---|
+| this repository's source | 14 | negative |
+| a small documentation stash | 52 | −0.055 MRR |
+| Kubernetes documentation | 1,097 | **+0.056 MRR** |
+
+With few documents a chunk's own wording nearly identifies its source already, so the breadcrumb's extra tokens only dilute the vector. With many — especially when some are near-identical generated reference pages — knowing the section and path is what tells them apart. It is **on by default** for the larger case; **set it to `false` if your stash is under roughly a hundred documents**, where the free lexical copy is not just sufficient but strictly better.
 
 #### Reranking
 
@@ -512,7 +524,7 @@ What is collected:
 | `STASH_SEARCH_ONNX_THREADS` | — | onnxruntime thread count for the `onnx:` backend (default: one per host core; set under container CPU limits) |
 | `STASH_SEARCH_QUERY_PREFIX` | *(model default)* | Instruction prepended to queries; `""` disables |
 | `STASH_SEARCH_DOCUMENT_PREFIX` | *(model default)* | Instruction prepended to documents; `""` disables |
-| `STASH_SEARCH_HEADING_CONTEXT` | `false` | Also embed each chunk's `path > heading` breadcrumb (always recorded and returned regardless) |
+| `STASH_SEARCH_HEADING_CONTEXT` | `true` | Also embed each chunk's `path > heading` breadcrumb (always recorded, returned and BM25-indexed regardless) |
 | `STASH_SEARCH_HYBRID_ENABLED` | *(on if `bm25s` installed)* | Fuse BM25 keyword search with vector search |
 | `STASH_SEARCH_RERANK_ENABLED` | `false` | Rescore top results with a cross-encoder |
 | `STASH_SEARCH_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-12-v2` | Cross-encoder used for reranking |
