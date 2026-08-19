@@ -13,7 +13,13 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .embedders import DEFAULT_EMBEDDER_MODEL, FastEmbedAdapter, is_onnx_model, onnx_model_name
+from .embedders import (
+    DEFAULT_EMBEDDER_MODEL,
+    ONNX_PREFIX,
+    FastEmbedAdapter,
+    is_onnx_model,
+    onnx_model_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -985,8 +991,23 @@ class SearchEngine:
 
             return Embedder(self.embedder_model)
         except ImportError:
-            provider = self.embedder_model.split(":", 1)[0]
-            extra = _PYDANTIC_AI_EXTRAS.get(provider, "search-openai")
+            provider, separator, _ = self.embedder_model.partition(":")
+            extra = _PYDANTIC_AI_EXTRAS.get(provider) if separator else None
+            if extra is None:
+                # An unrecognised prefix (or none at all) tells us nothing about
+                # which extra to install, so name the ones that exist rather
+                # than guessing -- and point at the backend that is already
+                # installed, since a dropped prefix is the likeliest way here.
+                known = ", ".join(
+                    f"'{p}:' (stash-mcp[{e}])" for p, e in _PYDANTIC_AI_EXTRAS.items()
+                )
+                raise RuntimeError(
+                    f"Embedder model {self.embedder_model!r} names no known "
+                    f"embedding provider. Local models run on the default "
+                    f"install as '{ONNX_PREFIX}<fastembed model>', e.g. "
+                    f"{DEFAULT_EMBEDDER_MODEL!r}. The providers handled by "
+                    f"pydantic-ai, which is not installed, are: {known}."
+                )
             hint = (
                 f"pydantic-ai is required for the '{provider}:' embedding provider. "
                 f"Install with: pip install 'stash-mcp[{extra}]'"
