@@ -3,8 +3,9 @@
 The default local backend runs on ONNX Runtime via `fastembed`_ (onnxruntime +
 tokenizers), which keeps the ``search`` install free of PyTorch and the CUDA
 libraries. Model strings use the ``onnx:`` prefix followed by a fastembed model
-name, e.g. ``onnx:sentence-transformers/all-MiniLM-L6-v2`` (the default) or
-``onnx:BAAI/bge-small-en-v1.5`` (int8-quantised, smaller and faster).
+name, e.g. ``onnx:BAAI/bge-small-en-v1.5`` (the default: 384-dim, 512-token
+window, ~66 MB) or ``onnx:sentence-transformers/all-MiniLM-L6-v2`` (the pre-0.2
+default: 384-dim, 256-token window, ~90 MB).
 
 :class:`FastEmbedAdapter` is an async ``embed_fn`` compatible with
 :class:`stash_mcp.search.SearchEngine`: it runs the synchronous

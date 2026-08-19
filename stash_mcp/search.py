@@ -1110,7 +1110,8 @@ class SearchEngine:
             index_dir: Directory for index persistence.
             embedder_model: Embedder model string. ``onnx:<fastembed model>``
                 selects the local ONNX Runtime backend (default:
-                ``onnx:sentence-transformers/all-MiniLM-L6-v2``); any other
+                ``onnx:BAAI/bge-small-en-v1.5``, see
+                :data:`~stash_mcp.embedders.DEFAULT_EMBEDDER_MODEL`); any other
                 prefix (``openai:``, ``cohere:``, ``sentence-transformers:``)
                 is passed to Pydantic AI's ``Embedder``.
             contextual_retrieval: Whether to use Claude-powered chunk enrichment.
