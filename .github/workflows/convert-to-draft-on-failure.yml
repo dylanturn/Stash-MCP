@@ -2,7 +2,7 @@ name: Convert PR to Draft on Failure
 
 on:
   workflow_run:
-    workflows: ["*"] # Triggers on completion of any workflow
+    workflows: ["Tests"] # Triggers on completion of the pytest workflow
     types:
       - completed
 
@@ -29,21 +29,46 @@ jobs:
 
           echo "Workflow failed for PR #${PR_NUMBER}. Converting to draft..."
 
-          # 1. Get the Node ID of the Pull Request
-          NODE_ID=$(curl -s -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
+          # 1. Get the Pull Request details
+          QUERY_RESPONSE=$(curl -s -X POST -H "Authorization: ******" \
             -H "Content-Type: application/json" \
-            -d "{ \"query\": \"query { repository(owner: \\\"${REPO_NAME%/*}\\\", name: \\\"${REPO_NAME#*/}\\\") { pullRequest(number: $PR_NUMBER) { id } } }\" }" \
-            https://api.github.com/graphql | jq -r '.data.repository.pullRequest.id')
+            -d "{ \"query\": \"query { repository(owner: \\\"${REPO_NAME%/*}\\\", name: \\\"${REPO_NAME#*/}\\\") { pullRequest(number: $PR_NUMBER) { id isDraft } } }\" }" \
+            https://api.github.com/graphql)
+
+          if [ "$(echo "$QUERY_RESPONSE" | jq '(.errors // []) | length')" -gt 0 ]; then
+            echo "Failed to retrieve PR details:"
+            echo "$QUERY_RESPONSE" | jq '.errors'
+            exit 1
+          fi
+
+          NODE_ID=$(echo "$QUERY_RESPONSE" | jq -r '.data.repository.pullRequest.id')
+          IS_DRAFT=$(echo "$QUERY_RESPONSE" | jq -r '.data.repository.pullRequest.isDraft')
 
           if [ "$NODE_ID" == "null" ] || [ -z "$NODE_ID" ]; then
             echo "Failed to retrieve Node ID."
             exit 1
           fi
 
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "PR #${PR_NUMBER} is already a draft. Skipping."
+            exit 0
+          fi
+
           # 2. Execute the mutation to convert to draft
-          curl -s -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
+          MUTATION_RESPONSE=$(curl -s -X POST -H "Authorization: ******" \
             -H "Content-Type: application/json" \
             -d "{ \"query\": \"mutation { convertPullRequestToDraft(input: {pullRequestId: \\\"$NODE_ID\\\"}) { pullRequest { id number isDraft } } }\" }" \
-            https://api.github.com/graphql
+            https://api.github.com/graphql)
+
+          if [ "$(echo "$MUTATION_RESPONSE" | jq '(.errors // []) | length')" -gt 0 ]; then
+            echo "Failed to convert PR #${PR_NUMBER} to a draft:"
+            echo "$MUTATION_RESPONSE" | jq '.errors'
+            exit 1
+          fi
+
+          if [ "$(echo "$MUTATION_RESPONSE" | jq -r '.data.convertPullRequestToDraft.pullRequest.isDraft')" != "true" ]; then
+            echo "PR #${PR_NUMBER} was not converted to a draft."
+            exit 1
+          fi
 
           echo "PR #${PR_NUMBER} has been converted to a draft."
