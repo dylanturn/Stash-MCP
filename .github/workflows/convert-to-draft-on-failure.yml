@@ -1,0 +1,49 @@
+name: Convert PR to Draft on Failure
+
+on:
+  workflow_run:
+    workflows: ["*"] # Triggers on completion of any workflow
+    types:
+      - completed
+
+jobs:
+  convert-to-draft:
+    runs-on: ubuntu-latest
+    # Only run if the triggering workflow failed
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    permissions:
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Convert PR to Draft via GraphQL
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          # Exit if no PR is associated with the workflow run (e.g., push to main)
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No associated PR found. Skipping."
+            exit 0
+          fi
+
+          echo "Workflow failed for PR #${PR_NUMBER}. Converting to draft..."
+
+          # 1. Get the Node ID of the Pull Request
+          NODE_ID=$(curl -s -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{ \"query\": \"query { repository(owner: \\\"${REPO_NAME%/*}\\\", name: \\\"${REPO_NAME#*/}\\\") { pullRequest(number: $PR_NUMBER) { id } } }\" }" \
+            https://api.github.com/graphql | jq -r '.data.repository.pullRequest.id')
+
+          if [ "$NODE_ID" == "null" ] || [ -z "$NODE_ID" ]; then
+            echo "Failed to retrieve Node ID."
+            exit 1
+          fi
+
+          # 2. Execute the mutation to convert to draft
+          curl -s -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{ \"query\": \"mutation { convertPullRequestToDraft(input: {pullRequestId: \\\"$NODE_ID\\\"}) { pullRequest { id number isDraft } } }\" }" \
+            https://api.github.com/graphql
+
+          echo "PR #${PR_NUMBER} has been converted to a draft."
