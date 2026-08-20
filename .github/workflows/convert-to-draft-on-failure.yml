@@ -2,7 +2,7 @@ name: Convert PR to Draft on Failure
 
 on:
   workflow_run:
-    workflows: ["Tests"] # Triggers on completion of the pytest workflow
+    workflows: ["Tests", "pytest"] # Triggers on completion of the pytest workflow
     types:
       - completed
 
