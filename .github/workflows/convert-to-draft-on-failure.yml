@@ -30,7 +30,7 @@ jobs:
           echo "Workflow failed for PR #${PR_NUMBER}. Converting to draft..."
 
           # 1. Get the Pull Request details
-          QUERY_RESPONSE=$(curl -s -X POST -H "Authorization: ******" \
+          QUERY_RESPONSE=$(curl -s -X POST -H "Authorization: bearer $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{ \"query\": \"query { repository(owner: \\\"${REPO_NAME%/*}\\\", name: \\\"${REPO_NAME#*/}\\\") { pullRequest(number: $PR_NUMBER) { id isDraft } } }\" }" \
             https://api.github.com/graphql)
@@ -55,7 +55,7 @@ jobs:
           fi
 
           # 2. Execute the mutation to convert to draft
-          MUTATION_RESPONSE=$(curl -s -X POST -H "Authorization: ******" \
+          MUTATION_RESPONSE=$(curl -s -X POST -H "Authorization: bearer $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{ \"query\": \"mutation { convertPullRequestToDraft(input: {pullRequestId: \\\"$NODE_ID\\\"}) { pullRequest { id number isDraft } } }\" }" \
             https://api.github.com/graphql)
