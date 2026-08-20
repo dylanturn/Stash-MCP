@@ -19,7 +19,7 @@ eagerly so configuration typos fail fast.
 
 import asyncio
 import logging
-import os
+import tempfile
 import threading
 from collections.abc import Iterable
 from pathlib import Path
@@ -149,6 +149,13 @@ def _import_text_cross_encoder():
 def _resolve_cache_dir(cache_dir: Path | str | None) -> str | None:
     """Ensure *cache_dir* exists and is writable, else fall back to fastembed's default.
 
+    Writability is settled by creating a file rather than by asking
+    :func:`os.access`, which answers for the *real* uid, ignores ACLs, and
+    tests the write bit alone -- while creating a file in a directory also
+    needs its execute (search) bit. Getting this wrong is expensive: the
+    download only starts on the first embed, long after start-up, and by then
+    there is no fallback left to take.
+
     Returns the directory as a string, or None to let fastembed choose
     (``FASTEMBED_CACHE_PATH`` or a temp directory).
     """
@@ -157,20 +164,14 @@ def _resolve_cache_dir(cache_dir: Path | str | None) -> str | None:
     path = Path(cache_dir)
     try:
         path.mkdir(parents=True, exist_ok=True)
-        writable = os.access(path, os.W_OK)
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".stash-write-test"):
+            pass
     except OSError as e:
         logger.warning(
             "Model cache directory %s is not usable (%s); "
             "falling back to fastembed's default cache location",
             path,
             e,
-        )
-        return None
-    if not writable:
-        logger.warning(
-            "Model cache directory %s is not writable; "
-            "falling back to fastembed's default cache location",
-            path,
         )
         return None
     return str(path)

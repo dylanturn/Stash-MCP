@@ -1847,6 +1847,27 @@ class TestOnnxBackendWiring:
         assert "stash-mcp[search-torch]" in message
         assert "onnx:sentence-transformers/all-MiniLM-L6-v2" in message
 
+    @pytest.mark.parametrize(
+        "model", ["all-MiniLM-L6-v2", "notaprovider:some-model"],
+    )
+    def test_unknown_provider_does_not_guess_an_extra(
+        self, monkeypatch, tmp_path, model
+    ):
+        """A dropped or unrecognised prefix must not be sold as an OpenAI problem."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "pydantic_ai", None)
+        with pytest.raises(RuntimeError) as exc_info:
+            SearchEngine(
+                content_dir=tmp_path / "content",
+                index_dir=tmp_path / "index",
+                embedder_model=model,
+            )
+        message = str(exc_info.value)
+        assert "search-openai" not in message.partition("handled by")[0]
+        assert model in message
+        assert "onnx:" in message
+
     async def test_invalid_model_string_does_not_wipe_existing_index(
         self, fake_fastembed, tmp_path
     ):

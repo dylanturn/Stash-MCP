@@ -192,6 +192,24 @@ class TestFastEmbedAdapter:
         await adapter(["x"])
         assert fake_fastembed.calls["init"][0]["cache_dir"] is None
 
+    def test_unwritable_cache_dir_falls_back_with_warning(
+        self, fake_fastembed, tmp_path, caplog, monkeypatch
+    ):
+        """A directory that exists but rejects writes must not defer the failure
+        to the first embed, where nothing is left to fall back to."""
+        import tempfile as tempfile_module
+
+        cache = tmp_path / "models"
+
+        def refuse(*args, **kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(tempfile_module, "NamedTemporaryFile", refuse)
+        with caplog.at_level("WARNING", logger="stash_mcp.embedders"):
+            adapter = FastEmbedAdapter(MINILM, cache_dir=cache)
+        assert adapter.cache_dir is None
+        assert any("cache" in rec.message.lower() for rec in caplog.records)
+
     def test_unknown_model_fails_fast_at_construction(self, fake_fastembed):
         with pytest.raises(ValueError, match="nope/not-a-model"):
             FastEmbedAdapter("nope/not-a-model")
