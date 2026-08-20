@@ -19,12 +19,18 @@ COPY pyproject.toml uv.lock README.md ./
 COPY stash_mcp ./stash_mcp
 
 # Install dependencies with uv
-# Use --extra search to include semantic search support (numpy + pydantic-ai).
+# Use --extra search to include semantic search support (numpy + fastembed,
+# i.e. ONNX Runtime — no torch/CUDA: ~0.7 GB unpacked / ~0.17 GB compressed
+# instead of ~12 GB / ~4.4 GB with the torch + CUDA wheels).
 # Override SEARCH_EXTRA at build time to use a different embedder provider:
-#   search            — sentence-transformers (local, default)
+#   search            — local ONNX Runtime via fastembed (default;
+#                       model strings onnx:<model>)
+#   search-torch      — local PyTorch via sentence-transformers (model strings
+#                       sentence-transformers:<model>; pulls torch + CUDA libs)
 #   search-openai     — OpenAI embeddings
 #   search-cohere     — Cohere embeddings
-#   search-contextual — sentence-transformers + Anthropic contextual retrieval
+#   search-contextual — ONNX Runtime + Anthropic contextual retrieval
+#   search-hybrid     — ONNX Runtime + BM25 (bm25s) hybrid retrieval
 # Example: docker build --build-arg SEARCH_EXTRA=search-openai .
 ARG SEARCH_EXTRA=search
 RUN uv sync --frozen --no-dev --extra ${SEARCH_EXTRA}
@@ -38,8 +44,11 @@ ENV STASH_SEARCH_INDEX_DIR=/data/.stash-index
 ENV STASH_HOST=0.0.0.0
 ENV STASH_PORT=8000
 ENV PYTHONUNBUFFERED=1
-# Cache HuggingFace/sentence-transformers model weights under /data/models
-# so they persist across container restarts when the volume is mounted.
+# Cache embedding model weights under /data/models so they persist across
+# container restarts when the volume is mounted. The ONNX backend writes to
+# $STASH_MODEL_CACHE_DIR/fastembed (default /data/models/fastembed); HF_HOME
+# covers the torch/sentence-transformers path (search-torch extra).
+ENV STASH_MODEL_CACHE_DIR=/data/models
 ENV HF_HOME=/data/models
 
 # Expose port

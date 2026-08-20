@@ -281,7 +281,7 @@ services:
       - STASH_SEARCH_ENABLED=true
 ```
 
-The default Docker image includes the `sentence-transformers` embedding provider. To use a different provider, override the build argument:
+The default Docker image includes the local ONNX Runtime embedding backend ([fastembed](https://github.com/qdrant/fastembed) — no PyTorch or CUDA libraries, so the image stays small). To use a different provider, override the build argument:
 
 ```bash
 # OpenAI embeddings
@@ -290,8 +290,14 @@ docker build --build-arg SEARCH_EXTRA=search-openai -t stash-mcp .
 # Cohere embeddings
 docker build --build-arg SEARCH_EXTRA=search-cohere -t stash-mcp .
 
-# Sentence-transformers + Anthropic contextual retrieval
+# ONNX Runtime + Anthropic contextual retrieval
 docker build --build-arg SEARCH_EXTRA=search-contextual -t stash-mcp .
+
+# ONNX Runtime + BM25 hybrid retrieval
+docker build --build-arg SEARCH_EXTRA=search-hybrid -t stash-mcp .
+
+# Local PyTorch / sentence-transformers backend (opt-in; adds ~5 GB of torch + CUDA wheels)
+docker build --build-arg SEARCH_EXTRA=search-torch -t stash-mcp .
 ```
 
 #### Local Development
@@ -299,7 +305,7 @@ docker build --build-arg SEARCH_EXTRA=search-contextual -t stash-mcp .
 Install the search dependencies for your preferred embedding provider:
 
 ```bash
-# Sentence-transformers (local, no API key needed)
+# Local ONNX Runtime embeddings (default, no API key needed)
 pip install -e ".[search]"
 
 # OpenAI embeddings
@@ -308,8 +314,11 @@ pip install -e ".[search-openai]"
 # Cohere embeddings
 pip install -e ".[search-cohere]"
 
-# Sentence-transformers + Anthropic contextual retrieval
+# ONNX Runtime + Anthropic contextual retrieval
 pip install -e ".[search-contextual]"
+
+# Local PyTorch / sentence-transformers embeddings (opt-in)
+pip install -e ".[search-torch]"
 ```
 
 Then enable search by setting the environment variable:
@@ -317,6 +326,26 @@ Then enable search by setting the environment variable:
 ```bash
 export STASH_SEARCH_ENABLED=true
 ```
+
+#### Choosing an Embedding Model
+
+`STASH_SEARCH_EMBEDDER_MODEL` selects both the backend (by prefix) and the model:
+
+| Model string | Backend | Notes |
+|---|---|---|
+| `onnx:sentence-transformers/all-MiniLM-L6-v2` | ONNX Runtime (default) | fp32, 384-dim, ~90 MB download. Same weights as the torch model — vectors match to ~1e-7. |
+| `onnx:BAAI/bge-small-en-v1.5` | ONNX Runtime | int8-quantised, ~67 MB, faster on CPU (opt-in) |
+| `onnx:BAAI/bge-base-en-v1.5` | ONNX Runtime | 768-dim, higher quality, ~210 MB |
+| `onnx:<any fastembed model>` | ONNX Runtime | See `python -c "from fastembed import TextEmbedding; print([m['model'] for m in TextEmbedding.list_supported_models()])"` |
+| `openai:text-embedding-3-small` | OpenAI API | Requires `OPENAI_API_KEY` and the `search-openai` extra |
+| `cohere:embed-english-v3.0` | Cohere API | Requires `CO_API_KEY` and the `search-cohere` extra |
+| `sentence-transformers:all-mpnet-base-v2` | PyTorch | Requires the `search-torch` extra |
+
+Local model files are downloaded on first use into `STASH_MODEL_CACHE_DIR` (default `/data/models`; ONNX models under a `fastembed/` subdirectory). Mount a volume there so the download happens once. With the HTTP server the download happens in the background during the first index build, so the server starts and answers health checks immediately (the stdio server, `stash-mcp-stdio`, builds the index before it starts serving, as before).
+
+The `onnx:` backend embeds queries and documents through the same path, which is what symmetric models such as `all-MiniLM-L6-v2` and the `bge-*` family expect; models that want a special query prefix or a separate query encoder are not special-cased. Set `STASH_SEARCH_ONNX_THREADS` (e.g. `2`) to cap onnxruntime's thread pool when the container runs under a CPU limit — by default onnxruntime sizes it from the host's core count.
+
+> **CPU requirement:** numpy ≥ 2.4 wheels are built for the x86-64-v2 baseline (SSE4.2/POPCNT). On Proxmox/QEMU VMs using the generic `kvm64` CPU type the process dies with `Illegal instruction` when search is enabled, whichever backend you pick — use CPU type `host` (or `x86-64-v2-AES`) for the VM.
 
 ### How Search Works
 
@@ -326,7 +355,7 @@ When search is enabled, the server:
 2. **Keeps the index up-to-date** — File creates, updates, and deletes automatically update the search index
 3. **Persists the index to disk** — The vector index is saved to `STASH_SEARCH_INDEX_DIR` and reloaded on restart
 4. **Skips unchanged files** — Incremental indexing only re-embeds files whose content has changed
-5. **Auto-reindexes on model change** — If `STASH_SEARCH_EMBEDDER_MODEL` changes between restarts, the stale index is automatically cleared and rebuilt with the new model
+5. **Auto-reindexes on model change** — If `STASH_SEARCH_EMBEDDER_MODEL` changes between restarts, the stale index is automatically cleared and rebuilt with the new model. The index records the full model string, so switching backends counts as a change: an index built with `sentence-transformers:all-MiniLM-L6-v2` (the pre-ONNX default) is rebuilt once on the first start with `onnx:sentence-transformers/all-MiniLM-L6-v2`
 
 ### Using Search via MCP
 
@@ -401,7 +430,9 @@ Environment variables:
 | `STASH_LOG_LEVEL` | Log level (debug, info, warning, error) | `info` |
 | `STASH_SEARCH_ENABLED` | Enable semantic search | `false` |
 | `STASH_SEARCH_INDEX_DIR` | Search index directory | `/data/.stash-index` |
-| `STASH_SEARCH_EMBEDDER_MODEL` | Embedder model string | `sentence-transformers:all-MiniLM-L6-v2` |
+| `STASH_SEARCH_EMBEDDER_MODEL` | Embedder model string (`onnx:`, `openai:`, `cohere:`, `sentence-transformers:` prefix selects the backend) | `onnx:sentence-transformers/all-MiniLM-L6-v2` |
+| `STASH_MODEL_CACHE_DIR` | Cache directory for locally downloaded model weights | `/data/models` |
+| `STASH_SEARCH_ONNX_THREADS` | onnxruntime thread count for the `onnx:` backend | *(onnxruntime default)* |
 | `STASH_CONTEXTUAL_RETRIEVAL` | Enable contextual chunk enrichment | `false` |
 | `STASH_CONTEXTUAL_MODEL` | Model for contextual retrieval | `claude-haiku-4-5-20251001` |
 | `ANTHROPIC_API_KEY` | API key for contextual retrieval | *(none)* |

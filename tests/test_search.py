@@ -819,7 +819,8 @@ class TestSearchConfig:
         from stash_mcp.config import Config
 
         assert Config.SEARCH_INDEX_DIR == Path("/data/.stash-index")
-        assert "sentence-transformers" in Config.SEARCH_EMBEDDER_MODEL
+        # Default local backend is ONNX Runtime (fastembed), not torch
+        assert Config.SEARCH_EMBEDDER_MODEL == "onnx:sentence-transformers/all-MiniLM-L6-v2"
         assert Config.CONTEXTUAL_RETRIEVAL is False
         assert Config.CONTEXTUAL_MODEL == "claude-haiku-4-5-20251001"
         assert Config.SEARCH_CHUNK_SIZE == 1000
@@ -830,6 +831,215 @@ class TestSearchConfig:
         from stash_mcp.config import Config
 
         assert Config.MODEL_CACHE_DIR == Path("/data/models")
+
+
+# --- ONNX Runtime (fastembed) backend wiring ---
+
+
+class TestOnnxBackendWiring:
+    """SearchEngine picks the fastembed adapter for ``onnx:`` model strings."""
+
+    ONNX_MODEL = "onnx:sentence-transformers/all-MiniLM-L6-v2"
+
+    async def test_onnx_model_string_installs_fastembed_adapter(
+        self, fake_fastembed, tmp_path
+    ):
+        from stash_mcp.embedders import FastEmbedAdapter
+
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embedder_model=self.ONNX_MODEL,
+            model_cache_dir=tmp_path / "models",
+        )
+        assert isinstance(engine._embed_fn, FastEmbedAdapter)
+        assert engine._embedder is None  # pydantic-ai is not involved
+        assert engine._embed_fn.model_name == "sentence-transformers/all-MiniLM-L6-v2"
+        # Weights are cached in a fastembed subdir of the model cache dir
+        assert engine._embed_fn.cache_dir == str(tmp_path / "models" / "fastembed")
+        # Nothing is downloaded/loaded at construction time
+        assert fake_fastembed.calls["init"] == []
+
+    async def test_onnx_engine_indexes_and_searches_via_adapter(
+        self, fake_fastembed, tmp_path
+    ):
+        content_dir = tmp_path / "content"
+        content_dir.mkdir()
+        (content_dir / "a.md").write_text("alpha")
+        (content_dir / "b.md").write_text("beta text is longer")
+        engine = SearchEngine(
+            content_dir=content_dir,
+            index_dir=tmp_path / "index",
+            embedder_model=self.ONNX_MODEL,
+            model_cache_dir=tmp_path / "models",
+        )
+        total = await engine.build_index(["a.md", "b.md"])
+        assert total == 2
+        assert len(fake_fastembed.calls["init"]) == 1
+        results = await engine.search("alpha", max_results=1)
+        assert results and results[0].file_path == "a.md"
+
+    async def test_custom_embed_fn_wins_over_onnx_model_string(self, fake_fastembed, tmp_path):
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embedder_model=self.ONNX_MODEL,
+            embed_fn=mock_embed,
+        )
+        assert engine._embed_fn is mock_embed
+        vec = await engine._embed_query("auth")
+        assert len(vec) == 16
+
+    def test_no_model_cache_dir_uses_fastembed_default(self, fake_fastembed, tmp_path):
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embedder_model=self.ONNX_MODEL,
+        )
+        assert engine._embed_fn.cache_dir is None
+
+    def test_unknown_onnx_model_fails_at_construction(self, fake_fastembed, tmp_path):
+        with pytest.raises(ValueError, match="not-a-model"):
+            SearchEngine(
+                content_dir=tmp_path / "content",
+                index_dir=tmp_path / "index",
+                embedder_model="onnx:nope/not-a-model",
+            )
+
+    def test_missing_fastembed_gives_install_hint(self, monkeypatch, tmp_path):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "fastembed", None)
+        with pytest.raises(RuntimeError, match=r"fastembed is required.*stash-mcp\[search\]"):
+            SearchEngine(
+                content_dir=tmp_path / "content",
+                index_dir=tmp_path / "index",
+                embedder_model=self.ONNX_MODEL,
+            )
+
+    def test_torch_model_string_without_pydantic_ai_points_at_search_torch(
+        self, monkeypatch, tmp_path
+    ):
+        """The old default on the torch-free image explains how to get it back."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "pydantic_ai", None)
+        with pytest.raises(RuntimeError) as exc_info:
+            SearchEngine(
+                content_dir=tmp_path / "content",
+                index_dir=tmp_path / "index",
+                embedder_model="sentence-transformers:all-MiniLM-L6-v2",
+            )
+        message = str(exc_info.value)
+        assert "sentence-transformers:" in message
+        assert "stash-mcp[search-torch]" in message
+        assert "onnx:sentence-transformers/all-MiniLM-L6-v2" in message
+
+    @pytest.mark.parametrize(
+        "model", ["all-MiniLM-L6-v2", "notaprovider:some-model"],
+    )
+    def test_unknown_provider_does_not_guess_an_extra(
+        self, monkeypatch, tmp_path, model
+    ):
+        """A dropped or unrecognised prefix must not be sold as an OpenAI problem."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "pydantic_ai", None)
+        with pytest.raises(RuntimeError) as exc_info:
+            SearchEngine(
+                content_dir=tmp_path / "content",
+                index_dir=tmp_path / "index",
+                embedder_model=model,
+            )
+        message = str(exc_info.value)
+        assert "search-openai" not in message.partition("handled by")[0]
+        assert model in message
+        assert "onnx:" in message
+
+    async def test_invalid_model_string_does_not_wipe_existing_index(
+        self, fake_fastembed, tmp_path
+    ):
+        """Backend validation must run before the model-changed index clear."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        (content_dir / "test.md").write_text("# Test\n\nContent here.")
+
+        engine = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-a", embed_fn=mock_embed,
+        )
+        await engine.build_index(["test.md"])
+        assert engine.store.count > 0
+
+        # A typo in the new model string must fail fast without touching disk
+        with pytest.raises(ValueError, match="not-a-model"):
+            SearchEngine(
+                content_dir=content_dir, index_dir=index_dir,
+                embedder_model="onnx:nope/not-a-model",
+            )
+
+        # Coming back with the original model finds the index intact
+        engine_again = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-a", embed_fn=mock_embed,
+        )
+        assert engine_again.store.count > 0
+        assert engine_again.ready
+
+    def test_onnx_threads_are_passed_to_adapter(self, fake_fastembed, tmp_path):
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embedder_model=self.ONNX_MODEL,
+            onnx_threads=2,
+        )
+        assert engine._embed_fn.threads == 2
+
+    async def test_switching_torch_to_onnx_model_string_clears_index(self, tmp_path):
+        """Upgrading from the torch default to the ONNX default triggers a rebuild."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        (content_dir / "test.md").write_text("# Test\n\nContent here.")
+
+        engine1 = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="sentence-transformers:all-MiniLM-L6-v2", embed_fn=mock_embed,
+        )
+        await engine1.build_index(["test.md"])
+        assert engine1.store.count > 0
+
+        engine2 = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model=self.ONNX_MODEL, embed_fn=mock_embed,
+        )
+        assert engine2.store.count == 0
+        assert engine2.meta.file_hashes == {}
+        assert not engine2.ready
+        chunks = await engine2.build_index(["test.md"])
+        assert chunks > 0
+        assert IndexMeta.load(index_dir / "index_meta.json").embedder_model == self.ONNX_MODEL
+
+    async def test_incremental_index_stamps_embedder_model(self, tmp_path):
+        """index_file() records the model string so a later model change is detected."""
+        content_dir = tmp_path / "content"
+        index_dir = tmp_path / "index"
+        content_dir.mkdir()
+        (content_dir / "test.md").write_text("# Test\n\nContent here.")
+
+        engine = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-a", embed_fn=mock_embed,
+        )
+        await engine.index_file("test.md")
+        assert IndexMeta.load(index_dir / "index_meta.json").embedder_model == "model-a"
+
+        engine2 = SearchEngine(
+            content_dir=content_dir, index_dir=index_dir,
+            embedder_model="model-b", embed_fn=mock_embed,
+        )
+        assert engine2.store.count == 0
 
 
 # --- Path normalization tests ---

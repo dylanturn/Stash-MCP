@@ -13,7 +13,14 @@ services:
       - STASH_HOST=0.0.0.0
       - STASH_PORT=8000
       - STASH_SEARCH_ENABLED=true
-      - STASH_SEARCH_EMBEDDER_MODEL=sentence-transformers:all-mpnet-base-v2
+      # Local embeddings on ONNX Runtime (fastembed) — the default image, no torch.
+      # Other local options:
+      #   onnx:BAAI/bge-small-en-v1.5   int8-quantised, smaller/faster (384-dim)
+      #   onnx:BAAI/bge-base-en-v1.5    higher quality (768-dim)
+      # For sentence-transformers models on PyTorch (e.g. all-mpnet-base-v2)
+      # build with `--build-arg SEARCH_EXTRA=search-torch` and use
+      # STASH_SEARCH_EMBEDDER_MODEL=sentence-transformers:all-mpnet-base-v2
+      - STASH_SEARCH_EMBEDDER_MODEL=onnx:sentence-transformers/all-MiniLM-L6-v2
     restart: unless-stopped
 volumes:
   stash-models:
