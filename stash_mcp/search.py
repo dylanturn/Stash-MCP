@@ -17,6 +17,7 @@ from pathlib import Path
 from .embedders import (
     DEFAULT_EMBEDDER_MODEL,
     DEFAULT_RERANK_MODEL,
+    ONNX_PREFIX,
     FastEmbedAdapter,
     FastEmbedReranker,
     is_onnx_model,
