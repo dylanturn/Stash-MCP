@@ -10,6 +10,7 @@ import stash_mcp.config as _config_module
 
 FAKE_MINILM = "sentence-transformers/all-MiniLM-L6-v2"
 FAKE_BGE_SMALL = "BAAI/bge-small-en-v1.5"
+FAKE_RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 
 
 @pytest.fixture
@@ -23,7 +24,10 @@ def fake_fastembed(monkeypatch):
     """
     import numpy as np
 
-    calls = {"init": [], "embed": [], "embed_threads": []}
+    calls = {
+        "init": [], "embed": [], "embed_threads": [],
+        "rerank_init": [], "rerank": [], "rerank_threads": [],
+    }
 
     class FakeTokenizer:
         """Mimics ``tokenizers.Tokenizer``: enable_* replace the whole config
@@ -61,6 +65,33 @@ def fake_fastembed(monkeypatch):
                 "direction": direction,
             }
 
+        def encode_batch(self, texts):
+            """Stand-in for real tokenization: one token per whitespace word,
+            truncated to the configured limit and padded to the configured
+            length — both of which the real tokenizer also apply here.
+
+            Encodings expose ``offsets`` (character spans, (0, 0) for padding)
+            like ``tokenizers.Encoding`` does.
+            """
+            limit = self.truncation["max_length"]
+            pad_to = self.padding.get("length")
+            out = []
+            for text in texts:
+                offsets = []
+                position = 0
+                for word in text.split():
+                    start = text.index(word, position)
+                    offsets.append((start, start + len(word)))
+                    position = start + len(word)
+                offsets = offsets[:limit]
+                ids = list(range(len(offsets)))
+                if pad_to:
+                    pad = max(0, pad_to - len(ids))
+                    ids += [0] * pad
+                    offsets += [(0, 0)] * pad
+                out.append(types.SimpleNamespace(ids=ids, offsets=offsets))
+            return out
+
     class FakeInnerModel:
         def __init__(self):
             self.tokenizer = FakeTokenizer()
@@ -94,10 +125,49 @@ def fake_fastembed(monkeypatch):
                 # float64 like the real library, and a generator (not a list)
                 yield np.array([float(len(doc)), 1.0, 0.5], dtype=np.float64)
 
+    class FakeTextCrossEncoder:
+        """Scores a pair by how many query words the document contains."""
+
+        SUPPORTED = [FAKE_RERANK_MODEL]
+
+        def __init__(self, model_name, cache_dir=None, threads=None, **kwargs):
+            if model_name.lower() not in [m.lower() for m in self.SUPPORTED]:
+                raise ValueError(f"Model {model_name} is not supported in TextCrossEncoder.")
+            calls["rerank_init"].append(
+                {"model_name": model_name, "cache_dir": cache_dir, "threads": threads}
+            )
+            self.model_name = model_name
+
+        @classmethod
+        def list_supported_models(cls):
+            return [{"model": m, "size_in_GB": 0.08} for m in cls.SUPPORTED]
+
+        def rerank(self, query, documents, batch_size=64, **kwargs):
+            docs = list(documents)
+            calls["rerank"].append((query, docs))
+            calls["rerank_threads"].append(threading.current_thread())
+            terms = set(query.lower().split())
+            for doc in docs:
+                words = doc.lower().split()
+                # Logit-like unbounded score, as real cross-encoders return
+                yield float(sum(w in terms for w in words)) - 5.0
+
     module = types.ModuleType("fastembed")
     module.TextEmbedding = FakeTextEmbedding
+    rerank_module = types.ModuleType("fastembed.rerank")
+    cross_module = types.ModuleType("fastembed.rerank.cross_encoder")
+    cross_module.TextCrossEncoder = FakeTextCrossEncoder
+    rerank_module.cross_encoder = cross_module
+    module.rerank = rerank_module
     monkeypatch.setitem(sys.modules, "fastembed", module)
-    return types.SimpleNamespace(module=module, TextEmbedding=FakeTextEmbedding, calls=calls)
+    monkeypatch.setitem(sys.modules, "fastembed.rerank", rerank_module)
+    monkeypatch.setitem(sys.modules, "fastembed.rerank.cross_encoder", cross_module)
+    return types.SimpleNamespace(
+        module=module,
+        TextEmbedding=FakeTextEmbedding,
+        TextCrossEncoder=FakeTextCrossEncoder,
+        calls=calls,
+    )
 
 
 @pytest.fixture(autouse=True)

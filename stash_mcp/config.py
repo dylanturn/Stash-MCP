@@ -1,5 +1,6 @@
 """Configuration for Stash-MCP server."""
 
+import importlib.util
 import os
 from pathlib import Path
 
@@ -56,8 +57,13 @@ class Config:
     # Runtime (default, no torch); "openai:", "cohere:" and
     # "sentence-transformers:" (torch, needs the search-torch extra) go
     # through Pydantic AI.
+    #
+    # bge-small-en-v1.5 is the default: same 384 dimensions as the older
+    # all-MiniLM-L6-v2 (so the index is the same size) but a much stronger
+    # retriever (MTEB retrieval 51.7 vs ~42) and a 512-token window, which
+    # fits a default 1000-character chunk whole.
     SEARCH_EMBEDDER_MODEL: str = os.getenv(
-        "STASH_SEARCH_EMBEDDER_MODEL", "onnx:sentence-transformers/all-MiniLM-L6-v2"
+        "STASH_SEARCH_EMBEDDER_MODEL", "onnx:BAAI/bge-small-en-v1.5"
     )
     # onnxruntime thread count for the onnx: backend. Unset = onnxruntime's
     # default (one thread per host core); set explicitly under container CPU
@@ -67,6 +73,12 @@ class Config:
         if os.getenv("STASH_SEARCH_ONNX_THREADS")
         else None
     )
+    # Instruction prefixes for asymmetric embedding models. Unset = use the
+    # model's documented prefix (e5 "query: "/"passage: ", nomic
+    # "search_query: "/"search_document: ", ...); set to an empty string to
+    # force none. Changing these re-indexes, since document vectors change.
+    SEARCH_QUERY_PREFIX: str | None = os.getenv("STASH_SEARCH_QUERY_PREFIX")
+    SEARCH_DOCUMENT_PREFIX: str | None = os.getenv("STASH_SEARCH_DOCUMENT_PREFIX")
     CONTEXTUAL_RETRIEVAL: bool = (
         os.getenv("STASH_CONTEXTUAL_RETRIEVAL", "false").lower() == "true"
     )
@@ -75,6 +87,17 @@ class Config:
     )
     SEARCH_CHUNK_SIZE: int = int(os.getenv("STASH_SEARCH_CHUNK_SIZE", "1000"))
     SEARCH_CHUNK_OVERLAP: int = int(os.getenv("STASH_SEARCH_CHUNK_OVERLAP", "100"))
+    # Fold the "path > heading > subheading" breadcrumb into the embedded
+    # text as well as showing it with results. The benefit scales with how
+    # many documents there are to tell apart: +0.056 MRR over a 1,097-document
+    # corpus, but -0.055 over a 52-document one, where a chunk's own wording
+    # already identifies its source and the extra tokens only dilute it.
+    # On by default for the larger case; set false for small stashes (roughly
+    # under a hundred documents). The breadcrumb is recorded and returned with
+    # results either way, and indexed by BM25 either way.
+    SEARCH_HEADING_CONTEXT: bool = (
+        os.getenv("STASH_SEARCH_HEADING_CONTEXT", "true").lower() == "true"
+    )
 
     # Find tool settings
     FIND_MAX_RESULTS_CEILING: int = int(
@@ -99,13 +122,44 @@ class Config:
         os.getenv("STASH_SEARCH_RECENCY_HALF_LIFE_DAYS", "180")
     )
 
-    # Search retrieval — hybrid BM25 + dense via Reciprocal Rank Fusion
+    # Search retrieval — hybrid BM25 + dense via Reciprocal Rank Fusion.
+    # On by default when bm25s is installed (the search, search-contextual
+    # and search-hybrid extras include it; the API-provider and torch extras
+    # do not): agent queries are full of literal tokens — env var names,
+    # function names, paths, error strings — which lexical matching handles
+    # far better than embeddings. Falls back to dense-only rather than
+    # failing when the dependency is absent, so a hand-rolled install of
+    # numpy + fastembed still works.
     SEARCH_HYBRID_ENABLED: bool = (
-        os.getenv("STASH_SEARCH_HYBRID_ENABLED", "false").lower() == "true"
+        os.getenv("STASH_SEARCH_HYBRID_ENABLED").lower() == "true"
+        if os.getenv("STASH_SEARCH_HYBRID_ENABLED")
+        else importlib.util.find_spec("bm25s") is not None
     )
     SEARCH_RRF_K: int = int(os.getenv("STASH_SEARCH_RRF_K", "60"))
     SEARCH_BM25_CANDIDATE_POOL: int = int(
         os.getenv("STASH_SEARCH_BM25_CANDIDATE_POOL", "30")
+    )
+
+    # Search ranking — cross-encoder reranking of the retrieved shortlist.
+    # Off by default: it adds a ~120 MB model download and takes a query from
+    # ~4 ms to ~470 ms (20 candidates, CPU) for a modest gain now that the
+    # lexical index also covers headings and paths.
+    SEARCH_RERANK_ENABLED: bool = (
+        os.getenv("STASH_SEARCH_RERANK_ENABLED", "false").lower() == "true"
+    )
+    SEARCH_RERANK_MODEL: str = os.getenv(
+        "STASH_SEARCH_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2"
+    )
+    # 10 measured as good as 20 (MRR 0.882 vs 0.880) at half the latency
+    SEARCH_RERANK_CANDIDATES: int = int(
+        os.getenv("STASH_SEARCH_RERANK_CANDIDATES", "10")
+    )
+    # Rerank only contested result sets: when the two best retrieval scores
+    # are further apart than this, retrieval already has a clear winner and
+    # the cross-encoder is skipped. Measured: 29% of queries skipped, mean
+    # latency 218 -> 160 ms, no change in ranking quality. 0 = always rerank.
+    SEARCH_RERANK_MARGIN: float = float(
+        os.getenv("STASH_SEARCH_RERANK_MARGIN", "0.1")
     )
 
     # Model cache directory for locally downloaded embedding weights. The ONNX
