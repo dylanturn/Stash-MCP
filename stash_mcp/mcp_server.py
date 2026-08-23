@@ -1331,6 +1331,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             instead — it returns every match up to max_results (see the
             truncated flag) rather than a ranked top-k.
 
+            Results are ranked best-first. The score is a relative relevance
+            signal, comparable only within one result set — its scale depends
+            on the server's retrieval configuration and it can be negative
+            when cross-encoder reranking is enabled. Rank order is what
+            carries meaning, not the absolute number.
+
             Args:
                 query: Natural language search query
                 max_results: Maximum number of results (default 5)

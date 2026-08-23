@@ -42,11 +42,13 @@ dev = [
     "numpy>=1.26.0",
     "bm25s>=0.2.0",
 ]
-# Local embeddings on ONNX Runtime via fastembed (default; no torch/CUDA).
-# Model strings: onnx:<fastembed model>, e.g. onnx:sentence-transformers/all-MiniLM-L6-v2
+# Local embeddings on ONNX Runtime via fastembed (default; no torch/CUDA),
+# plus bm25s for hybrid dense+lexical retrieval (on by default).
+# Model strings: onnx:<fastembed model>, e.g. onnx:BAAI/bge-small-en-v1.5
 search = [
     "numpy>=1.26.0",
     "fastembed>=0.7.0",
+    "bm25s>=0.2.0",
 ]
 # Local embeddings on PyTorch via sentence-transformers (opt-in; ~5 GB of
 # torch + CUDA wheels on Linux). Model strings: sentence-transformers:<model>
@@ -67,8 +69,10 @@ search-cohere = [
 search-contextual = [
     "numpy>=1.26.0",
     "fastembed>=0.7.0",
+    "bm25s>=0.2.0",
     "anthropic>=0.40.0",
 ]
+# Kept as an alias of `search` (which now includes bm25s) for compatibility
 search-hybrid = [
     "numpy>=1.26.0",
     "fastembed>=0.7.0",

@@ -78,8 +78,11 @@ def _create_search_engine(filesystem: FileSystem):
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
             model_cache_dir=Config.MODEL_CACHE_DIR,
             onnx_threads=Config.SEARCH_ONNX_THREADS,
+            query_prefix=Config.SEARCH_QUERY_PREFIX,
+            document_prefix=Config.SEARCH_DOCUMENT_PREFIX,
             chunk_size=Config.SEARCH_CHUNK_SIZE,
             chunk_overlap=Config.SEARCH_CHUNK_OVERLAP,
+            heading_context=Config.SEARCH_HEADING_CONTEXT,
             mmr_enabled=Config.SEARCH_MMR_ENABLED,
             mmr_lambda=Config.SEARCH_MMR_LAMBDA,
             max_per_file=Config.SEARCH_MAX_PER_FILE,
@@ -89,6 +92,10 @@ def _create_search_engine(filesystem: FileSystem):
             hybrid_enabled=Config.SEARCH_HYBRID_ENABLED,
             rrf_k=Config.SEARCH_RRF_K,
             bm25_candidate_pool=Config.SEARCH_BM25_CANDIDATE_POOL,
+            rerank_enabled=Config.SEARCH_RERANK_ENABLED,
+            rerank_model=Config.SEARCH_RERANK_MODEL,
+            rerank_candidates=Config.SEARCH_RERANK_CANDIDATES,
+            rerank_margin=Config.SEARCH_RERANK_MARGIN,
         )
         engine._filesystem = filesystem
         logger.info(f"Search engine initialised (model={Config.SEARCH_EMBEDDER_MODEL})")
