@@ -128,8 +128,15 @@ class TestUIBrowse:
         assert "Stash-MCP" in body
         assert "New Document" in body
 
-    def test_directory_links_to_scoped_changes(self, ui_client):
-        assert '/ui/activity?path=docs' in ui_client.get("/ui/browse/").text
+    def test_directory_uses_view_and_history_tabs(self, ui_client):
+        root = ui_client.get("/ui/browse/").text
+        assert 'class="mode-tab active" href="/ui/browse/"' in root
+        assert 'class="mode-tab" href="/ui/activity"' in root
+        assert "View changes" not in root
+
+        folder = ui_client.get("/ui/browse/docs").text
+        assert 'class="mode-tab active" href="/ui/browse/docs"' in folder
+        assert 'class="mode-tab" href="/ui/activity?path=docs"' in folder
 
 
 class TestUIActivity:
@@ -144,7 +151,13 @@ class TestUIActivity:
             assert stash.status_code == 200
             assert "Entire stash" in stash.text
             assert "/ui/history/docs/what%3F%23.md" in stash.text
-            assert "Update docs" in client.get("/ui/activity?path=docs").text
+            folder_history = client.get("/ui/activity?path=docs").text
+            assert "Update docs" in folder_history
+            assert 'class="mode-tab" href="/ui/browse/docs"' in folder_history
+            assert (
+                'class="mode-tab active" href="/ui/activity?path=docs"'
+                in folder_history
+            )
             assert "File history" in client.get("/ui/history/docs/readme.md").text
 
     def test_new_activity_links_url_encode_paths(self):
@@ -155,8 +168,8 @@ class TestUIActivity:
             app.include_router(create_ui_router(fs, git_backend=_HistoryGitBackend()))
             client = TestClient(app)
 
-            browse = client.get("/ui/browse/")
-            assert '/ui/activity?path=docs%3F%23' in browse.text
+            folder = client.get("/ui/browse/docs%3F%23")
+            assert '/ui/activity?path=docs%3F%23' in folder.text
 
             history = client.get("/ui/history/docs%3F%23/readme.md")
             assert '/ui/activity?path=docs%3F%23' in history.text

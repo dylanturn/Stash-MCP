@@ -1994,13 +1994,34 @@ def _page(
     mode: str = "view",
     path: str = "",
     hide_edit: bool = False,
+    folder_path: str | None = None,
 ) -> str:
     """Wrap content in the three-panel layout."""
     right_panel = f'<aside class="right-panel">{right}</aside>' if right else ""
 
-    # Build mode-switch tabs if viewing/editing a file
+    # Build mode-switch tabs for folders or files.
     mode_tabs = ""
-    if path:
+    if folder_path is not None:
+        escaped_folder_path = html.escape(quote(folder_path, safe="/"))
+        browse_url = (
+            f"/ui/browse/{escaped_folder_path}"
+            if escaped_folder_path
+            else "/ui/browse/"
+        )
+        history_url = (
+            f"/ui/activity?path={escaped_folder_path}"
+            if escaped_folder_path
+            else "/ui/activity"
+        )
+        mode_tabs = (
+            '<div class="mode-tabs">'
+            f'<a class="{"mode-tab active" if mode == "view" else "mode-tab"}" '
+            f'href="{browse_url}">{_icon("eye")} View</a>'
+            f'<a class="{"mode-tab active" if mode == "history" else "mode-tab"}" '
+            f'href="{history_url}">{_icon("history")} History</a>'
+            "</div>"
+        )
+    elif path:
         view_cls = "mode-tab active" if mode == "view" else "mode-tab"
         escaped_path = html.escape(quote(path, safe="/"))
         edit_tab = "" if hide_edit else (
@@ -2153,7 +2174,13 @@ def create_ui_router(
         center = ('<div class="activity-header"><div class="activity-kicker">Activity</div>'
                   f'<h1>{html.escape(label)}</h1><p class="activity-subtitle">'
                   'Recent commits and the files they changed.</p></div>' + _activity_html(scope))
-        return _page(f"Changes · {label}", sidebar, center)
+        return _page(
+            f"Changes · {label}",
+            sidebar,
+            center,
+            mode="history",
+            folder_path=scope,
+        )
 
     @router.get("/ui/history/{path:path}", response_class=HTMLResponse)
     async def ui_history(path: str) -> str:
@@ -2210,13 +2237,10 @@ def create_ui_router(
                 escaped = html.escape(name)
                 escaped_child = html.escape(child)
                 if is_dir:
-                    activity_scope = html.escape(quote(child, safe="/"))
                     rows += (
                         f'<tr><td class="dir"><a href="/ui/browse/{escaped_child}">'
                         f"{_icon('folder')} {escaped}/</a></td>"
-                        '<td>directory</td><td>\u2014</td><td>'
-                        f'<a href="/ui/activity?path={activity_scope}">'
-                        "View changes</a></td></tr>"
+                        '<td>directory</td><td>\u2014</td><td>\u2014</td></tr>'
                     )
                 else:
                     # file metadata
@@ -2253,7 +2277,7 @@ def create_ui_router(
                 f"<h1>{html.escape(title)}</h1>"
                 f"{table}"
             )
-            return _page(f"Browse {title}", sidebar, center)
+            return _page(f"Browse {title}", sidebar, center, folder_path=path)
 
         # --- file view ---
         if full.is_file():
