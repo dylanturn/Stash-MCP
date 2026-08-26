@@ -1200,12 +1200,16 @@ def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") ->
             open_attr = "open" if active.startswith(child) else ""
             children_html = _build_tree_html(filesystem, child, active)
             escaped_child = html.escape(child)
+            escaped_child_url = html.escape(quote(child, safe="/"))
+            selected = " selected" if child == active else ""
             parts.append(
                 f'<details {open_attr} data-path="{escaped_child}">'
                 f'<summary class="tree-dir">'
                 f'<span class="tree-chevron">{_icon("chevron-right")}{_icon("chevron-down")}</span>'
+                f'<a class="tree-folder-link{selected}" href="/ui/browse/{escaped_child_url}" '
+                f'onclick="event.stopPropagation()">'
                 f'<span class="tree-folder-icon">{_icon("folder")}{_icon("folder-open")}</span>'
-                f' {escaped}</summary>'
+                f'<span>{escaped}</span></a></summary>'
                 f'<div class="tree-children">{children_html}</div></details>'
             )
         else:
@@ -1356,6 +1360,10 @@ padding:6px 8px;font-size:14px;cursor:pointer;color:#cdd6f4;
 list-style:none;border-radius:6px;margin:2px 0;transition:background 150ms ease}
 details summary.tree-dir:hover{background:#2e2e42}
 details summary.tree-dir::marker,details summary.tree-dir::-webkit-details-marker{display:none}
+.tree-folder-link{display:flex;align-items:center;gap:4px;min-width:0;flex:1;
+color:#cdd6f4;text-decoration:none;border-radius:4px}
+.tree-folder-link:hover{text-decoration:none}
+.tree-folder-link.selected{color:#94e2d5;font-weight:600}
 .tree-children{padding-left:24px}
 
 /* file listing table */

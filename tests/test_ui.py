@@ -127,6 +127,10 @@ class TestUIBrowse:
         body = response.text
         assert "Stash-MCP" in body
         assert "New Document" in body
+        assert 'class="tree-folder-link" href="/ui/browse/docs"' in body
+
+        folder = ui_client.get("/ui/browse/docs").text
+        assert 'class="tree-folder-link selected" href="/ui/browse/docs"' in folder
 
     def test_directory_uses_view_and_history_tabs(self, ui_client):
         root = ui_client.get("/ui/browse/").text
@@ -167,6 +171,9 @@ class TestUIActivity:
             app = create_api(fs)
             app.include_router(create_ui_router(fs, git_backend=_HistoryGitBackend()))
             client = TestClient(app)
+
+            root = client.get("/ui/browse/")
+            assert 'href="/ui/browse/docs%3F%23"' in root.text
 
             folder = client.get("/ui/browse/docs%3F%23")
             assert '/ui/activity?path=docs%3F%23' in folder.text
