@@ -150,6 +150,7 @@ def _parse_pull_file_statuses(
 
 
 _NAME_STATUS_RE = re.compile(r"^[ACDMRTUXB][0-9]*$")
+_COMMIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _ACTIVITY_RECORD_SEPARATOR = "\x1e"
 
 
@@ -495,6 +496,37 @@ class GitBackend:
         result = self._run(["git", "diff", ref, "--", path])
         if result.returncode != 0:
             logger.warning("git diff failed for %s: %s", path, result.stderr.strip())
+            return result.stderr or "diff unavailable"
+        return result.stdout
+
+    def revision_diff(self, path: str, commit_hash: str) -> str:
+        """Return the patch for *path* introduced by *commit_hash*.
+
+        Unlike :meth:`diff`, this compares the selected commit with its parent,
+        so the result is stable even when the working tree has moved on.
+        """
+        if not _COMMIT_HASH_RE.fullmatch(commit_hash):
+            return "diff unavailable"
+        result = self._run(
+            [
+                "git",
+                "show",
+                "--format=",
+                "--no-ext-diff",
+                "--find-renames",
+                "--find-copies-harder",
+                commit_hash,
+                "--",
+                path,
+            ]
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "git show failed for %s at %s: %s",
+                path,
+                commit_hash,
+                result.stderr.strip(),
+            )
             return result.stderr or "diff unavailable"
         return result.stdout
 

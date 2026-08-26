@@ -1185,6 +1185,30 @@ def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
     return dirs + readme + files
 
 
+def _diff_html(diff_text: str) -> str:
+    """Render a unified diff with safe, line-level highlighting."""
+    if not diff_text:
+        return '<div class="history-empty">No textual changes in this revision.</div>'
+
+    lines = []
+    for raw_line in diff_text.splitlines():
+        line_class = "diff-context"
+        if raw_line.startswith("@@"):
+            line_class = "diff-hunk"
+        elif raw_line.startswith("diff --git") or raw_line.startswith("index "):
+            line_class = "diff-meta"
+        elif raw_line.startswith("+") and not raw_line.startswith("+++"):
+            line_class = "diff-add"
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            line_class = "diff-del"
+        elif raw_line.startswith("---") or raw_line.startswith("+++"):
+            line_class = "diff-file"
+        lines.append(
+            f'<span class="diff-line {line_class}">{html.escape(raw_line) or " "}</span>'
+        )
+    return '<div class="diff-view"><pre class="diff-code">' + "".join(lines) + "</pre></div>"
+
+
 def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
     """Build recursive HTML for the sidebar tree."""
     try:
@@ -1388,6 +1412,14 @@ display:inline-flex;align-items:center;justify-content:center;font-size:11px;fon
 background:rgba(137,180,250,.14);color:#89b4fa}.change-status.A{color:#a6e3a1}
 .change-status.D{color:#f38ba8}.history-empty{padding:48px 24px;text-align:center;
 border:1px dashed #45475a;border-radius:10px;color:#7f849c}.history-back{display:inline-flex;margin-bottom:18px}
+.change-card-link{display:block;color:inherit;border-radius:7px;padding:2px}
+.change-card-link:hover{background:#1e1e2e;text-decoration:none}
+.diff-view{overflow:auto;border:1px solid #313244;border-radius:10px;background:#181825}
+.diff-code{display:block;min-width:max-content;padding:10px 0;font-family:'Monaco','Menlo',
+'Ubuntu Mono',monospace;font-size:13px;line-height:1.55}.diff-line{display:block;padding:0 16px;
+white-space:pre}.diff-add{background:rgba(166,227,161,.12);color:#a6e3a1}.diff-del{
+background:rgba(243,139,168,.12);color:#f38ba8}.diff-hunk{background:rgba(137,180,250,.12);
+color:#89b4fa}.diff-meta,.diff-file{color:#7f849c}.diff-context{color:#cdd6f4}
 
 /* viewer - typography for comfortable reading */
 .viewer-content{background:transparent;padding:24px 32px;border-radius:6px;overflow-x:auto;
@@ -2145,7 +2177,7 @@ def create_ui_router(
     _search_enabled = search_engine is not None
     router = APIRouter()
 
-    def _activity_html(scope: str = "") -> str:
+    def _activity_html(scope: str = "", revision_path: str | None = None) -> str:
         if git_backend is None:
             return '<div class="history-empty">Enable Git tracking to see change history.</div>'
         activities = git_backend.activity(scope or None, max_count=30)
@@ -2164,11 +2196,22 @@ def create_ui_router(
                     f'<span class="change-status {status}">{status}</span>{changed_path}</a>'
                 )
             timestamp = entry.timestamp.strftime("%b %-d, %Y · %H:%M")
-            cards.append(
-                '<article class="change-card"><div class="change-card-head"><div>'
+            card_head = (
+                '<div class="change-card-head"><div>'
                 f'<div class="change-message">{html.escape(entry.message)}</div>'
                 f'<div class="change-meta">{html.escape(entry.author)} · {timestamp}</div></div>'
                 f'<span class="commit-id">{html.escape(entry.commit_hash[:7])}</span></div>'
+            )
+            if revision_path is not None:
+                revision_path_url = html.escape(quote(revision_path, safe="/"))
+                revision_hash = html.escape(quote(entry.commit_hash, safe=""))
+                card_head = (
+                    f'<a class="change-card-link" href="/ui/history/{revision_path_url}'
+                    f'?revision={revision_hash}" aria-label="View diff for revision '
+                    f'{html.escape(entry.commit_hash[:7])}">{card_head}</a>'
+                )
+            cards.append(
+                f'<article class="change-card">{card_head}'
                 f'<div class="change-files">{"".join(file_rows)}</div></article>'
             )
         return f'<div class="activity-feed">{"".join(cards)}</div>'
@@ -2191,19 +2234,36 @@ def create_ui_router(
         )
 
     @router.get("/ui/history/{path:path}", response_class=HTMLResponse)
-    async def ui_history(path: str) -> str:
+    async def ui_history(path: str, revision: str = "") -> str:
         path = path.strip("/")
         sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled,
                                 read_only=read_only)
         parent = str(PurePosixPath(path).parent)
         parent = "" if parent == "." else parent
         parent_url = html.escape(quote(parent, safe="/"))
-        center = (f'<a class="history-back" href="/ui/activity?path={parent_url}">'
-                  '← Folder changes</a><div class="activity-header">'
-                  '<div class="activity-kicker">File history</div>'
-                  f'<h1>{html.escape(PurePosixPath(path).name)}</h1>'
-                  f'<p class="activity-subtitle">{html.escape(path)}</p></div>' +
-                  _activity_html(path))
+        path_url = html.escape(quote(path, safe="/"))
+        if revision:
+            diff_text = (
+                git_backend.revision_diff(path, revision)
+                if git_backend is not None
+                else ""
+            )
+            center = (
+                f'<a class="history-back" href="/ui/history/{path_url}">← File history</a>'
+                '<div class="activity-header"><div class="activity-kicker">Revision diff</div>'
+                f'<h1>{html.escape(PurePosixPath(path).name)}</h1>'
+                f'<p class="activity-subtitle">{html.escape(path)} · '
+                f'{html.escape(revision[:7])}</p></div>{_diff_html(diff_text)}'
+            )
+        else:
+            center = (
+                f'<a class="history-back" href="/ui/activity?path={parent_url}">'
+                '← Folder changes</a><div class="activity-header">'
+                '<div class="activity-kicker">File history</div>'
+                f'<h1>{html.escape(PurePosixPath(path).name)}</h1>'
+                f'<p class="activity-subtitle">{html.escape(path)}</p></div>'
+                + _activity_html(path, revision_path=path)
+            )
         return _page(f"History · {PurePosixPath(path).name}", sidebar, center,
                      mode="history", path=path)
 

@@ -29,6 +29,18 @@ class _HistoryGitBackend:
             )
         ]
 
+    def revision_diff(self, path, commit_hash):
+        return "\n".join(
+            [
+                f"diff --git a/{path} b/{path}",
+                f"--- a/{path}",
+                f"+++ b/{path}",
+                "@@ -1 +1 @@",
+                "-old <unsafe>",
+                "+new & improved",
+            ]
+        )
+
 
 # Simple mock embedding for search-enabled UI tests
 async def _mock_embed(texts: list[str]) -> list[list[float]]:
@@ -163,6 +175,20 @@ class TestUIActivity:
                 in folder_history
             )
             assert "File history" in client.get("/ui/history/docs/readme.md").text
+
+            file_history = client.get("/ui/history/docs/readme.md").text
+            assert (
+                "/ui/history/docs/readme.md?revision=abcdef123456" in file_history
+            )
+            revision = client.get(
+                "/ui/history/docs/readme.md?revision=abcdef123456"
+            )
+            assert revision.status_code == 200
+            assert "Revision diff" in revision.text
+            assert 'class="diff-line diff-del"' in revision.text
+            assert "-old &lt;unsafe&gt;" in revision.text
+            assert 'class="diff-line diff-add"' in revision.text
+            assert "+new &amp; improved" in revision.text
 
     def test_new_activity_links_url_encode_paths(self):
         with TemporaryDirectory() as tmpdir:

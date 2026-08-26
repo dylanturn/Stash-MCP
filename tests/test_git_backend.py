@@ -516,6 +516,33 @@ class TestGitBackendDiff:
             result = backend.diff("README.md", ref=head1)
             assert "README.md" in result or "diff" in result.lower() or result == ""
 
+    def test_revision_diff_compares_commit_with_its_parent(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "README.md").write_text("# Updated\n")
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-am", "Update README"],
+                check=True,
+                capture_output=True,
+            )
+            commit_hash = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            result = GitBackend(repo).revision_diff("README.md", commit_hash)
+
+            assert "-# Test" in result
+            assert "+# Updated" in result
+
+    def test_revision_diff_rejects_non_hash_revision(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            assert GitBackend(repo).revision_diff("README.md", "--stat") == (
+                "diff unavailable"
+            )
+
 
 # ---------------------------------------------------------------------------
 # GitBackend._configure_credentials()
