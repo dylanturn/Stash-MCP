@@ -12,15 +12,22 @@ from stash_mcp.ui import create_ui_router
 
 
 class _HistoryGitBackend:
-    def log(self, path=None, max_count=20):
+    def activity(self, path=None, max_count=20):
         from datetime import UTC, datetime
-        from stash_mcp.git_backend import LogEntry
-        return [LogEntry("abcdef123456", "Alex", datetime(2026, 8, 25, tzinfo=UTC),
-                         f"Update {path or 'stash'}")]
 
-    def changed_files(self, commit_hash, path=None):
-        from stash_mcp.git_backend import ChangedFile
-        return [ChangedFile(path or "docs/readme.md", "M")]
+        from stash_mcp.git_backend import ActivityEntry, ChangedFile, LogEntry
+        changed_path = path or "docs/what?#.md"
+        return [
+            ActivityEntry(
+                LogEntry(
+                    "abcdef123456",
+                    "Alex",
+                    datetime(2026, 8, 25, tzinfo=UTC),
+                    f"Update {path or 'stash'}",
+                ),
+                [ChangedFile(changed_path, "M")],
+            )
+        ]
 
 
 # Simple mock embedding for search-enabled UI tests
@@ -136,9 +143,24 @@ class TestUIActivity:
             stash = client.get("/ui/activity")
             assert stash.status_code == 200
             assert "Entire stash" in stash.text
-            assert "/ui/history/docs/readme.md" in stash.text
+            assert "/ui/history/docs/what%3F%23.md" in stash.text
             assert "Update docs" in client.get("/ui/activity?path=docs").text
             assert "File history" in client.get("/ui/history/docs/readme.md").text
+
+    def test_new_activity_links_url_encode_paths(self):
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("docs?#/readme.md", "hello")
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs, git_backend=_HistoryGitBackend()))
+            client = TestClient(app)
+
+            browse = client.get("/ui/browse/")
+            assert '/ui/activity?path=docs%3F%23' in browse.text
+
+            history = client.get("/ui/history/docs%3F%23/readme.md")
+            assert '/ui/activity?path=docs%3F%23' in history.text
+            assert '/ui/history/docs%3F%23/readme.md' in history.text
 
     def test_file_view_links_to_history(self, ui_client):
         assert '/ui/history/hello.md' in ui_client.get("/ui/browse/hello.md").text

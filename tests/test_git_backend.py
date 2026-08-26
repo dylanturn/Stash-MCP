@@ -8,7 +8,9 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from stash_mcp.git_backend import (
+    ActivityEntry,
     BlameLine,
+    ChangedFile,
     GitBackend,
     LogEntry,
     PullResult,
@@ -282,6 +284,153 @@ class TestGitBackendLog:
             entries = backend.log(path="specific.md")
             assert len(entries) == 1
             assert entries[0].message == "Add specific file"
+
+
+# ---------------------------------------------------------------------------
+# GitBackend.changed_files() / activity()
+# ---------------------------------------------------------------------------
+
+
+class TestGitBackendActivity:
+    def test_changed_files_parses_added_modified_and_deleted(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "gone.txt").write_text("remove me")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add deleted fixture"],
+                check=True,
+                capture_output=True,
+            )
+
+            (repo / "README.md").write_text("# Updated\n")
+            (repo / "added.txt").write_text("new")
+            (repo / "gone.txt").unlink()
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Mixed changes"],
+                check=True,
+                capture_output=True,
+            )
+
+            files = GitBackend(repo).changed_files("HEAD")
+            assert all(isinstance(file, ChangedFile) for file in files)
+            assert {file.path: file.status for file in files} == {
+                "README.md": "M",
+                "added.txt": "A",
+                "gone.txt": "D",
+            }
+
+    def test_changed_files_respects_path_scope(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "docs").mkdir()
+            (repo / "other").mkdir()
+            (repo / "docs" / "inside.md").write_text("inside")
+            (repo / "other" / "outside.md").write_text("outside")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add scoped files"],
+                check=True,
+                capture_output=True,
+            )
+
+            files = GitBackend(repo).changed_files("HEAD", path="docs")
+            assert [(file.status, file.path) for file in files] == [
+                ("A", "docs/inside.md")
+            ]
+
+    def test_changed_files_parses_rename_and_copy_destinations(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "original.txt").write_text("rename-only content")
+            (repo / "source.txt").write_text("copy-only content")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add move fixtures"],
+                check=True,
+                capture_output=True,
+            )
+
+            (repo / "original.txt").rename(repo / "renamed.txt")
+            (repo / "copied.txt").write_bytes((repo / "source.txt").read_bytes())
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Rename and copy"],
+                check=True,
+                capture_output=True,
+            )
+
+            files = GitBackend(repo).changed_files("HEAD")
+            status_by_path = {file.path: file.status for file in files}
+            assert status_by_path["renamed.txt"] == "R"
+            assert status_by_path["copied.txt"] == "C"
+
+    def test_changed_files_preserves_unusual_filename_exactly(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            unusual = (
+                "docs/r\N{LATIN SMALL LETTER E WITH ACUTE}sum"
+                "\N{LATIN SMALL LETTER E WITH ACUTE} ?#\n.md"
+            )
+            (repo / "docs").mkdir()
+            (repo / unusual).write_text("exact path")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add unusual path"],
+                check=True,
+                capture_output=True,
+            )
+
+            assert GitBackend(repo).changed_files("HEAD") == [
+                ChangedFile(path=unusual, status="A")
+            ]
+
+    def test_activity_batches_commits_and_changed_files_in_one_process(self, monkeypatch):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "new.txt").write_text("new")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add new file"],
+                check=True,
+                capture_output=True,
+            )
+            backend = GitBackend(repo)
+            original_run = backend._run
+            calls = []
+
+            def counting_run(args, *run_args, **run_kwargs):
+                calls.append(args)
+                return original_run(args, *run_args, **run_kwargs)
+
+            monkeypatch.setattr(backend, "_run", counting_run)
+            activities = backend.activity(max_count=2)
+
+            assert len(calls) == 1
+            assert len(activities) == 2
+            assert isinstance(activities[0], ActivityEntry)
+            assert activities[0].entry.message == "Add new file"
+            assert activities[0].changed_files == [ChangedFile("new.txt", "A")]
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import posixpath
 import re
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 import markdown as md
 import yaml as _yaml
@@ -2001,7 +2002,7 @@ def _page(
     mode_tabs = ""
     if path:
         view_cls = "mode-tab active" if mode == "view" else "mode-tab"
-        escaped_path = html.escape(path)
+        escaped_path = html.escape(quote(path, safe="/"))
         edit_tab = "" if hide_edit else (
             f'<a class="{"mode-tab active" if mode == "edit" else "mode-tab"}" '
             f'href="/ui/edit/{escaped_path}">'
@@ -2118,17 +2119,19 @@ def create_ui_router(
     def _activity_html(scope: str = "") -> str:
         if git_backend is None:
             return '<div class="history-empty">Enable Git tracking to see change history.</div>'
-        entries = git_backend.log(scope or None, max_count=30)
-        if not entries:
+        activities = git_backend.activity(scope or None, max_count=30)
+        if not activities:
             return '<div class="history-empty">No changes found for this location yet.</div>'
         cards = []
-        for entry in entries:
+        for activity in activities:
+            entry = activity.entry
             file_rows = []
-            for changed in git_backend.changed_files(entry.commit_hash, scope or None):
+            for changed in activity.changed_files:
                 changed_path = html.escape(changed.path)
+                changed_path_url = html.escape(quote(changed.path, safe="/"))
                 status = html.escape(changed.status)
                 file_rows.append(
-                    f'<a class="change-file" href="/ui/history/{changed_path}">'
+                    f'<a class="change-file" href="/ui/history/{changed_path_url}">'
                     f'<span class="change-status {status}">{status}</span>{changed_path}</a>'
                 )
             timestamp = entry.timestamp.strftime("%b %-d, %Y · %H:%M")
@@ -2159,7 +2162,8 @@ def create_ui_router(
                                 read_only=read_only)
         parent = str(PurePosixPath(path).parent)
         parent = "" if parent == "." else parent
-        center = (f'<a class="history-back" href="/ui/activity?path={html.escape(parent)}">'
+        parent_url = html.escape(quote(parent, safe="/"))
+        center = (f'<a class="history-back" href="/ui/activity?path={parent_url}">'
                   '← Folder changes</a><div class="activity-header">'
                   '<div class="activity-kicker">File history</div>'
                   f'<h1>{html.escape(PurePosixPath(path).name)}</h1>'
@@ -2206,10 +2210,12 @@ def create_ui_router(
                 escaped = html.escape(name)
                 escaped_child = html.escape(child)
                 if is_dir:
+                    activity_scope = html.escape(quote(child, safe="/"))
                     rows += (
                         f'<tr><td class="dir"><a href="/ui/browse/{escaped_child}">'
                         f"{_icon('folder')} {escaped}/</a></td>"
-                        f'<td>directory</td><td>\u2014</td><td><a href="/ui/activity?path={escaped_child}">'
+                        '<td>directory</td><td>\u2014</td><td>'
+                        f'<a href="/ui/activity?path={activity_scope}">'
                         "View changes</a></td></tr>"
                     )
                 else:
