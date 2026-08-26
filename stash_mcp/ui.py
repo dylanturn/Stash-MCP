@@ -199,6 +199,12 @@ _ICONS = {
         '<circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'
         '<path d="M18 9a9 9 0 0 1-9 9"/></svg>'
     ),
+    "history": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/>'
+        '<path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>'
+    ),
     "external-link": (
         '<svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" '
         'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
@@ -1261,6 +1267,8 @@ padding:8px 12px;background:#94e2d5;color:#1e1e2e;
 border-radius:6px;font-size:13px;font-weight:600;text-align:center;border:none;cursor:pointer;
 transition:background 150ms ease,transform 150ms ease}
 .btn-new:hover{background:#a6e3e0;text-decoration:none;transform:translateY(-1px)}
+.btn-activity{display:flex;align-items:center;gap:7px;padding:8px 10px;color:#cdd6f4;
+border-radius:6px;font-size:13px}.btn-activity:hover{background:#2e2e42;color:#94e2d5;text-decoration:none}
 
 /* search */
 .search-box{margin-top:8px;position:relative}
@@ -1358,6 +1366,19 @@ border-bottom:1px solid #313244;font-weight:500}
 .file-table .name a,.file-table .dir a{display:inline-flex;align-items:center;gap:6px}
 .file-table .name a{color:#94e2d5}
 .file-table .dir a{color:#cdd6f4}
+.activity-header{margin-bottom:22px}.activity-kicker{font-size:12px;text-transform:uppercase;
+letter-spacing:.09em;color:#94e2d5;margin-bottom:6px}.activity-subtitle{color:#7f849c;margin-top:7px}
+.activity-feed{display:flex;flex-direction:column;gap:12px}.change-card{background:#272738;
+border:1px solid #313244;border-radius:10px;padding:16px 18px}.change-card-head{display:flex;
+justify-content:space-between;gap:18px}.change-message{font-weight:650;color:#e0e4f0}
+.change-meta{font-size:12px;color:#7f849c;margin-top:5px}.commit-id{font-family:monospace;color:#94e2d5}
+.change-files{display:flex;flex-direction:column;gap:5px;margin-top:14px}.change-file{display:flex;
+align-items:center;gap:9px;padding:7px 9px;border-radius:6px;color:#cdd6f4}.change-file:hover{
+background:#1e1e2e;text-decoration:none}.change-status{width:21px;height:21px;border-radius:5px;
+display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;
+background:rgba(137,180,250,.14);color:#89b4fa}.change-status.A{color:#a6e3a1}
+.change-status.D{color:#f38ba8}.history-empty{padding:48px 24px;text-align:center;
+border:1px dashed #45475a;border-radius:10px;color:#7f849c}.history-back{display:inline-flex;margin-bottom:18px}
 
 /* viewer - typography for comfortable reading */
 .viewer-content{background:transparent;padding:24px 32px;border-radius:6px;overflow-x:auto;
@@ -1991,6 +2012,8 @@ def _page(
             f'<a class="{view_cls}" href="/ui/browse/{escaped_path}">'
             f'{_icon("eye")} View</a>'
             f'{edit_tab}'
+            f'<a class="{"mode-tab active" if mode == "history" else "mode-tab"}" '
+            f'href="/ui/history/{escaped_path}">{_icon("history")} History</a>'
             "</div>"
         )
 
@@ -2055,6 +2078,7 @@ def _sidebar_html(
     return (
         '<div class="sidebar-header">'
         f'{new_doc_btn}'
+        f'<a href="/ui/activity" class="btn-activity">{_icon("history")} Recent changes</a>'
         f'<div class="search-box"{vector_attr}>'
         f'<input type="text" id="tree-search" class="search-input" '
         f'placeholder="{placeholder}" aria-label="Search" '
@@ -2075,6 +2099,7 @@ def create_ui_router(
     filesystem: FileSystem,
     search_engine=None,
     read_only: bool = False,
+    git_backend=None,
 ) -> APIRouter:
     """Create UI router with content browser & editor.
 
@@ -2089,6 +2114,59 @@ def create_ui_router(
     """
     _search_enabled = search_engine is not None
     router = APIRouter()
+
+    def _activity_html(scope: str = "") -> str:
+        if git_backend is None:
+            return '<div class="history-empty">Enable Git tracking to see change history.</div>'
+        entries = git_backend.log(scope or None, max_count=30)
+        if not entries:
+            return '<div class="history-empty">No changes found for this location yet.</div>'
+        cards = []
+        for entry in entries:
+            file_rows = []
+            for changed in git_backend.changed_files(entry.commit_hash, scope or None):
+                changed_path = html.escape(changed.path)
+                status = html.escape(changed.status)
+                file_rows.append(
+                    f'<a class="change-file" href="/ui/history/{changed_path}">'
+                    f'<span class="change-status {status}">{status}</span>{changed_path}</a>'
+                )
+            timestamp = entry.timestamp.strftime("%b %-d, %Y · %H:%M")
+            cards.append(
+                '<article class="change-card"><div class="change-card-head"><div>'
+                f'<div class="change-message">{html.escape(entry.message)}</div>'
+                f'<div class="change-meta">{html.escape(entry.author)} · {timestamp}</div></div>'
+                f'<span class="commit-id">{html.escape(entry.commit_hash[:7])}</span></div>'
+                f'<div class="change-files">{"".join(file_rows)}</div></article>'
+            )
+        return f'<div class="activity-feed">{"".join(cards)}</div>'
+
+    @router.get("/ui/activity", response_class=HTMLResponse)
+    async def ui_activity(path: str = "") -> str:
+        scope = path.strip("/")
+        sidebar = _sidebar_html(filesystem, active=scope, search_enabled=_search_enabled,
+                                read_only=read_only)
+        label = scope or "Entire stash"
+        center = ('<div class="activity-header"><div class="activity-kicker">Activity</div>'
+                  f'<h1>{html.escape(label)}</h1><p class="activity-subtitle">'
+                  'Recent commits and the files they changed.</p></div>' + _activity_html(scope))
+        return _page(f"Changes · {label}", sidebar, center)
+
+    @router.get("/ui/history/{path:path}", response_class=HTMLResponse)
+    async def ui_history(path: str) -> str:
+        path = path.strip("/")
+        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled,
+                                read_only=read_only)
+        parent = str(PurePosixPath(path).parent)
+        parent = "" if parent == "." else parent
+        center = (f'<a class="history-back" href="/ui/activity?path={html.escape(parent)}">'
+                  '← Folder changes</a><div class="activity-header">'
+                  '<div class="activity-kicker">File history</div>'
+                  f'<h1>{html.escape(PurePosixPath(path).name)}</h1>'
+                  f'<p class="activity-subtitle">{html.escape(path)}</p></div>' +
+                  _activity_html(path))
+        return _page(f"History · {PurePosixPath(path).name}", sidebar, center,
+                     mode="history", path=path)
 
     # --- redirect /ui to /ui/browse/ ---
     @router.get("/ui", response_class=RedirectResponse)
@@ -2131,7 +2209,8 @@ def create_ui_router(
                     rows += (
                         f'<tr><td class="dir"><a href="/ui/browse/{escaped_child}">'
                         f"{_icon('folder')} {escaped}/</a></td>"
-                        "<td>directory</td><td>\u2014</td><td>\u2014</td></tr>"
+                        f'<td>directory</td><td>\u2014</td><td><a href="/ui/activity?path={escaped_child}">'
+                        "View changes</a></td></tr>"
                     )
                 else:
                     # file metadata

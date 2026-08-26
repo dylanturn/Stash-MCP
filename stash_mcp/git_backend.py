@@ -34,6 +34,14 @@ class LogEntry:
 
 
 @dataclass
+class ChangedFile:
+    """A file touched by a commit."""
+
+    path: str
+    status: str
+
+
+@dataclass
 class PullResult:
     """Result of a git pull operation."""
 
@@ -350,6 +358,22 @@ class GitBackend:
                 )
             )
         return entries
+
+    def changed_files(self, commit_hash: str, path: str | None = None) -> list[ChangedFile]:
+        """Return files changed by *commit_hash*, optionally scoped to *path*."""
+        args = ["git", "show", "--format=", "--name-status", commit_hash]
+        if path:
+            args.extend(["--", path])
+        result = self._run(args)
+        if result.returncode != 0:
+            logger.warning("git show failed for %s: %s", commit_hash, result.stderr.strip())
+            return []
+        files = []
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                files.append(ChangedFile(path=parts[-1], status=parts[0][:1]))
+        return files
 
     def diff(self, path: str, ref: str | None = None) -> str:
         """Return the diff for *path* against *ref* (default ``HEAD~1``).

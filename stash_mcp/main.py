@@ -340,7 +340,10 @@ def create_app():
             get_metrics().close()
 
     app = create_api(filesystem, lifespan=_combined_lifespan, search_engine=search_engine)
-    ui_router = create_ui_router(filesystem, search_engine=search_engine, read_only=Config.READ_ONLY)
+    ui_router = create_ui_router(
+        filesystem, search_engine=search_engine, read_only=Config.READ_ONLY,
+        git_backend=git_backend,
+    )
     app.include_router(ui_router)
 
     # Serve vendored static assets (highlight.js, mermaid.js, etc.)
