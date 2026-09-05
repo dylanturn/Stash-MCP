@@ -208,6 +208,43 @@ class TestUIActivity:
             assert '/ui/activity?path=docs%3F%23' in history.text
             assert '/ui/history/docs%3F%23/readme.md' in history.text
 
+    def test_activity_hides_filtered_paths_and_empty_commits(self):
+        class FilteredHistoryBackend(_HistoryGitBackend):
+            def activity(self, path=None, max_count=20):
+                from datetime import UTC, datetime
+
+                from stash_mcp.git_backend import ActivityEntry, ChangedFile, LogEntry
+
+                timestamp = datetime(2026, 8, 25, tzinfo=UTC)
+                return [
+                    ActivityEntry(
+                        LogEntry("visible", "Alex", timestamp, "Mixed changes"),
+                        [
+                            ChangedFile("visible.md", "M"),
+                            ChangedFile("excluded.txt", "M"),
+                            ChangedFile(".secret.md", "M"),
+                            ChangedFile("docs/.private/note.md", "M"),
+                        ],
+                    ),
+                    ActivityEntry(
+                        LogEntry("hidden", "Alex", timestamp, "Hidden only"),
+                        [ChangedFile("excluded.txt", "M")],
+                    ),
+                ]
+
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir), include_patterns=["**/*.md", "*.md"])
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs, git_backend=FilteredHistoryBackend()))
+            body = TestClient(app).get("/ui/activity").text
+
+            assert "visible.md" in body
+            assert "excluded.txt" not in body
+            assert ".secret.md" not in body
+            assert ".private" not in body
+            assert "Mixed changes" in body
+            assert "Hidden only" not in body
+
     def test_file_view_links_to_history(self, ui_client):
         assert '/ui/history/hello.md' in ui_client.get("/ui/browse/hello.md").text
 

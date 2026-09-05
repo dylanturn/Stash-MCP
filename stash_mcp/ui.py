@@ -1,5 +1,6 @@
 """Content browser & editor UI with three-panel layout."""
 
+import asyncio
 import base64
 import csv
 import functools
@@ -2170,6 +2171,8 @@ def create_ui_router(
         search_engine: Optional SearchEngine for vector search
         read_only: When True, editing UI elements are hidden and write
             endpoints return HTTP 403.
+        git_backend: Optional Git backend used to populate activity, history,
+            and revision views. History UI shows an enablement message when omitted.
 
     Returns:
         FastAPI router for UI
@@ -2177,10 +2180,12 @@ def create_ui_router(
     _search_enabled = search_engine is not None
     router = APIRouter()
 
-    def _activity_html(scope: str = "", revision_path: str | None = None) -> str:
+    async def _activity_html(scope: str = "", revision_path: str | None = None) -> str:
         if git_backend is None:
             return '<div class="history-empty">Enable Git tracking to see change history.</div>'
-        activities = git_backend.activity(scope or None, max_count=30)
+        activities = await asyncio.to_thread(
+            git_backend.activity, scope or None, max_count=30
+        )
         if not activities:
             return '<div class="history-empty">No changes found for this location yet.</div>'
         cards = []
@@ -2188,6 +2193,10 @@ def create_ui_router(
             entry = activity.entry
             file_rows = []
             for changed in activity.changed_files:
+                if any(part.startswith(".") for part in PurePosixPath(changed.path).parts):
+                    continue
+                if not filesystem._matches_patterns(changed.path):
+                    continue
                 changed_path = html.escape(changed.path)
                 changed_path_url = html.escape(quote(changed.path, safe="/"))
                 status = html.escape(changed.status)
@@ -2210,10 +2219,13 @@ def create_ui_router(
                     f'?revision={revision_hash}" aria-label="View diff for revision '
                     f'{html.escape(entry.commit_hash[:7])}">{card_head}</a>'
                 )
-            cards.append(
-                f'<article class="change-card">{card_head}'
-                f'<div class="change-files">{"".join(file_rows)}</div></article>'
-            )
+            if file_rows:
+                cards.append(
+                    f'<article class="change-card">{card_head}'
+                    f'<div class="change-files">{"".join(file_rows)}</div></article>'
+                )
+        if not cards:
+            return '<div class="history-empty">No changes found for this location yet.</div>'
         return f'<div class="activity-feed">{"".join(cards)}</div>'
 
     @router.get("/ui/activity", response_class=HTMLResponse)
@@ -2224,7 +2236,8 @@ def create_ui_router(
         label = scope or "Entire stash"
         center = ('<div class="activity-header"><div class="activity-kicker">Activity</div>'
                   f'<h1>{html.escape(label)}</h1><p class="activity-subtitle">'
-                  'Recent commits and the files they changed.</p></div>' + _activity_html(scope))
+                  'Recent commits and the files they changed.</p></div>'
+                  + await _activity_html(scope))
         return _page(
             f"Changes · {label}",
             sidebar,
@@ -2244,7 +2257,7 @@ def create_ui_router(
         path_url = html.escape(quote(path, safe="/"))
         if revision:
             diff_text = (
-                git_backend.revision_diff(path, revision)
+                await asyncio.to_thread(git_backend.revision_diff, path, revision)
                 if git_backend is not None
                 else ""
             )
@@ -2262,7 +2275,7 @@ def create_ui_router(
                 '<div class="activity-kicker">File history</div>'
                 f'<h1>{html.escape(PurePosixPath(path).name)}</h1>'
                 f'<p class="activity-subtitle">{html.escape(path)}</p></div>'
-                + _activity_html(path, revision_path=path)
+                + await _activity_html(path, revision_path=path)
             )
         return _page(f"History · {PurePosixPath(path).name}", sidebar, center,
                      mode="history", path=path)

@@ -442,6 +442,7 @@ class GitBackend:
         """Return files changed by *commit_hash*, optionally scoped to *path*."""
         args = [
             "git",
+            "--literal-pathspecs",
             "show",
             "--format=",
             "--name-status",
@@ -465,6 +466,7 @@ class GitBackend:
         """Return recent commits and their changed files in one Git process."""
         args = [
             "git",
+            "--literal-pathspecs",
             "log",
             f"--max-count={max_count}",
             "--format=%x1e%H%x00%an%x00%aI%x00%s",
@@ -510,6 +512,7 @@ class GitBackend:
         result = self._run(
             [
                 "git",
+                "--literal-pathspecs",
                 "show",
                 "--format=",
                 "--no-ext-diff",
