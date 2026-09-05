@@ -432,6 +432,34 @@ class TestGitBackendActivity:
             assert activities[0].entry.message == "Add new file"
             assert activities[0].changed_files == [ChangedFile("new.txt", "A")]
 
+    def test_history_paths_are_treated_as_literal_pathspecs(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "literal?.md").write_text("question mark")
+            (repo / "literalX.md").write_text("wildcard match")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add literal paths"],
+                check=True,
+                capture_output=True,
+            )
+            commit_hash = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+            ).strip()
+            backend = GitBackend(repo)
+
+            assert backend.changed_files(commit_hash, "literal?.md") == [
+                ChangedFile("literal?.md", "A")
+            ]
+            activities = backend.activity("literal?.md")
+            assert activities[0].changed_files == [ChangedFile("literal?.md", "A")]
+            patch = backend.revision_diff("literal?.md", commit_hash)
+            assert "literal?.md" in patch
+            assert "literalX.md" not in patch
+
 
 # ---------------------------------------------------------------------------
 # GitBackend.blame()
