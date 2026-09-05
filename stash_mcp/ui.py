@@ -1,5 +1,6 @@
 """Content browser & editor UI with three-panel layout."""
 
+import asyncio
 import base64
 import csv
 import functools
@@ -11,10 +12,11 @@ import posixpath
 import re
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 import markdown as md
 import yaml as _yaml
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
@@ -198,6 +200,12 @@ _ICONS = {
         'stroke-linejoin="round"><line x1="6" x2="6" y1="3" y2="15"/>'
         '<circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'
         '<path d="M18 9a9 9 0 0 1-9 9"/></svg>'
+    ),
+    "history": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/>'
+        '<path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>'
     ),
     "external-link": (
         '<svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" '
@@ -1178,6 +1186,30 @@ def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
     return dirs + readme + files
 
 
+def _diff_html(diff_text: str) -> str:
+    """Render a unified diff with safe, line-level highlighting."""
+    if not diff_text:
+        return '<div class="history-empty">No textual changes in this revision.</div>'
+
+    lines = []
+    for raw_line in diff_text.splitlines():
+        line_class = "diff-context"
+        if raw_line.startswith("@@"):
+            line_class = "diff-hunk"
+        elif raw_line.startswith("diff --git") or raw_line.startswith("index "):
+            line_class = "diff-meta"
+        elif raw_line.startswith("+") and not raw_line.startswith("+++"):
+            line_class = "diff-add"
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            line_class = "diff-del"
+        elif raw_line.startswith("---") or raw_line.startswith("+++"):
+            line_class = "diff-file"
+        lines.append(
+            f'<span class="diff-line {line_class}">{html.escape(raw_line) or " "}</span>'
+        )
+    return '<div class="diff-view"><pre class="diff-code">' + "".join(lines) + "</pre></div>"
+
+
 def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") -> str:
     """Build recursive HTML for the sidebar tree."""
     try:
@@ -1193,12 +1225,16 @@ def _build_tree_html(filesystem: FileSystem, rel: str = "", active: str = "") ->
             open_attr = "open" if active.startswith(child) else ""
             children_html = _build_tree_html(filesystem, child, active)
             escaped_child = html.escape(child)
+            escaped_child_url = html.escape(quote(child, safe="/"))
+            selected = " selected" if child == active else ""
             parts.append(
                 f'<details {open_attr} data-path="{escaped_child}">'
                 f'<summary class="tree-dir">'
                 f'<span class="tree-chevron">{_icon("chevron-right")}{_icon("chevron-down")}</span>'
+                f'<a class="tree-folder-link{selected}" href="/ui/browse/{escaped_child_url}" '
+                f'onclick="event.stopPropagation()">'
                 f'<span class="tree-folder-icon">{_icon("folder")}{_icon("folder-open")}</span>'
-                f' {escaped}</summary>'
+                f'<span>{escaped}</span></a></summary>'
                 f'<div class="tree-children">{children_html}</div></details>'
             )
         else:
@@ -1261,6 +1297,8 @@ padding:8px 12px;background:#94e2d5;color:#1e1e2e;
 border-radius:6px;font-size:13px;font-weight:600;text-align:center;border:none;cursor:pointer;
 transition:background 150ms ease,transform 150ms ease}
 .btn-new:hover{background:#a6e3e0;text-decoration:none;transform:translateY(-1px)}
+.btn-activity{display:flex;align-items:center;gap:7px;padding:8px 10px;color:#cdd6f4;
+border-radius:6px;font-size:13px}.btn-activity:hover{background:#2e2e42;color:#94e2d5;text-decoration:none}
 
 /* search */
 .search-box{margin-top:8px;position:relative}
@@ -1347,6 +1385,10 @@ padding:6px 8px;font-size:14px;cursor:pointer;color:#cdd6f4;
 list-style:none;border-radius:6px;margin:2px 0;transition:background 150ms ease}
 details summary.tree-dir:hover{background:#2e2e42}
 details summary.tree-dir::marker,details summary.tree-dir::-webkit-details-marker{display:none}
+.tree-folder-link{display:flex;align-items:center;gap:4px;min-width:0;flex:1;
+color:#cdd6f4;text-decoration:none;border-radius:4px}
+.tree-folder-link:hover{text-decoration:none}
+.tree-folder-link.selected{color:#94e2d5;font-weight:600}
 .tree-children{padding-left:24px}
 
 /* file listing table */
@@ -1358,6 +1400,27 @@ border-bottom:1px solid #313244;font-weight:500}
 .file-table .name a,.file-table .dir a{display:inline-flex;align-items:center;gap:6px}
 .file-table .name a{color:#94e2d5}
 .file-table .dir a{color:#cdd6f4}
+.activity-header{margin-bottom:22px}.activity-kicker{font-size:12px;text-transform:uppercase;
+letter-spacing:.09em;color:#94e2d5;margin-bottom:6px}.activity-subtitle{color:#7f849c;margin-top:7px}
+.activity-feed{display:flex;flex-direction:column;gap:12px}.change-card{background:#272738;
+border:1px solid #313244;border-radius:10px;padding:16px 18px}.change-card-head{display:flex;
+justify-content:space-between;gap:18px}.change-message{font-weight:650;color:#e0e4f0}
+.change-meta{font-size:12px;color:#7f849c;margin-top:5px}.commit-id{font-family:monospace;color:#94e2d5}
+.change-files{display:flex;flex-direction:column;gap:5px;margin-top:14px}.change-file{display:flex;
+align-items:center;gap:9px;padding:7px 9px;border-radius:6px;color:#cdd6f4}.change-file:hover{
+background:#1e1e2e;text-decoration:none}.change-status{width:21px;height:21px;border-radius:5px;
+display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;
+background:rgba(137,180,250,.14);color:#89b4fa}.change-status.A{color:#a6e3a1}
+.change-status.D{color:#f38ba8}.history-empty{padding:48px 24px;text-align:center;
+border:1px dashed #45475a;border-radius:10px;color:#7f849c}.history-back{display:inline-flex;margin-bottom:18px}
+.change-card-link{display:block;color:inherit;border-radius:7px;padding:2px}
+.change-card-link:hover{background:#1e1e2e;text-decoration:none}
+.diff-view{overflow:auto;border:1px solid #313244;border-radius:10px;background:#181825}
+.diff-code{display:block;min-width:max-content;padding:10px 0;font-family:'Monaco','Menlo',
+'Ubuntu Mono',monospace;font-size:13px;line-height:1.55}.diff-line{display:block;padding:0 16px;
+white-space:pre}.diff-add{background:rgba(166,227,161,.12);color:#a6e3a1}.diff-del{
+background:rgba(243,139,168,.12);color:#f38ba8}.diff-hunk{background:rgba(137,180,250,.12);
+color:#89b4fa}.diff-meta,.diff-file{color:#7f849c}.diff-context{color:#cdd6f4}
 
 /* viewer - typography for comfortable reading */
 .viewer-content{background:transparent;padding:24px 32px;border-radius:6px;overflow-x:auto;
@@ -1972,15 +2035,36 @@ def _page(
     mode: str = "view",
     path: str = "",
     hide_edit: bool = False,
+    folder_path: str | None = None,
 ) -> str:
     """Wrap content in the three-panel layout."""
     right_panel = f'<aside class="right-panel">{right}</aside>' if right else ""
 
-    # Build mode-switch tabs if viewing/editing a file
+    # Build mode-switch tabs for folders or files.
     mode_tabs = ""
-    if path:
+    if folder_path is not None:
+        escaped_folder_path = html.escape(quote(folder_path, safe="/"))
+        browse_url = (
+            f"/ui/browse/{escaped_folder_path}"
+            if escaped_folder_path
+            else "/ui/browse/"
+        )
+        history_url = (
+            f"/ui/activity?path={escaped_folder_path}"
+            if escaped_folder_path
+            else "/ui/activity"
+        )
+        mode_tabs = (
+            '<div class="mode-tabs">'
+            f'<a class="{"mode-tab active" if mode == "view" else "mode-tab"}" '
+            f'href="{browse_url}">{_icon("eye")} View</a>'
+            f'<a class="{"mode-tab active" if mode == "history" else "mode-tab"}" '
+            f'href="{history_url}">{_icon("history")} History</a>'
+            "</div>"
+        )
+    elif path:
         view_cls = "mode-tab active" if mode == "view" else "mode-tab"
-        escaped_path = html.escape(path)
+        escaped_path = html.escape(quote(path, safe="/"))
         edit_tab = "" if hide_edit else (
             f'<a class="{"mode-tab active" if mode == "edit" else "mode-tab"}" '
             f'href="/ui/edit/{escaped_path}">'
@@ -1991,6 +2075,8 @@ def _page(
             f'<a class="{view_cls}" href="/ui/browse/{escaped_path}">'
             f'{_icon("eye")} View</a>'
             f'{edit_tab}'
+            f'<a class="{"mode-tab active" if mode == "history" else "mode-tab"}" '
+            f'href="/ui/history/{escaped_path}">{_icon("history")} History</a>'
             "</div>"
         )
 
@@ -2055,6 +2141,7 @@ def _sidebar_html(
     return (
         '<div class="sidebar-header">'
         f'{new_doc_btn}'
+        f'<a href="/ui/activity" class="btn-activity">{_icon("history")} Recent changes</a>'
         f'<div class="search-box"{vector_attr}>'
         f'<input type="text" id="tree-search" class="search-input" '
         f'placeholder="{placeholder}" aria-label="Search" '
@@ -2075,6 +2162,7 @@ def create_ui_router(
     filesystem: FileSystem,
     search_engine=None,
     read_only: bool = False,
+    git_backend=None,
 ) -> APIRouter:
     """Create UI router with content browser & editor.
 
@@ -2083,12 +2171,139 @@ def create_ui_router(
         search_engine: Optional SearchEngine for vector search
         read_only: When True, editing UI elements are hidden and write
             endpoints return HTTP 403.
+        git_backend: Optional Git backend used to populate activity, history,
+            and revision views. History UI shows an enablement message when omitted.
 
     Returns:
         FastAPI router for UI
     """
     _search_enabled = search_engine is not None
     router = APIRouter()
+
+    def _is_visible_path(path: str, *, allow_directory: bool = False) -> bool:
+        """Apply the content browser's containment, hidden-path, and glob rules."""
+        if not path or any(part.startswith(".") for part in PurePosixPath(path).parts):
+            return False
+        try:
+            resolved = filesystem._resolve_path(path)
+        except (InvalidPathError, ValueError):
+            return False
+        if allow_directory and resolved.is_dir():
+            return True
+        return filesystem._matches_patterns(path)
+
+    async def _activity_html(scope: str = "", revision_path: str | None = None) -> str:
+        if git_backend is None:
+            return '<div class="history-empty">Enable Git tracking to see change history.</div>'
+        cards = []
+        skip = 0
+        page_size = 30
+        while len(cards) < 30:
+            activities = await asyncio.to_thread(
+                git_backend.activity, scope or None, max_count=page_size, skip=skip
+            )
+            for activity in activities:
+                entry = activity.entry
+                file_rows = []
+                for changed in activity.changed_files:
+                    if not _is_visible_path(changed.path):
+                        continue
+                    changed_path = html.escape(changed.path)
+                    changed_path_url = html.escape(quote(changed.path, safe="/"))
+                    status = html.escape(changed.status)
+                    file_rows.append(
+                        f'<a class="change-file" href="/ui/history/{changed_path_url}">'
+                        f'<span class="change-status {status}">{status}</span>{changed_path}</a>'
+                    )
+                if not file_rows:
+                    continue
+                timestamp = (
+                    f'{entry.timestamp.strftime("%b")} {entry.timestamp.day}, '
+                    f'{entry.timestamp.strftime("%Y · %H:%M")}'
+                )
+                card_head = (
+                    '<div class="change-card-head"><div>'
+                    f'<div class="change-message">{html.escape(entry.message)}</div>'
+                    '<div class="change-meta">'
+                    f'{html.escape(entry.author)} · {timestamp}</div></div>'
+                    f'<span class="commit-id">{html.escape(entry.commit_hash[:7])}</span></div>'
+                )
+                if revision_path is not None:
+                    revision_path_url = html.escape(quote(revision_path, safe="/"))
+                    revision_hash = html.escape(quote(entry.commit_hash, safe=""))
+                    card_head = (
+                        f'<a class="change-card-link" href="/ui/history/{revision_path_url}'
+                        f'?revision={revision_hash}" aria-label="View diff for revision '
+                        f'{html.escape(entry.commit_hash[:7])}">{card_head}</a>'
+                    )
+                cards.append(
+                    f'<article class="change-card">{card_head}'
+                    f'<div class="change-files">{"".join(file_rows)}</div></article>'
+                )
+                if len(cards) == 30:
+                    break
+            if len(activities) < page_size:
+                break
+            skip += page_size
+        if not cards:
+            return '<div class="history-empty">No changes found for this location yet.</div>'
+        return f'<div class="activity-feed">{"".join(cards)}</div>'
+
+    @router.get("/ui/activity", response_class=HTMLResponse)
+    async def ui_activity(path: str = "") -> str:
+        scope = path.strip("/")
+        if scope and not _is_visible_path(scope, allow_directory=True):
+            raise HTTPException(status_code=404, detail="Path not found")
+        sidebar = _sidebar_html(filesystem, active=scope, search_enabled=_search_enabled,
+                                read_only=read_only)
+        label = scope or "Entire stash"
+        center = ('<div class="activity-header"><div class="activity-kicker">Activity</div>'
+                  f'<h1>{html.escape(label)}</h1><p class="activity-subtitle">'
+                  'Recent commits and the files they changed.</p></div>'
+                  + await _activity_html(scope))
+        return _page(
+            f"Changes · {label}",
+            sidebar,
+            center,
+            mode="history",
+            folder_path=scope,
+        )
+
+    @router.get("/ui/history/{path:path}", response_class=HTMLResponse)
+    async def ui_history(path: str, revision: str = "") -> str:
+        path = path.strip("/")
+        if not _is_visible_path(path):
+            raise HTTPException(status_code=404, detail="Path not found")
+        sidebar = _sidebar_html(filesystem, active=path, search_enabled=_search_enabled,
+                                read_only=read_only)
+        parent = str(PurePosixPath(path).parent)
+        parent = "" if parent == "." else parent
+        parent_url = html.escape(quote(parent, safe="/"))
+        path_url = html.escape(quote(path, safe="/"))
+        if revision:
+            diff_text = (
+                await asyncio.to_thread(git_backend.revision_diff, path, revision)
+                if git_backend is not None
+                else ""
+            )
+            center = (
+                f'<a class="history-back" href="/ui/history/{path_url}">← File history</a>'
+                '<div class="activity-header"><div class="activity-kicker">Revision diff</div>'
+                f'<h1>{html.escape(PurePosixPath(path).name)}</h1>'
+                f'<p class="activity-subtitle">{html.escape(path)} · '
+                f'{html.escape(revision[:7])}</p></div>{_diff_html(diff_text)}'
+            )
+        else:
+            center = (
+                f'<a class="history-back" href="/ui/activity?path={parent_url}">'
+                '← Folder changes</a><div class="activity-header">'
+                '<div class="activity-kicker">File history</div>'
+                f'<h1>{html.escape(PurePosixPath(path).name)}</h1>'
+                f'<p class="activity-subtitle">{html.escape(path)}</p></div>'
+                + await _activity_html(path, revision_path=path)
+            )
+        return _page(f"History · {PurePosixPath(path).name}", sidebar, center,
+                     mode="history", path=path)
 
     # --- redirect /ui to /ui/browse/ ---
     @router.get("/ui", response_class=RedirectResponse)
@@ -2131,7 +2346,7 @@ def create_ui_router(
                     rows += (
                         f'<tr><td class="dir"><a href="/ui/browse/{escaped_child}">'
                         f"{_icon('folder')} {escaped}/</a></td>"
-                        "<td>directory</td><td>\u2014</td><td>\u2014</td></tr>"
+                        '<td>directory</td><td>\u2014</td><td>\u2014</td></tr>'
                     )
                 else:
                     # file metadata
@@ -2168,7 +2383,7 @@ def create_ui_router(
                 f"<h1>{html.escape(title)}</h1>"
                 f"{table}"
             )
-            return _page(f"Browse {title}", sidebar, center)
+            return _page(f"Browse {title}", sidebar, center, folder_path=path)
 
         # --- file view ---
         if full.is_file():

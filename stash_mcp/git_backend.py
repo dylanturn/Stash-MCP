@@ -34,6 +34,22 @@ class LogEntry:
 
 
 @dataclass
+class ChangedFile:
+    """A file touched by a commit."""
+
+    path: str
+    status: str
+
+
+@dataclass
+class ActivityEntry:
+    """A git log entry together with the files changed by that commit."""
+
+    entry: LogEntry
+    changed_files: list[ChangedFile] = field(default_factory=list)
+
+
+@dataclass
 class PullResult:
     """Result of a git pull operation."""
 
@@ -131,6 +147,77 @@ def _parse_pull_file_statuses(
             modified.append(path)
 
     return added, modified, deleted
+
+
+_NAME_STATUS_RE = re.compile(r"^[ACDMRTUXB][0-9]*$")
+_COMMIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_ACTIVITY_RECORD_SEPARATOR = "\x1e"
+
+
+def _parse_name_status_tokens(
+    tokens: list[str], start: int = 0
+) -> tuple[list[ChangedFile], int]:
+    """Parse NUL-delimited ``--name-status`` tokens.
+
+    Rename and copy records contain both the source and destination path.  The
+    destination is the path users can open in the current tree, so it is the
+    one exposed through :class:`ChangedFile`.
+    """
+    files: list[ChangedFile] = []
+    index = start
+    while index < len(tokens):
+        raw_status = tokens[index]
+        status = raw_status.lstrip("\n")
+        if status.startswith(_ACTIVITY_RECORD_SEPARATOR):
+            break
+        if not status:
+            index += 1
+            continue
+        if not _NAME_STATUS_RE.fullmatch(status):
+            index += 1
+            continue
+
+        path_count = 2 if status[0] in {"R", "C"} else 1
+        if index + path_count >= len(tokens):
+            break
+        paths = tokens[index + 1 : index + 1 + path_count]
+        files.append(ChangedFile(path=paths[-1], status=status[0]))
+        index += 1 + path_count
+    return files, index
+
+
+def _parse_activity_log_z(output: str) -> list[ActivityEntry]:
+    """Parse one ``git log --name-status -z`` result into activity entries."""
+    tokens = output.split("\x00")
+    activities: list[ActivityEntry] = []
+    index = 0
+    while index < len(tokens):
+        commit_token = tokens[index].lstrip("\n")
+        if not commit_token.startswith(_ACTIVITY_RECORD_SEPARATOR):
+            index += 1
+            continue
+        if index + 3 >= len(tokens):
+            break
+
+        commit_hash = commit_token[1:]
+        author, timestamp_str, message = tokens[index + 1 : index + 4]
+        try:
+            timestamp = datetime.fromisoformat(timestamp_str)
+        except ValueError:
+            timestamp = datetime.now(UTC)
+        changed_files, index = _parse_name_status_tokens(tokens, index + 4)
+        activities.append(
+            ActivityEntry(
+                entry=LogEntry(
+                    commit_hash=commit_hash,
+                    author=author,
+                    timestamp=timestamp,
+                    message=message,
+                ),
+                changed_files=changed_files,
+            )
+        )
+    return activities
 
 
 def _parse_author_string(author: str) -> tuple[str, str]:
@@ -351,6 +438,53 @@ class GitBackend:
             )
         return entries
 
+    def changed_files(self, commit_hash: str, path: str | None = None) -> list[ChangedFile]:
+        """Return files changed by *commit_hash*, optionally scoped to *path*."""
+        args = [
+            "git",
+            "--literal-pathspecs",
+            "show",
+            "--format=",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "--find-copies-harder",
+            commit_hash,
+        ]
+        if path:
+            args.extend(["--", path])
+        result = self._run(args)
+        if result.returncode != 0:
+            logger.warning("git show failed for %s: %s", commit_hash, result.stderr.strip())
+            return []
+        files, _ = _parse_name_status_tokens(result.stdout.split("\x00"))
+        return files
+
+    def activity(
+        self, path: str | None = None, max_count: int = 20, skip: int = 0
+    ) -> list[ActivityEntry]:
+        """Return a page of recent commits and their changed files in one Git process."""
+        args = [
+            "git",
+            "--literal-pathspecs",
+            "log",
+            f"--max-count={max_count}",
+            f"--skip={skip}",
+            "--format=%x1e%H%x00%an%x00%aI%x00%s",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "--find-copies-harder",
+        ]
+        if path:
+            args.extend(["--", path])
+
+        result = self._run(args)
+        if result.returncode != 0:
+            logger.warning("git activity log failed: %s", result.stderr.strip())
+            return []
+        return _parse_activity_log_z(result.stdout)
+
     def diff(self, path: str, ref: str | None = None) -> str:
         """Return the diff for *path* against *ref* (default ``HEAD~1``).
 
@@ -365,6 +499,38 @@ class GitBackend:
         result = self._run(["git", "diff", ref, "--", path])
         if result.returncode != 0:
             logger.warning("git diff failed for %s: %s", path, result.stderr.strip())
+            return result.stderr or "diff unavailable"
+        return result.stdout
+
+    def revision_diff(self, path: str, commit_hash: str) -> str:
+        """Return the patch for *path* introduced by *commit_hash*.
+
+        Unlike :meth:`diff`, this compares the selected commit with its parent,
+        so the result is stable even when the working tree has moved on.
+        """
+        if not _COMMIT_HASH_RE.fullmatch(commit_hash):
+            return "diff unavailable"
+        result = self._run(
+            [
+                "git",
+                "--literal-pathspecs",
+                "show",
+                "--format=",
+                "--no-ext-diff",
+                "--find-renames",
+                "--find-copies-harder",
+                commit_hash,
+                "--",
+                path,
+            ]
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "git show failed for %s at %s: %s",
+                path,
+                commit_hash,
+                result.stderr.strip(),
+            )
             return result.stderr or "diff unavailable"
         return result.stdout
 
