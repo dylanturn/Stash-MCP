@@ -440,6 +440,8 @@ class GitBackend:
 
     def changed_files(self, commit_hash: str, path: str | None = None) -> list[ChangedFile]:
         """Return files changed by *commit_hash*, optionally scoped to *path*."""
+        if commit_hash.startswith("-"):
+            return []
         args = [
             "git",
             "--literal-pathspecs",

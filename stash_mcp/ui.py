@@ -2198,7 +2198,8 @@ def create_ui_router(
         cards = []
         skip = 0
         page_size = 30
-        while len(cards) < 30:
+        max_scan_commits = 300
+        while len(cards) < 30 and skip < max_scan_commits:
             activities = await asyncio.to_thread(
                 git_backend.activity, scope or None, max_count=page_size, skip=skip
             )
@@ -2245,9 +2246,17 @@ def create_ui_router(
             if len(activities) < page_size:
                 break
             skip += page_size
+        scan_notice = (
+            '<div class="history-empty">Showing visible changes from the most recent '
+            f'{max_scan_commits} commits. Older commits were not scanned.</div>'
+            if skip >= max_scan_commits and len(cards) < 30
+            else ""
+        )
         if not cards:
-            return '<div class="history-empty">No changes found for this location yet.</div>'
-        return f'<div class="activity-feed">{"".join(cards)}</div>'
+            return scan_notice or (
+                '<div class="history-empty">No changes found for this location yet.</div>'
+            )
+        return f'<div class="activity-feed">{"".join(cards)}</div>{scan_notice}'
 
     @router.get("/ui/activity", response_class=HTMLResponse)
     async def ui_activity(path: str = "") -> str:
@@ -2337,7 +2346,7 @@ def create_ui_router(
             for name, is_dir in entries:
                 child = f"{path}/{name}" if path else name
                 escaped = html.escape(name)
-                escaped_child = html.escape(child)
+                escaped_child = html.escape(quote(child, safe="/"))
                 if is_dir:
                     rows += (
                         f'<tr><td class="dir"><a href="/ui/browse/{escaped_child}">'

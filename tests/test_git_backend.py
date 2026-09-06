@@ -379,6 +379,16 @@ class TestGitBackendActivity:
             assert status_by_path["renamed.txt"] == "R"
             assert status_by_path["copied.txt"] == "C"
 
+    @pytest.mark.parametrize("revision", ["--help", "--pretty=raw", "-p"])
+    def test_changed_files_rejects_option_like_revisions(self, tmp_path, monkeypatch, revision):
+        backend = GitBackend(tmp_path)
+
+        def unexpected_run(*args, **kwargs):
+            pytest.fail("Option-like revisions must be rejected before invoking Git")
+
+        monkeypatch.setattr(backend, "_run", unexpected_run)
+        assert backend.changed_files(revision) == []
+
     def test_changed_files_preserves_unusual_filename_exactly(self):
         with TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)

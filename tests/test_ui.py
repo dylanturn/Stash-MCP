@@ -156,6 +156,54 @@ class TestUIBrowse:
 
 
 class TestUIActivity:
+    @pytest.mark.parametrize("visible_first", [False, True])
+    def test_activity_bounds_scan_of_hidden_commits(self, tmp_path, visible_first):
+        class HiddenHistoryBackend(_HistoryGitBackend):
+            def __init__(self):
+                self.skips = []
+
+            def activity(self, path=None, max_count=20, skip=0):
+                self.skips.append(skip)
+                assert len(self.skips) <= 10, "Activity scanned too many pages"
+                entries = super().activity(path=".hidden.md") * max_count
+                if visible_first and skip == 0:
+                    entries[0] = super().activity(path="visible.md")[0]
+                return entries
+
+        backend = HiddenHistoryBackend()
+        fs = FileSystem(tmp_path)
+        app = create_api(fs)
+        app.include_router(create_ui_router(fs, git_backend=backend))
+
+        response = TestClient(app).get("/ui/activity")
+
+        assert response.status_code == 200
+        assert backend.skips == list(range(0, 300, 30))
+        assert "Older commits were not scanned." in response.text
+        assert ".hidden.md" not in response.text
+        assert ("Update visible.md" in response.text) is visible_first
+
+    def test_directory_listing_url_encodes_folder_and_file_links(self, tmp_path):
+        from bs4 import BeautifulSoup
+
+        fs = FileSystem(tmp_path)
+        fs.write_file("docs?#/note?#.md", "reserved path content")
+        app = create_api(fs)
+        app.include_router(create_ui_router(fs))
+        client = TestClient(app)
+
+        root = BeautifulSoup(client.get("/ui/browse/").text, "html.parser")
+        folder_link = root.select_one("td.dir a")["href"]
+        assert folder_link == "/ui/browse/docs%3F%23"
+        folder = client.get(folder_link)
+        assert folder.status_code == 200
+        listing = BeautifulSoup(folder.text, "html.parser")
+        file_link = listing.select_one("td.name a")["href"]
+        assert file_link == "/ui/browse/docs%3F%23/note%3F%23.md"
+        file_response = client.get(file_link)
+        assert file_response.status_code == 200
+        assert "reserved path content" in file_response.text
+
     @pytest.mark.parametrize("revision", ["", "abcdef123456"])
     def test_history_without_git_shows_enablement_message(self, ui_client, revision):
         response = ui_client.get("/ui/history/hello.md", params={"revision": revision})
