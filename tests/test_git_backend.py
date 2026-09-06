@@ -8,7 +8,9 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from stash_mcp.git_backend import (
+    ActivityEntry,
     BlameLine,
+    ChangedFile,
     GitBackend,
     LogEntry,
     PullResult,
@@ -285,6 +287,192 @@ class TestGitBackendLog:
 
 
 # ---------------------------------------------------------------------------
+# GitBackend.changed_files() / activity()
+# ---------------------------------------------------------------------------
+
+
+class TestGitBackendActivity:
+    def test_changed_files_parses_added_modified_and_deleted(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "gone.txt").write_text("remove me")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add deleted fixture"],
+                check=True,
+                capture_output=True,
+            )
+
+            (repo / "README.md").write_text("# Updated\n")
+            (repo / "added.txt").write_text("new")
+            (repo / "gone.txt").unlink()
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Mixed changes"],
+                check=True,
+                capture_output=True,
+            )
+
+            files = GitBackend(repo).changed_files("HEAD")
+            assert all(isinstance(file, ChangedFile) for file in files)
+            assert {file.path: file.status for file in files} == {
+                "README.md": "M",
+                "added.txt": "A",
+                "gone.txt": "D",
+            }
+
+    def test_changed_files_respects_path_scope(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "docs").mkdir()
+            (repo / "other").mkdir()
+            (repo / "docs" / "inside.md").write_text("inside")
+            (repo / "other" / "outside.md").write_text("outside")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add scoped files"],
+                check=True,
+                capture_output=True,
+            )
+
+            files = GitBackend(repo).changed_files("HEAD", path="docs")
+            assert [(file.status, file.path) for file in files] == [
+                ("A", "docs/inside.md")
+            ]
+
+    def test_changed_files_parses_rename_and_copy_destinations(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "original.txt").write_text("rename-only content")
+            (repo / "source.txt").write_text("copy-only content")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add move fixtures"],
+                check=True,
+                capture_output=True,
+            )
+
+            (repo / "original.txt").rename(repo / "renamed.txt")
+            (repo / "copied.txt").write_bytes((repo / "source.txt").read_bytes())
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Rename and copy"],
+                check=True,
+                capture_output=True,
+            )
+
+            files = GitBackend(repo).changed_files("HEAD")
+            status_by_path = {file.path: file.status for file in files}
+            assert status_by_path["renamed.txt"] == "R"
+            assert status_by_path["copied.txt"] == "C"
+
+    @pytest.mark.parametrize("revision", ["--help", "--pretty=raw", "-p"])
+    def test_changed_files_rejects_option_like_revisions(self, tmp_path, monkeypatch, revision):
+        backend = GitBackend(tmp_path)
+
+        def unexpected_run(*args, **kwargs):
+            pytest.fail("Option-like revisions must be rejected before invoking Git")
+
+        monkeypatch.setattr(backend, "_run", unexpected_run)
+        assert backend.changed_files(revision) == []
+
+    def test_changed_files_preserves_unusual_filename_exactly(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            unusual = (
+                "docs/r\N{LATIN SMALL LETTER E WITH ACUTE}sum"
+                "\N{LATIN SMALL LETTER E WITH ACUTE} ?#\n.md"
+            )
+            (repo / "docs").mkdir()
+            (repo / unusual).write_text("exact path")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add unusual path"],
+                check=True,
+                capture_output=True,
+            )
+
+            assert GitBackend(repo).changed_files("HEAD") == [
+                ChangedFile(path=unusual, status="A")
+            ]
+
+    def test_activity_batches_commits_and_changed_files_in_one_process(self, monkeypatch):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "new.txt").write_text("new")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add new file"],
+                check=True,
+                capture_output=True,
+            )
+            backend = GitBackend(repo)
+            original_run = backend._run
+            calls = []
+
+            def counting_run(args, *run_args, **run_kwargs):
+                calls.append(args)
+                return original_run(args, *run_args, **run_kwargs)
+
+            monkeypatch.setattr(backend, "_run", counting_run)
+            activities = backend.activity(max_count=2)
+
+            assert len(calls) == 1
+            assert "--skip=0" in calls[0]
+            assert len(activities) == 2
+            assert isinstance(activities[0], ActivityEntry)
+            assert activities[0].entry.message == "Add new file"
+            assert activities[0].changed_files == [ChangedFile("new.txt", "A")]
+
+    def test_history_paths_are_treated_as_literal_pathspecs(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "literal?.md").write_text("question mark")
+            (repo / "literalX.md").write_text("wildcard match")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "Add literal paths"],
+                check=True,
+                capture_output=True,
+            )
+            commit_hash = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+            ).strip()
+            backend = GitBackend(repo)
+
+            assert backend.changed_files(commit_hash, "literal?.md") == [
+                ChangedFile("literal?.md", "A")
+            ]
+            activities = backend.activity("literal?.md")
+            assert activities[0].changed_files == [ChangedFile("literal?.md", "A")]
+            patch = backend.revision_diff("literal?.md", commit_hash)
+            assert "literal?.md" in patch
+            assert "literalX.md" not in patch
+
+
+# ---------------------------------------------------------------------------
 # GitBackend.blame()
 # ---------------------------------------------------------------------------
 
@@ -366,6 +554,33 @@ class TestGitBackendDiff:
             backend = GitBackend(repo)
             result = backend.diff("README.md", ref=head1)
             assert "README.md" in result or "diff" in result.lower() or result == ""
+
+    def test_revision_diff_compares_commit_with_its_parent(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "README.md").write_text("# Updated\n")
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-am", "Update README"],
+                check=True,
+                capture_output=True,
+            )
+            commit_hash = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            result = GitBackend(repo).revision_diff("README.md", commit_hash)
+
+            assert "-# Test" in result
+            assert "+# Updated" in result
+
+    def test_revision_diff_rejects_non_hash_revision(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            assert GitBackend(repo).revision_diff("README.md", "--stat") == (
+                "diff unavailable"
+            )
 
 
 # ---------------------------------------------------------------------------

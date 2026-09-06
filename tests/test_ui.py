@@ -11,6 +11,37 @@ from stash_mcp.filesystem import FileSystem
 from stash_mcp.ui import create_ui_router
 
 
+class _HistoryGitBackend:
+    def activity(self, path=None, max_count=20, skip=0):
+        from datetime import UTC, datetime
+
+        from stash_mcp.git_backend import ActivityEntry, ChangedFile, LogEntry
+        changed_path = path or "docs/what?#.md"
+        return [
+            ActivityEntry(
+                LogEntry(
+                    "abcdef123456",
+                    "Alex",
+                    datetime(2026, 8, 25, tzinfo=UTC),
+                    f"Update {path or 'stash'}",
+                ),
+                [ChangedFile(changed_path, "M")],
+            )
+        ]
+
+    def revision_diff(self, path, commit_hash):
+        return "\n".join(
+            [
+                f"diff --git a/{path} b/{path}",
+                f"--- a/{path}",
+                f"+++ b/{path}",
+                "@@ -1 +1 @@",
+                "-old <unsafe>",
+                "+new & improved",
+            ]
+        )
+
+
 # Simple mock embedding for search-enabled UI tests
 async def _mock_embed(texts: list[str]) -> list[list[float]]:
     keywords = [
@@ -108,6 +139,240 @@ class TestUIBrowse:
         body = response.text
         assert "Stash-MCP" in body
         assert "New Document" in body
+        assert 'class="tree-folder-link" href="/ui/browse/docs"' in body
+
+        folder = ui_client.get("/ui/browse/docs").text
+        assert 'class="tree-folder-link selected" href="/ui/browse/docs"' in folder
+
+    def test_directory_uses_view_and_history_tabs(self, ui_client):
+        root = ui_client.get("/ui/browse/").text
+        assert 'class="mode-tab active" href="/ui/browse/"' in root
+        assert 'class="mode-tab" href="/ui/activity"' in root
+        assert "View changes" not in root
+
+        folder = ui_client.get("/ui/browse/docs").text
+        assert 'class="mode-tab active" href="/ui/browse/docs"' in folder
+        assert 'class="mode-tab" href="/ui/activity?path=docs"' in folder
+
+
+class TestUIActivity:
+    @pytest.mark.parametrize("visible_first", [False, True])
+    def test_activity_bounds_scan_of_hidden_commits(self, tmp_path, visible_first):
+        class HiddenHistoryBackend(_HistoryGitBackend):
+            def __init__(self):
+                self.skips = []
+
+            def activity(self, path=None, max_count=20, skip=0):
+                self.skips.append(skip)
+                assert len(self.skips) <= 10, "Activity scanned too many pages"
+                entries = super().activity(path=".hidden.md") * max_count
+                if visible_first and skip == 0:
+                    entries[0] = super().activity(path="visible.md")[0]
+                return entries
+
+        backend = HiddenHistoryBackend()
+        fs = FileSystem(tmp_path)
+        app = create_api(fs)
+        app.include_router(create_ui_router(fs, git_backend=backend))
+
+        response = TestClient(app).get("/ui/activity")
+
+        assert response.status_code == 200
+        assert backend.skips == list(range(0, 300, 30))
+        assert "Older commits were not scanned." in response.text
+        assert ".hidden.md" not in response.text
+        assert ("Update visible.md" in response.text) is visible_first
+
+    def test_directory_listing_url_encodes_folder_and_file_links(self, tmp_path):
+        from bs4 import BeautifulSoup
+
+        fs = FileSystem(tmp_path)
+        fs.write_file("docs?#/note?#.md", "reserved path content")
+        app = create_api(fs)
+        app.include_router(create_ui_router(fs))
+        client = TestClient(app)
+
+        root = BeautifulSoup(client.get("/ui/browse/").text, "html.parser")
+        folder_link = root.select_one("td.dir a")["href"]
+        assert folder_link == "/ui/browse/docs%3F%23"
+        folder = client.get(folder_link)
+        assert folder.status_code == 200
+        listing = BeautifulSoup(folder.text, "html.parser")
+        file_link = listing.select_one("td.name a")["href"]
+        assert file_link == "/ui/browse/docs%3F%23/note%3F%23.md"
+        file_response = client.get(file_link)
+        assert file_response.status_code == 200
+        assert "reserved path content" in file_response.text
+
+    @pytest.mark.parametrize("revision", ["", "abcdef123456"])
+    def test_history_without_git_shows_enablement_message(self, ui_client, revision):
+        response = ui_client.get("/ui/history/hello.md", params={"revision": revision})
+
+        assert response.status_code == 200
+        assert "Enable Git tracking to see change history." in response.text
+        assert "No textual changes in this revision." not in response.text
+        assert "Revision diff" not in response.text
+
+    @pytest.mark.parametrize("revision", ["", "abcdef123456"])
+    @pytest.mark.parametrize("read_only", [False, True])
+    @pytest.mark.parametrize("git_enabled", [False, True])
+    def test_history_edit_tab_respects_read_only(
+        self, tmp_path, revision, read_only, git_enabled
+    ):
+        fs = FileSystem(tmp_path)
+        fs.write_file("hello.md", "hello")
+        app = create_api(fs)
+        app.include_router(
+            create_ui_router(
+                fs,
+                read_only=read_only,
+                git_backend=_HistoryGitBackend() if git_enabled else None,
+            )
+        )
+        response = TestClient(app).get(
+            "/ui/history/hello.md", params={"revision": revision}
+        )
+
+        assert response.status_code == 200
+        assert ('href="/ui/edit/hello.md"' in response.text) is (not read_only)
+        assert 'href="/ui/browse/hello.md"' in response.text
+        assert 'class="mode-tab active" href="/ui/history/hello.md"' in response.text
+
+    def test_stash_folder_and_file_history(self):
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("docs/readme.md", "hello")
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs, git_backend=_HistoryGitBackend()))
+            client = TestClient(app)
+            stash = client.get("/ui/activity")
+            assert stash.status_code == 200
+            assert "Entire stash" in stash.text
+            assert "/ui/history/docs/what%3F%23.md" in stash.text
+            folder_history = client.get("/ui/activity?path=docs").text
+            assert "Update docs" in folder_history
+            assert 'class="mode-tab" href="/ui/browse/docs"' in folder_history
+            assert (
+                'class="mode-tab active" href="/ui/activity?path=docs"'
+                in folder_history
+            )
+            assert "File history" in client.get("/ui/history/docs/readme.md").text
+
+            file_history = client.get("/ui/history/docs/readme.md").text
+            assert (
+                "/ui/history/docs/readme.md?revision=abcdef123456" in file_history
+            )
+            revision = client.get(
+                "/ui/history/docs/readme.md?revision=abcdef123456"
+            )
+            assert revision.status_code == 200
+            assert "Revision diff" in revision.text
+            assert 'class="diff-line diff-del"' in revision.text
+            assert "-old &lt;unsafe&gt;" in revision.text
+            assert 'class="diff-line diff-add"' in revision.text
+            assert "+new &amp; improved" in revision.text
+
+    def test_new_activity_links_url_encode_paths(self):
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            fs.write_file("docs?#/readme.md", "hello")
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs, git_backend=_HistoryGitBackend()))
+            client = TestClient(app)
+
+            root = client.get("/ui/browse/")
+            assert 'href="/ui/browse/docs%3F%23"' in root.text
+
+            folder = client.get("/ui/browse/docs%3F%23")
+            assert '/ui/activity?path=docs%3F%23' in folder.text
+
+            history = client.get("/ui/history/docs%3F%23/readme.md")
+            assert '/ui/activity?path=docs%3F%23' in history.text
+            assert '/ui/history/docs%3F%23/readme.md' in history.text
+
+    def test_activity_hides_filtered_paths_and_empty_commits(self):
+        class FilteredHistoryBackend(_HistoryGitBackend):
+            def activity(self, path=None, max_count=20, skip=0):
+                from datetime import UTC, datetime
+
+                from stash_mcp.git_backend import ActivityEntry, ChangedFile, LogEntry
+
+                timestamp = datetime(2026, 8, 25, tzinfo=UTC)
+                return [
+                    ActivityEntry(
+                        LogEntry("visible", "Alex", timestamp, "Mixed changes"),
+                        [
+                            ChangedFile("visible.md", "M"),
+                            ChangedFile("excluded.txt", "M"),
+                            ChangedFile(".secret.md", "M"),
+                            ChangedFile("docs/.private/note.md", "M"),
+                        ],
+                    ),
+                    ActivityEntry(
+                        LogEntry("hidden", "Alex", timestamp, "Hidden only"),
+                        [ChangedFile("excluded.txt", "M")],
+                    ),
+                ]
+
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir), include_patterns=["**/*.md", "*.md"])
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs, git_backend=FilteredHistoryBackend()))
+            body = TestClient(app).get("/ui/activity").text
+
+            assert "visible.md" in body
+            assert "excluded.txt" not in body
+            assert ".secret.md" not in body
+            assert ".private" not in body
+            assert "Mixed changes" in body
+            assert "Hidden only" not in body
+
+    def test_history_rejects_hidden_excluded_and_traversal_paths(self):
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir), include_patterns=["*.md"])
+            fs.write_file("visible.md", "visible")
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs, git_backend=_HistoryGitBackend()))
+            client = TestClient(app)
+
+            assert client.get("/ui/history/visible.md").status_code == 200
+            assert client.get("/ui/history/.secret.md").status_code == 404
+            assert client.get("/ui/history/excluded.txt").status_code == 404
+            assert client.get("/ui/history/%2E%2E/outside.md").status_code == 404
+
+    def test_activity_paginates_past_commits_with_no_visible_files(self):
+        class PaginatedBackend(_HistoryGitBackend):
+            def activity(self, path=None, max_count=20, skip=0):
+                from datetime import UTC, datetime
+
+                from stash_mcp.git_backend import ActivityEntry, ChangedFile, LogEntry
+
+                if skip == 0:
+                    return [
+                        ActivityEntry(
+                            LogEntry(str(i), "Alex", datetime(2026, 9, 5, tzinfo=UTC), "Hidden"),
+                            [ChangedFile(f".hidden-{i}.md", "M")],
+                        )
+                        for i in range(max_count)
+                    ]
+                return [
+                    ActivityEntry(
+                        LogEntry("visible", "Alex", datetime(2026, 9, 5, tzinfo=UTC), "Visible"),
+                        [ChangedFile("visible.md", "M")],
+                    )
+                ]
+
+        with TemporaryDirectory() as tmpdir:
+            fs = FileSystem(Path(tmpdir))
+            app = create_api(fs)
+            app.include_router(create_ui_router(fs, git_backend=PaginatedBackend()))
+            body = TestClient(app).get("/ui/activity").text
+
+            assert "Visible" in body
+            assert ".hidden" not in body
+
+    def test_file_view_links_to_history(self, ui_client):
+        assert '/ui/history/hello.md' in ui_client.get("/ui/browse/hello.md").text
 
 
 class TestUIEdit:
