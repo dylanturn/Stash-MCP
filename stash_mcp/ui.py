@@ -2280,12 +2280,8 @@ def create_ui_router(
         parent = "" if parent == "." else parent
         parent_url = html.escape(quote(parent, safe="/"))
         path_url = html.escape(quote(path, safe="/"))
-        if revision:
-            diff_text = (
-                await asyncio.to_thread(git_backend.revision_diff, path, revision)
-                if git_backend is not None
-                else ""
-            )
+        if revision and git_backend is not None:
+            diff_text = await asyncio.to_thread(git_backend.revision_diff, path, revision)
             center = (
                 f'<a class="history-back" href="/ui/history/{path_url}">← File history</a>'
                 '<div class="activity-header"><div class="activity-kicker">Revision diff</div>'
@@ -2303,7 +2299,7 @@ def create_ui_router(
                 + await _activity_html(path, revision_path=path)
             )
         return _page(f"History · {PurePosixPath(path).name}", sidebar, center,
-                     mode="history", path=path)
+                     mode="history", path=path, hide_edit=read_only)
 
     # --- redirect /ui to /ui/browse/ ---
     @router.get("/ui", response_class=RedirectResponse)

@@ -156,6 +156,40 @@ class TestUIBrowse:
 
 
 class TestUIActivity:
+    @pytest.mark.parametrize("revision", ["", "abcdef123456"])
+    def test_history_without_git_shows_enablement_message(self, ui_client, revision):
+        response = ui_client.get("/ui/history/hello.md", params={"revision": revision})
+
+        assert response.status_code == 200
+        assert "Enable Git tracking to see change history." in response.text
+        assert "No textual changes in this revision." not in response.text
+        assert "Revision diff" not in response.text
+
+    @pytest.mark.parametrize("revision", ["", "abcdef123456"])
+    @pytest.mark.parametrize("read_only", [False, True])
+    @pytest.mark.parametrize("git_enabled", [False, True])
+    def test_history_edit_tab_respects_read_only(
+        self, tmp_path, revision, read_only, git_enabled
+    ):
+        fs = FileSystem(tmp_path)
+        fs.write_file("hello.md", "hello")
+        app = create_api(fs)
+        app.include_router(
+            create_ui_router(
+                fs,
+                read_only=read_only,
+                git_backend=_HistoryGitBackend() if git_enabled else None,
+            )
+        )
+        response = TestClient(app).get(
+            "/ui/history/hello.md", params={"revision": revision}
+        )
+
+        assert response.status_code == 200
+        assert ('href="/ui/edit/hello.md"' in response.text) is (not read_only)
+        assert 'href="/ui/browse/hello.md"' in response.text
+        assert 'class="mode-tab active" href="/ui/history/hello.md"' in response.text
+
     def test_stash_folder_and_file_history(self):
         with TemporaryDirectory() as tmpdir:
             fs = FileSystem(Path(tmpdir))
