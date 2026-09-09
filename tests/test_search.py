@@ -837,6 +837,7 @@ class TestSearchConfig:
         assert Config.SEARCH_INDEX_DIR == Path("/data/.stash-index")
         # Default local backend is ONNX Runtime (fastembed), not torch
         assert Config.SEARCH_EMBEDDER_MODEL == "onnx:BAAI/bge-small-en-v1.5"
+        assert Config.SEARCH_ONNX_BATCH_SIZE == 32
         assert Config.CONTEXTUAL_RETRIEVAL is False
         assert Config.CONTEXTUAL_MODEL == "claude-haiku-4-5-20251001"
         assert Config.SEARCH_CHUNK_SIZE == 1000
@@ -866,6 +867,7 @@ class TestSearchConfig:
         monkeypatch.setattr(Config, "SEARCH_EMBEDDER_MODEL", "onnx:test-model")
         monkeypatch.setattr(Config, "MODEL_CACHE_DIR", tmp_path / "models")
         monkeypatch.setattr(Config, "SEARCH_ONNX_THREADS", 3)
+        monkeypatch.setattr(Config, "SEARCH_ONNX_BATCH_SIZE", 7)
         monkeypatch.setattr(Config, "SEARCH_QUERY_PREFIX", "q: ")
         monkeypatch.setattr(Config, "SEARCH_DOCUMENT_PREFIX", "d: ")
         monkeypatch.setattr(Config, "SEARCH_HEADING_CONTEXT", False)
@@ -882,6 +884,7 @@ class TestSearchConfig:
         assert captured["embedder_model"] == "onnx:test-model"
         assert captured["model_cache_dir"] == tmp_path / "models"
         assert captured["onnx_threads"] == 3
+        assert captured["onnx_batch_size"] == 7
         assert captured["query_prefix"] == "q: "
         assert captured["document_prefix"] == "d: "
         assert captured["heading_context"] is False
@@ -1809,6 +1812,15 @@ class TestOnnxBackendWiring:
             embedder_model=self.ONNX_MODEL,
         )
         assert engine._embed_fn.cache_dir is None
+
+    def test_onnx_batch_size_is_passed_to_adapter(self, fake_fastembed, tmp_path):
+        engine = SearchEngine(
+            content_dir=tmp_path / "content",
+            index_dir=tmp_path / "index",
+            embedder_model=self.ONNX_MODEL,
+            onnx_batch_size=7,
+        )
+        assert engine._embed_fn.batch_size == 7
 
     def test_unknown_onnx_model_fails_at_construction(self, fake_fastembed, tmp_path):
         with pytest.raises(ValueError, match="not-a-model"):

@@ -30,6 +30,7 @@ ONNX_PREFIX = "onnx:"
 DEFAULT_ONNX_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_EMBEDDER_MODEL = f"{ONNX_PREFIX}{DEFAULT_ONNX_MODEL}"
 MINILM_ONNX_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_ONNX_BATCH_SIZE = 32
 # Best accuracy-per-megabyte of fastembed's cross-encoders on the corpora
 # measured here (~120 MB). The L-6 variant is 80 MB and ~2x faster but scored
 # no better than not reranking at all; jina's tiny/turbo rerankers are a
@@ -191,6 +192,9 @@ class FastEmbedAdapter:
         cache_dir: Directory for downloaded model files. Created if missing;
             if it cannot be used, fastembed's default cache is used instead.
         threads: onnxruntime intra/inter-op thread count (None = library default).
+        batch_size: Maximum documents per FastEmbed inference batch. The
+            bounded default avoids retaining the library's much larger
+            256-document workspace after bulk indexing.
         max_tokens: Truncation limit applied after loading. Defaults to a
             per-model correction table (see ``_KNOWN_MAX_TOKENS``); pass an int
             to force a value, or leave None for models not in the table to keep
@@ -211,6 +215,7 @@ class FastEmbedAdapter:
         *,
         cache_dir: Path | str | None = None,
         threads: int | None = None,
+        batch_size: int = DEFAULT_ONNX_BATCH_SIZE,
         max_tokens: int | None = None,
         query_prefix: str | None = None,
         document_prefix: str | None = None,
@@ -219,6 +224,9 @@ class FastEmbedAdapter:
         self.model_name = model_name
         self.cache_dir = _resolve_cache_dir(cache_dir)
         self.threads = threads
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        self.batch_size = batch_size
         self.max_tokens = (
             max_tokens
             if max_tokens is not None
@@ -341,7 +349,10 @@ class FastEmbedAdapter:
         if prefix:
             texts = [f"{prefix}{text}" for text in texts]
         model = self._get_model()
-        return [vector.tolist() for vector in model.embed(texts)]
+        return [
+            vector.tolist()
+            for vector in model.embed(texts, batch_size=self.batch_size)
+        ]
 
     async def __call__(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts* as documents in a worker thread, one vector per text."""

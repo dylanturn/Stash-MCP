@@ -347,6 +347,8 @@ Local model files are downloaded on first use into `STASH_MODEL_CACHE_DIR` (defa
 
 Set `STASH_SEARCH_ONNX_THREADS` (e.g. `2`) to cap onnxruntime's thread pool when the container runs under a CPU limit — by default onnxruntime sizes it from the host's core count.
 
+Set `STASH_SEARCH_ONNX_BATCH_SIZE` to cap documents per FastEmbed inference batch (default `32`). Smaller batches reduce peak and retained ONNX Runtime workspace during bulk indexing, with a possible throughput tradeoff.
+
 > **CPU requirement:** numpy ≥ 2.4 wheels are built for the x86-64-v2 baseline (SSE4.2/POPCNT). On Proxmox/QEMU VMs using the generic `kvm64` CPU type the process dies with `Illegal instruction` when search is enabled, whichever backend you pick — use CPU type `host` (or `x86-64-v2-AES`) for the VM.
 
 ### How Search Works
@@ -467,6 +469,7 @@ Environment variables:
 | `STASH_SEARCH_EMBEDDER_MODEL` | Embedder model string (`onnx:`, `openai:`, `cohere:`, `sentence-transformers:` prefix selects the backend) | `onnx:BAAI/bge-small-en-v1.5` |
 | `STASH_MODEL_CACHE_DIR` | Cache directory for locally downloaded model weights | `/data/models` |
 | `STASH_SEARCH_ONNX_THREADS` | onnxruntime thread count for the `onnx:` backend | *(onnxruntime default)* |
+| `STASH_SEARCH_ONNX_BATCH_SIZE` | Maximum documents per FastEmbed inference batch | `32` |
 | `STASH_SEARCH_QUERY_PREFIX` | Instruction prepended to queries (`""` to disable) | *(model default)* |
 | `STASH_SEARCH_DOCUMENT_PREFIX` | Instruction prepended to documents (`""` to disable) | *(model default)* |
 | `STASH_SEARCH_HEADING_CONTEXT` | Also embed the `path > heading` breadcrumb (always recorded, returned and BM25-indexed regardless) | `true` |
