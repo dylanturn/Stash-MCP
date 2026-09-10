@@ -78,6 +78,7 @@ def _create_search_engine(filesystem: FileSystem):
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
             model_cache_dir=Config.MODEL_CACHE_DIR,
             onnx_threads=Config.SEARCH_ONNX_THREADS,
+            onnx_batch_size=Config.SEARCH_ONNX_BATCH_SIZE,
             query_prefix=Config.SEARCH_QUERY_PREFIX,
             document_prefix=Config.SEARCH_DOCUMENT_PREFIX,
             chunk_size=Config.SEARCH_CHUNK_SIZE,

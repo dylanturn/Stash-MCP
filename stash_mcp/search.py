@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .embedders import (
     DEFAULT_EMBEDDER_MODEL,
+    DEFAULT_ONNX_BATCH_SIZE,
     DEFAULT_RERANK_MODEL,
     ONNX_PREFIX,
     FastEmbedAdapter,
@@ -1082,6 +1083,7 @@ class SearchEngine:
         embed_fn=None,
         model_cache_dir: Path | str | None = None,
         onnx_threads: int | None = None,
+        onnx_batch_size: int = DEFAULT_ONNX_BATCH_SIZE,
         query_prefix: str | None = None,
         document_prefix: str | None = None,
         filesystem=None,
@@ -1128,6 +1130,9 @@ class SearchEngine:
                 ``onnx:`` backend (``STASH_SEARCH_ONNX_THREADS``). None keeps
                 onnxruntime's default (one thread per host core, which can
                 oversubscribe under container CPU limits).
+            onnx_batch_size: Maximum documents per FastEmbed inference batch
+                (``STASH_SEARCH_ONNX_BATCH_SIZE``). Smaller batches bound the
+                ONNX Runtime workspace retained after bulk indexing.
             query_prefix: Instruction prepended to queries for the ``onnx:``
                 backend (``STASH_SEARCH_QUERY_PREFIX``). None uses the model's
                 documented prefix; ``""`` forces none.
@@ -1246,6 +1251,7 @@ class SearchEngine:
                 onnx_model_name(embedder_model),
                 cache_dir=cache_dir,
                 threads=onnx_threads,
+                batch_size=onnx_batch_size,
                 query_prefix=query_prefix,
                 document_prefix=document_prefix,
             )

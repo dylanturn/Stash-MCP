@@ -376,6 +376,7 @@ Semantic search is **disabled by default**. To enable:
 - `STASH_SEARCH_EMBEDDER_MODEL` — Embedder model string (default: `onnx:BAAI/bge-small-en-v1.5`), see below
 - `STASH_MODEL_CACHE_DIR` — Where locally downloaded model weights are cached (default: `/data/models`; mount a volume there so the download happens once)
 - `STASH_SEARCH_ONNX_THREADS` — onnxruntime thread count for the `onnx:` backend (default: onnxruntime's, one per host core; set e.g. `2` under container CPU limits)
+- `STASH_SEARCH_ONNX_BATCH_SIZE` — Maximum documents per FastEmbed inference batch (default: `32`; lower values reduce bulk-index memory at some throughput cost)
 - `STASH_SEARCH_HYBRID_ENABLED` — Fuse BM25 keyword matching with vector search (default: on when `bm25s` is installed — the `search`, `search-contextual` and `search-hybrid` extras include it; the API-provider and torch extras do not)
 - `STASH_SEARCH_HEADING_CONTEXT` — Also fold each chunk's `path > heading > subheading` breadcrumb into the embedded text (default: `true`; set `false` for collections under roughly a hundred documents — see [Breadcrumbs](#breadcrumbs))
 - `STASH_SEARCH_RERANK_ENABLED` — Rescore the top results with a cross-encoder (default: `false`, see [Reranking](#reranking))
@@ -522,6 +523,7 @@ What is collected:
 | `STASH_SEARCH_EMBEDDER_MODEL` | `onnx:BAAI/bge-small-en-v1.5` | Embedder model: `onnx:` (local, ONNX Runtime), `openai:`, `cohere:`, or `sentence-transformers:` (local, PyTorch; needs `search-torch`) |
 | `STASH_MODEL_CACHE_DIR` | `/data/models` | Cache for locally downloaded model weights (`onnx:` models go in a `fastembed/` subdir) |
 | `STASH_SEARCH_ONNX_THREADS` | — | onnxruntime thread count for the `onnx:` backend (default: one per host core; set under container CPU limits) |
+| `STASH_SEARCH_ONNX_BATCH_SIZE` | `32` | Maximum documents per FastEmbed inference batch; bounds memory retained after bulk indexing |
 | `STASH_SEARCH_QUERY_PREFIX` | *(model default)* | Instruction prepended to queries; `""` disables |
 | `STASH_SEARCH_DOCUMENT_PREFIX` | *(model default)* | Instruction prepended to documents; `""` disables |
 | `STASH_SEARCH_HEADING_CONTEXT` | `true` | Also embed each chunk's `path > heading` breadcrumb (always recorded, returned and BM25-indexed regardless) |

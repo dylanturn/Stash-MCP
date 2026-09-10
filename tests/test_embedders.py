@@ -180,6 +180,20 @@ class TestFastEmbedAdapter:
         assert init["cache_dir"] is None
         assert init["threads"] is None
 
+    async def test_bounds_fastembed_batch_size_by_default(self, fake_fastembed):
+        adapter = FastEmbedAdapter(MINILM)
+        await adapter(["a", "b"])
+        assert fake_fastembed.calls["embed_batch_sizes"] == [32]
+
+    async def test_passes_explicit_batch_size(self, fake_fastembed):
+        adapter = FastEmbedAdapter(MINILM, batch_size=7)
+        await adapter(["a", "b"])
+        assert fake_fastembed.calls["embed_batch_sizes"] == [7]
+
+    def test_rejects_nonpositive_batch_size(self, fake_fastembed):
+        with pytest.raises(ValueError, match="batch_size must be positive"):
+            FastEmbedAdapter(MINILM, batch_size=0)
+
     async def test_unusable_cache_dir_falls_back_with_warning(
         self, fake_fastembed, tmp_path, caplog
     ):
