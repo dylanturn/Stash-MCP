@@ -24,6 +24,7 @@ from .embedders import (
     is_onnx_model,
     onnx_model_name,
 )
+from .search_probes import QUESTION_PROBES, TEXT_PROBES
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,27 @@ _PYDANTIC_AI_EXTRAS = {
     "cohere": "search-cohere",
     "sentence-transformers": "search-torch",
 }
+
+
+# Probe sets behind SearchEngine.noise_floor, by kind of input.
+NOISE_FLOOR_PROBES = {"question": QUESTION_PROBES, "text": TEXT_PROBES}
+
+# How many robust standard deviations above the probes' median best match the
+# noise floor sits. Measured on a 347-document store with the probes held out
+# in halves: at 1.75, unrelated input cleared the floor in 0/40 (questions)
+# and 0/18 (text) cases on bge-small-en-v1.5 and in 1/40 and 1/18 on
+# all-MiniLM-L6-v2, while 1/56 covered questions and 1-2/15 covered text
+# inputs fell below it. 1.5 let more unrelated input through; 2.0 began
+# rejecting real matches (4/56 questions on bge-small).
+NOISE_FLOOR_SIGMAS = 1.75
+
+
+def _median(ordered: list[float]) -> float:
+    """Median of an already-sorted, non-empty list."""
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
 
 
 def _normalize_path(path: str) -> str:
@@ -77,6 +99,10 @@ class SearchResult:
     last_changed_at: str | None = None
     changed_by: str | None = None
     commit_message: str | None = None
+    # Cosine similarity between the query and this chunk. Unlike ``score`` it
+    # means the same thing across queries, so it can be held against
+    # ``SearchEngine.noise_floor`` to tell a real match from a nearest neighbour.
+    similarity: float | None = None
 
 
 class VectorStore:
@@ -99,11 +125,15 @@ class VectorStore:
         # access, invalidated together on any mutation.
         self._meta_index_cache: dict[tuple[str, int], dict] | None = None
         self._pos_index_cache: dict[tuple[str, int], int] | None = None
+        # Bumped on every mutation, so anything derived from the vectors can
+        # tell whether it is still current.
+        self.generation = 0
         self._load()
 
     def _invalidate_caches(self) -> None:
         self._meta_index_cache = None
         self._pos_index_cache = None
+        self.generation += 1
 
     @property
     def metadata_index(self) -> dict[tuple[str, int], dict]:
@@ -476,6 +506,51 @@ class VectorStore:
             item["score"] = float(relevance_by_candidate[p])
             out.append(item)
         return out
+
+    def cosine_similarities(
+        self, query_embedding: list[float], keys: list[tuple[str, int]]
+    ) -> list[float | None]:
+        """Cosine similarity between the query and each named chunk.
+
+        Args:
+            query_embedding: The query embedding vector.
+            keys: ``(file_path, chunk_index)`` of the chunks to score.
+
+        Returns:
+            One similarity per key, None where the chunk is not in the store.
+        """
+        if not keys or self._vectors is None or len(self._vectors) == 0:
+            return [None] * len(keys)
+
+        import numpy as np
+
+        query = np.array(query_embedding, dtype=np.float32)
+        query_norm = np.linalg.norm(query)
+        if query_norm == 0:
+            return [None] * len(keys)
+        index = self.vector_index
+        positions = [index.get(key) for key in keys]
+        found = [pos for pos in positions if pos is not None]
+        if not found:
+            return [None] * len(keys)
+        rows = self._vectors[found]
+        norms = np.maximum(np.linalg.norm(rows, axis=1), 1e-10)
+        scored = iter((rows @ (query / query_norm)) / norms)
+        return [float(next(scored)) if pos is not None else None for pos in positions]
+
+    def best_similarities(self, query_embeddings: list[list[float]]) -> list[float]:
+        """Highest cosine similarity in the store for each query embedding."""
+        if not query_embeddings or self._vectors is None or len(self._vectors) == 0:
+            return []
+
+        import numpy as np
+
+        queries = np.array(query_embeddings, dtype=np.float32)
+        queries = queries / np.maximum(
+            np.linalg.norm(queries, axis=1, keepdims=True), 1e-10
+        )
+        norms = np.maximum(np.linalg.norm(self._vectors, axis=1, keepdims=True), 1e-10)
+        return [float(v) for v in ((self._vectors / norms) @ queries.T).max(axis=0)]
 
     def clear(self) -> None:
         """Remove all vectors and metadata."""
@@ -1301,6 +1376,10 @@ class SearchEngine:
         self._ready = self.store.count > 0
         self._indexing = False
         self._lock = asyncio.Lock()
+        # Noise-floor state: probe embeddings depend only on the model, the
+        # floor itself on the corpus (see noise_floor).
+        self._probe_embeddings: dict[str, list[list[float]]] = {}
+        self._noise_floors: dict[str, tuple[int, float]] = {}
 
     @property
     def embedder_fingerprint(self) -> str:
@@ -1814,6 +1893,7 @@ class SearchEngine:
         *,
         max_results: int = 5,
         file_types: list[str] | None = None,
+        min_similarity: float | None = None,
     ) -> list[SearchResult]:
         """Search for relevant content.
 
@@ -1821,6 +1901,10 @@ class SearchEngine:
             query: Search query text.
             max_results: Maximum number of results.
             file_types: Optional list of file extensions to filter (e.g. [".md", ".py"]).
+            min_similarity: Drop results whose query-to-chunk cosine similarity
+                is below this, so a query the store has nothing on returns
+                nothing instead of its nearest neighbours. ``noise_floor``
+                gives a threshold measured for this index.
 
         Returns:
             List of SearchResult sorted by relevance.
@@ -1901,6 +1985,29 @@ class SearchEngine:
             else:
                 raw_results = self.store.search(query_embedding, top_n=fetch_n)
 
+            # ``score`` is whatever this path ranked on — normalised fusion,
+            # later a cross-encoder logit or a recency blend — and none of
+            # those say whether the best hit is any good. The cosine does, so
+            # carry it alongside from here on.
+            similarities = self.store.cosine_similarities(
+                query_embedding,
+                [
+                    (r.get("file_path", ""), int(r.get("chunk_index", 0)))
+                    for r in raw_results
+                ],
+            )
+            raw_results = [
+                {**r, "similarity": similarity}
+                for r, similarity in zip(raw_results, similarities)
+            ]
+
+        if min_similarity is not None:
+            raw_results = [
+                r
+                for r in raw_results
+                if r["similarity"] is not None and r["similarity"] >= min_similarity
+            ]
+
         if file_types:
             raw_results = [
                 r
@@ -1980,6 +2087,7 @@ class SearchEngine:
                     content=r.get("content", ""),
                     context=r.get("context"),
                     score=r.get("score", 0.0),
+                    similarity=r.get("similarity"),
                 )
             )
             if len(results) >= max_results:
@@ -2003,6 +2111,62 @@ class SearchEngine:
                     await self._enrich_with_blame(result, blame_lines)
 
         return results
+
+    async def noise_floor(self, kind: str = "question") -> float | None:
+        """Similarity that input unrelated to this store still reaches.
+
+        A raw cosine cannot be read on its own: its scale belongs to the
+        embedding model (unrelated text scores ~0.65 on bge-small, ~0.25 on
+        MiniLM) and shifts with the corpus and with the shape of the input. So
+        the floor is measured rather than configured — a fixed set of probes on
+        subjects no one store is likely to hold is run against the index, and
+        the floor is a robust upper bound on their best matches: the median
+        plus ``NOISE_FLOOR_SIGMAS`` robust standard deviations (1.4826 x MAD).
+        Median-based because a store will be on-topic for a few of the probes,
+        and a mean would let those few drag the floor above real matches.
+
+        A result at or above the floor matches better than unrelated input
+        does; one below it is a nearest neighbour, not evidence the store
+        covers the query.
+
+        Args:
+            kind: ``"question"`` for natural-language queries, ``"text"`` for
+                raw working text (command output, logs, diffs, source), which
+                sits on a higher baseline.
+
+        Returns:
+            The floor, or None while the index is empty.
+
+        Raises:
+            ValueError: If *kind* is not one of the above.
+        """
+        probes = NOISE_FLOOR_PROBES.get(kind)
+        if probes is None:
+            raise ValueError(
+                f"Unknown noise floor kind {kind!r}; expected one of: "
+                f"{', '.join(sorted(NOISE_FLOOR_PROBES))}"
+            )
+        if self.store.count == 0:
+            return None
+
+        embeddings = self._probe_embeddings.get(kind)
+        if embeddings is None:
+            embeddings = [await self._embed_query(probe) for probe in probes]
+            self._probe_embeddings[kind] = embeddings
+
+        async with self._lock:
+            generation = self.store.generation
+            cached = self._noise_floors.get(kind)
+            if cached is not None and cached[0] == generation:
+                return cached[1]
+            tops = sorted(self.store.best_similarities(embeddings))
+        if not tops:
+            return None
+        median = _median(tops)
+        spread = _median(sorted(abs(t - median) for t in tops))
+        floor = median + NOISE_FLOOR_SIGMAS * 1.4826 * spread
+        self._noise_floors[kind] = (generation, floor)
+        return floor
 
     def _decide_rerank_scores(self, results: list[dict]) -> list[float]:
         """Scores the skip decision looks at (separated out for testing)."""
