@@ -147,6 +147,8 @@ def _create_search_engine():
             rerank_model=Config.SEARCH_RERANK_MODEL,
             rerank_candidates=Config.SEARCH_RERANK_CANDIDATES,
             rerank_margin=Config.SEARCH_RERANK_MARGIN,
+            noise_floor_question=Config.SEARCH_NOISE_FLOOR,
+            noise_floor_text=Config.SEARCH_NOISE_FLOOR_TEXT,
         )
         logger.info(
             f"Search engine initialised (model={Config.SEARCH_EMBEDDER_MODEL}, "

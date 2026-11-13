@@ -482,6 +482,8 @@ Measured on a 347-document store with `bge-small-en-v1.5` (floors 0.715 for ques
 | tool output on covered subjects | 14 / 15 |
 | tool output on unrelated subjects | 0 / 18 |
 
+The probes are English and span common subjects, so the measured floor will be off for a non-English store or one that covers many of those subjects. `STASH_SEARCH_NOISE_FLOOR` and `STASH_SEARCH_NOISE_FLOOR_TEXT` replace the measured value with a fixed one for those cases; a fixed value has to be re-chosen whenever the embedding model changes.
+
 The unrelated inputs are the probes themselves; with the floor computed from one half and tested on the other, 0 / 40 and 0 / 18 cleared it (1 / 40 and 1 / 18 on `all-MiniLM-L6-v2`). The tool-output cases are synthetic, so treat the text floor as a starting point: a caller that must not interrupt can add a margin through `min_similarity`. Only the first ~512 tokens of a long input are embedded, so pass the relevant part rather than a whole log.
 
 When search is enabled, the server exposes:
@@ -557,6 +559,8 @@ What is collected:
 | `STASH_SEARCH_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-12-v2` | Cross-encoder used for reranking |
 | `STASH_SEARCH_RERANK_CANDIDATES` | `10` | How many results to rescore |
 | `STASH_SEARCH_RERANK_MARGIN` | `0.1` | Rerank only when the top two scores are this close; `0` = always |
+| `STASH_SEARCH_NOISE_FLOOR` | — | Similarity floor for questions (default: measured from the index) |
+| `STASH_SEARCH_NOISE_FLOOR_TEXT` | — | Similarity floor for `input_type=text` (default: measured from the index) |
 | `STASH_CONTEXTUAL_RETRIEVAL` | `false` | Enable Claude-powered contextual chunk enrichment |
 | `STASH_CONTEXTUAL_MODEL` | `claude-haiku-4-5-20251001` | Model for contextual retrieval |
 | `ANTHROPIC_API_KEY` | — | Required when contextual retrieval is enabled |

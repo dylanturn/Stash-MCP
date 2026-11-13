@@ -1180,6 +1180,8 @@ class SearchEngine:
         rerank_candidates: int = 10,
         rerank_margin: float = 0.1,
         reranker=None,
+        noise_floor_question: float | None = None,
+        noise_floor_text: float | None = None,
     ):
         """Initialize the search engine.
 
@@ -1377,7 +1379,16 @@ class SearchEngine:
         self._indexing = False
         self._lock = asyncio.Lock()
         # Noise-floor state: probe embeddings depend only on the model, the
-        # floor itself on the corpus (see noise_floor).
+        # floor itself on the corpus (see noise_floor). A configured floor
+        # replaces the measured one for that kind of input.
+        self._noise_floor_overrides = {
+            kind: floor
+            for kind, floor in (
+                ("question", noise_floor_question),
+                ("text", noise_floor_text),
+            )
+            if floor is not None
+        }
         self._probe_embeddings: dict[str, list[list[float]]] = {}
         self._noise_floors: dict[str, tuple[int, float]] = {}
 
@@ -2135,7 +2146,9 @@ class SearchEngine:
                 sits on a higher baseline.
 
         Returns:
-            The floor, or None while the index is empty.
+            The configured floor for *kind* if there is one
+            (``STASH_SEARCH_NOISE_FLOOR`` / ``_TEXT``); otherwise the measured
+            floor, or None while the index is empty.
 
         Raises:
             ValueError: If *kind* is not one of the above.
@@ -2146,6 +2159,8 @@ class SearchEngine:
                 f"Unknown noise floor kind {kind!r}; expected one of: "
                 f"{', '.join(sorted(NOISE_FLOOR_PROBES))}"
             )
+        if kind in self._noise_floor_overrides:
+            return self._noise_floor_overrides[kind]
         if self.store.count == 0:
             return None
 

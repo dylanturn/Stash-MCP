@@ -232,6 +232,28 @@ class TestNoiseFloor:
         assert after > before
         assert calls == 0
 
+    async def test_a_configured_floor_replaces_the_measured_one(self, tmp_path):
+        """The escape hatch for a store the probes do not suit (a non-English
+        corpus, or one that covers many of the probe subjects)."""
+        calls = 0
+
+        async def counting_embed(texts):
+            nonlocal calls
+            calls += len(texts)
+            return await topic_embed(texts)
+
+        engine = await _engine(
+            tmp_path, embed_fn=counting_embed, noise_floor_question=0.42
+        )
+        measured = await _engine(tmp_path)
+        calls = 0
+        assert await engine.noise_floor("question") == 0.42
+        assert calls == 0  # nothing to measure, so no probes are embedded
+        # Each kind is overridden on its own; the other is still measured.
+        assert await engine.noise_floor("text") == pytest.approx(
+            await measured.noise_floor("text")
+        )
+
     async def test_a_plain_search_does_not_embed_the_probes(self, tmp_path):
         calls = 0
 
