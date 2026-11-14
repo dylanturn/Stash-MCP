@@ -1390,6 +1390,7 @@ class SearchEngine:
             if floor is not None
         }
         self._probe_embeddings: dict[str, list[list[float]]] = {}
+        self._probe_locks = {kind: asyncio.Lock() for kind in NOISE_FLOOR_PROBES}
         self._noise_floors: dict[str, tuple[int, float]] = {}
 
     @property
@@ -2166,8 +2167,15 @@ class SearchEngine:
 
         embeddings = self._probe_embeddings.get(kind)
         if embeddings is None:
-            embeddings = [await self._embed_query(probe) for probe in probes]
-            self._probe_embeddings[kind] = embeddings
+            # Single-flight per kind: searches that arrive while the first is
+            # still embedding wait for its result instead of each paying for
+            # the whole probe set. A lock of its own, so the index lock is
+            # never held across a (possibly remote) embedding call.
+            async with self._probe_locks[kind]:
+                embeddings = self._probe_embeddings.get(kind)
+                if embeddings is None:
+                    embeddings = [await self._embed_query(probe) for probe in probes]
+                    self._probe_embeddings[kind] = embeddings
 
         async with self._lock:
             generation = self.store.generation

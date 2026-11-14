@@ -232,6 +232,40 @@ class TestNoiseFloor:
         assert after > before
         assert calls == 0
 
+    async def test_overlapping_first_calls_embed_the_probes_once(self, tmp_path):
+        """Several searches can arrive before the first has finished embedding
+        the probes; on a remote embedder each duplicate set is paid for."""
+        calls = 0
+
+        async def yielding_embed(texts):
+            nonlocal calls
+            calls += len(texts)
+            await asyncio.sleep(0)  # let the other callers run, as real I/O would
+            return await topic_embed(texts)
+
+        engine = await _engine(tmp_path, embed_fn=yielding_embed)
+        calls = 0
+        floors = await asyncio.gather(
+            *(engine.noise_floor("question") for _ in range(4))
+        )
+        assert calls == len(QUESTION_PROBES)
+        assert len(set(floors)) == 1
+
+    async def test_a_failed_probe_embedding_is_retried_by_the_next_call(self, tmp_path):
+        fail = False
+
+        async def flaky_embed(texts):
+            if fail:
+                raise RuntimeError("rate limited")
+            return await topic_embed(texts)
+
+        engine = await _engine(tmp_path, embed_fn=flaky_embed)
+        fail = True
+        with pytest.raises(RuntimeError, match="rate limited"):
+            await engine.noise_floor("question")
+        fail = False
+        assert await engine.noise_floor("question") is not None
+
     async def test_a_configured_floor_replaces_the_measured_one(self, tmp_path):
         """The escape hatch for a store the probes do not suit (a non-English
         corpus, or one that covers many of the probe subjects)."""
