@@ -1331,11 +1331,16 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             instead — it returns every match up to max_results (see the
             truncated flag) rather than a ranked top-k.
 
-            Results are ranked best-first. The score is a relative relevance
-            signal, comparable only within one result set — its scale depends
-            on the server's retrieval configuration and it can be negative
-            when cross-encoder reranking is enabled. Rank order is what
-            carries meaning, not the absolute number.
+            Results are ranked best-first, and a search always returns its
+            nearest neighbours — even for a question the store has nothing
+            on. Each result therefore shows its similarity to the query, and
+            is marked "below noise floor" when it matches no better than
+            unrelated text does on this server. When every result is below
+            the floor the output opens with "No close match": treat that as
+            "the store does not cover this", not as an answer to read.
+            Similarity is comparable across queries on one server; its scale
+            depends on the embedding model, so judge it by the floor rather
+            than by the raw number.
 
             Args:
                 query: Natural language search query
@@ -1343,7 +1348,8 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 file_types: Optional comma-separated file extensions
                     (e.g. ".md,.py")
             Returns:
-                Search results formatted as a string
+                Search results formatted as a string; each result shows the
+                path, its similarity and a snippet
             """
             types_list = None
             if file_types:
@@ -1365,9 +1371,26 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             if not results:
                 return "No results found."
 
+            floor = await search_engine.noise_floor("question")
+            similarities = [r.similarity for r in results if r.similarity is not None]
             lines = []
+            if floor is not None and similarities and max(similarities) < floor:
+                lines.append(
+                    f"No close match: the best similarity here "
+                    f"({max(similarities):.2f}) is below this index's noise floor "
+                    f"({floor:.2f}), the level unrelated queries reach. These are "
+                    f"nearest neighbours, not answers — rephrase the query, or use "
+                    f"find_content for a literal string."
+                )
+                lines.append("")
             for r in results:
-                lines.append(f"📄 {r.file_path} (score: {r.score:.2f})")
+                if r.similarity is None:
+                    relevance = "similarity unknown"
+                elif floor is not None and r.similarity < floor:
+                    relevance = f"similarity {r.similarity:.2f}, below noise floor"
+                else:
+                    relevance = f"similarity {r.similarity:.2f}"
+                lines.append(f"📄 {r.file_path} ({relevance})")
                 if r.context:
                     lines.append(f"   Context: {r.context}")
                 if r.last_changed_at:
