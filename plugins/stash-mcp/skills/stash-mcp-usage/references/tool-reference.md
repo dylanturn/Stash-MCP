@@ -60,6 +60,15 @@ edit_content(path, sha, edits) → succeeds if sha matches current file
 
 Create a new file. **Fails if the file already exists** — this is intentional to prevent accidental overwrites. Use `overwrite_content` or `edit_content` for existing files.
 
+### upload_content(path, data_base64, sha?)
+
+Store a file of any type (image, PDF, archive, text) from base64-encoded bytes, byte-for-byte. Use it for binaries; use `create_content` for text you are writing yourself.
+
+- Without `sha` it creates the file and **fails if the file already exists**
+- To replace an existing file, pass the `sha` returned by the upload that wrote it — this is the SHA-256 of the raw bytes, not the `read_content` sha
+- Returns `path`, `created`, `size_bytes`, `mime_type`, and `sha`
+- Size is capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB of decoded bytes)
+
 ### edit_content(file_path, sha, edits[]) / edit_content_batch(edit_operations[])
 
 Apply targeted string-replacement edits. The preferred tool for modifying existing files.
@@ -102,7 +111,7 @@ Rename or relocate files and directories.
 
 ## Transactions
 
-When git tracking is enabled and the server is not in read-only mode, **every write tool requires an active transaction owned by the calling session**. The gated set is `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. This applies equally to single-file edits and multi-file changes — any of these without an active transaction raises:
+When git tracking is enabled and the server is not in read-only mode, **every write tool requires an active transaction owned by the calling session**. The gated set is `create_content`, `upload_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. This applies equally to single-file edits and multi-file changes — any of these without an active transaction raises:
 
 > `TransactionError: No active transaction. Call start_content_transaction first.`
 

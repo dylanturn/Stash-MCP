@@ -103,7 +103,7 @@ Stash exposes 21+ tools across five categories. Not all are always available —
 |----------|-------|-----------------|
 | Discovery | `list_content`, `inspect_content_structure(_batch)`, `search_content` | list/inspect yes, search conditional |
 | Reading | `read_content(_batch)` | Yes |
-| Writing | `create_content`, `edit_content(_batch)`, `overwrite_content`, `delete_content`, `move_content(_batch/_directory)` | Only when not read-only |
+| Writing | `create_content`, `upload_content`, `edit_content(_batch)`, `overwrite_content`, `delete_content`, `move_content(_batch/_directory)` | Only when not read-only |
 | Transactions | `start_content_transaction`, `commit_content_transaction`, `abort_content_transaction`, `list_content_transactions` | Only with git tracking enabled |
 | Git History | `log_content`, `diff_content`, `blame_content` | Only with git tracking enabled |
 
@@ -135,7 +135,7 @@ Use `overwrite_content` only when regenerating an entire file from scratch.
 
 ### 3. Transactions Wrap Every Write (when git tracking is on)
 
-When the server has git tracking enabled, every write tool requires an active transaction owned by your session — `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory` are all gated. Calling any of them without an active transaction raises:
+When the server has git tracking enabled, every write tool requires an active transaction owned by your session — `create_content`, `upload_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory` are all gated. Calling any of them without an active transaction raises:
 
 > `TransactionError: No active transaction. Call start_content_transaction first.`
 

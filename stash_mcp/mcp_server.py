@@ -1,10 +1,13 @@
 """MCP Server implementation for Stash using FastMCP."""
 
 import asyncio
+import base64
+import binascii
 import functools
 import hashlib
 import inspect
 import logging
+import mimetypes
 import re
 import time
 from collections.abc import AsyncIterator
@@ -111,7 +114,8 @@ def _build_instructions(
             "get its sha, then edit_content (targeted string replacement, preferred "
             "for small changes) or overwrite_content (full replace). create_content "
             "is only for files that do not exist yet; delete_content also requires "
-            "the sha."
+            "the sha. upload_content stores base64-encoded bytes as-is, for "
+            "images, PDFs and other binary files."
         )
     if transactions_active:
         parts.append(
@@ -288,6 +292,48 @@ def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
         else:
             content = content.replace(edit.old_string, edit.new_string, 1)
     return content
+
+
+def _upload_mime_type(path: str) -> str:
+    """MIME type for an uploaded file; unknown types are binary, not text."""
+    suffix = PurePosixPath(path).suffix.lower()
+    return (
+        MIME_TYPES.get(suffix)
+        or mimetypes.guess_type(path)[0]
+        or "application/octet-stream"
+    )
+
+
+_DATA_URL_RE = re.compile(r"^data:[^,]*;base64,", re.IGNORECASE)
+
+
+def _decode_upload(data_base64: str, max_bytes: int) -> bytes:
+    """Decode an upload payload, enforcing strict base64 and a size cap.
+
+    Accepts standard or URL-safe base64, tolerates embedded whitespace and a
+    leading ``data:<mime>;base64,`` prefix, and rejects anything else rather
+    than silently dropping invalid characters.
+    """
+    payload = _DATA_URL_RE.sub("", data_base64.strip(), count=1)
+    payload = "".join(payload.split())
+    # Cheap pre-check so an oversized payload is rejected before decoding.
+    if len(payload) // 4 * 3 > max_bytes + 2:
+        raise ValueError(
+            f"Upload exceeds the {max_bytes}-byte limit (STASH_MAX_UPLOAD_BYTES)."
+        )
+    if "-" in payload or "_" in payload:
+        payload = payload.replace("-", "+").replace("_", "/")
+    payload += "=" * (-len(payload) % 4)
+    try:
+        data = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"data_base64 is not valid base64: {e}") from None
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"Upload is {len(data)} bytes, over the {max_bytes}-byte limit "
+            "(STASH_MAX_UPLOAD_BYTES)."
+        )
+    return data
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
@@ -532,6 +578,96 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             emit(CONTENT_CREATED, path)
             logger.info(f"Created: {path}")
             return f"Created: {path}"
+
+        @_write_tool(
+            annotations=ToolAnnotations(
+                title="Upload file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=False,
+                openWorldHint=False,
+            )
+        )
+        async def upload_content(
+            path: ContentPath,
+            data_base64: Annotated[
+                str,
+                Field(
+                    description="File bytes, base64-encoded (standard or URL-safe; a "
+                    "'data:<mime>;base64,' prefix is accepted and stripped)"
+                ),
+            ],
+            ctx: Context,
+            sha: Annotated[
+                str | None,
+                Field(
+                    description="Required only to replace an existing file: SHA-256 "
+                    "hex digest of its current raw bytes, as returned by a previous "
+                    "upload_content. Omit when creating a new file."
+                ),
+            ] = None,
+        ) -> dict:
+            """
+            Upload a file of any type (image, PDF, archive, text) from
+            base64-encoded bytes. The bytes are stored exactly as given.
+
+            Use create_content instead for plain text you are writing yourself;
+            use this tool for binary files or to store an existing file
+            byte-for-byte. Missing parent directories are created
+            automatically.
+
+            Without sha the file must not already exist. To replace an
+            existing file, pass the sha returned when it was last uploaded
+            (the SHA-256 of its raw bytes).
+
+            Args:
+                path: File path relative to content root
+                data_base64: Base64-encoded file content
+                sha: SHA-256 of the existing file's raw bytes, to replace it
+            Returns:
+                A dict with path, created (bool), size_bytes, mime_type, and sha
+                (SHA-256 of the stored bytes)
+            """
+            data = _decode_upload(data_base64, Config.MAX_UPLOAD_BYTES)
+            exists = filesystem.file_exists(path)
+            if exists:
+                if sha is None:
+                    raise ValueError(
+                        f"File already exists: {path}. Pass the sha of its current "
+                        "bytes to replace it."
+                    )
+                current = await asyncio.to_thread(filesystem.read_bytes, path)
+                current_sha = hashlib.sha256(current).hexdigest()
+                if sha != current_sha:
+                    raise ValueError(
+                        f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
+                        "The file may have changed since it was last uploaded."
+                    )
+            elif sha is not None:
+                raise FileNotFoundError(
+                    f"File '{path}' does not exist; omit sha to create it."
+                )
+
+            # Called on the event loop (not to_thread): under transactions the
+            # write gate re-arms the idle timeout with asyncio.create_task.
+            filesystem.write_bytes(path, data)
+            if exists:
+                if _is_resource_file(path):
+                    await ctx.session.send_resource_updated(uri=AnyUrl(f"stash://{path}"))
+                emit(CONTENT_UPDATED, path)
+                logger.info(f"Uploaded (replaced): {path} ({len(data)} bytes)")
+            else:
+                if _register_resource(path):
+                    await ctx.send_resource_list_changed()
+                emit(CONTENT_CREATED, path)
+                logger.info(f"Uploaded: {path} ({len(data)} bytes)")
+            return {
+                "path": path,
+                "created": not exists,
+                "size_bytes": len(data),
+                "mime_type": _upload_mime_type(path),
+                "sha": hashlib.sha256(data).hexdigest(),
+            }
 
         @_write_tool(
             annotations=ToolAnnotations(

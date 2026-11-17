@@ -259,6 +259,7 @@
     { "name": "inspect_content_structure", "description": "Parse markdown heading hierarchy for a file" },
     { "name": "inspect_content_structure_batch", "description": "Parse markdown heading hierarchy for multiple files (max 10)" },
     { "name": "create_content", "description": "Create a new file" },
+    { "name": "upload_content", "description": "Upload a file of any type (images, PDFs, binaries) from base64-encoded bytes" },
     { "name": "overwrite_content", "description": "Replace the full content of an existing file" },
     { "name": "edit_content", "description": "Apply targeted string-replacement edits to a file" },
     { "name": "edit_content_batch", "description": "Atomically apply edits to multiple files" },
