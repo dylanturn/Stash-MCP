@@ -185,7 +185,7 @@ class TestLinkIndex:
         assert reads == ["docs/notes.md"]
 
     def test_hidden_and_filtered_documents_are_not_sources(self, tmp_path):
-        fs = FileSystem(tmp_path, include_patterns=["docs/**"])
+        fs = FileSystem(tmp_path, include_patterns=["docs/**/*.md"])
         fs.write_file("docs/target.md", "# Target")
         fs.write_file("docs/visible.md", "[t](target.md)")
         fs.write_file("docs/.hidden.md", "[t](target.md)")
