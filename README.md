@@ -213,7 +213,7 @@ await client.call_tool("delete_content", {
 })
 ```
 
-`upload_content` stores files of any type (images, PDFs, archives) from base64-encoded bytes, byte-for-byte. It creates new files; to replace one, pass the `sha` it returned (the SHA-256 of the stored bytes). Uploads are capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB):
+`upload_content` stores text documents (Markdown, HTML, JSON, YAML, CSV, SVG and the other text formats the store indexes) and images (PNG, JPEG, GIF, WebP, BMP, ICO) from base64-encoded bytes, byte-for-byte. Anything else is refused: executables, archives, PDFs and compiled code cannot be uploaded. Content must match the extension, so text must be UTF-8 and an image must carry its format's signature; a binary renamed to `.png` or `.md` is rejected. It creates new files; to replace one, pass the `sha` it returned (the SHA-256 of the stored bytes). Uploads are capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB). There is no tool for reading an image's bytes back, so keep that `sha`:
 
 ```python
 import base64
@@ -223,7 +223,14 @@ result = await client.call_tool("upload_content", {
     "data_base64": base64.b64encode(open("diagram.png", "rb").read()).decode()
 })
 # result.data -> {"path": ..., "created": True, "size_bytes": ..., "mime_type": "image/png", "sha": ...}
+
+await client.call_tool("delete_content", {
+    "path": "assets/diagram.png",
+    "sha": result.data["sha"]
+})
 ```
+
+`delete_content` accepts either the `read_content` sha (SHA-256 of the decoded text) or the raw-bytes sha from `upload_content`. Binary files such as images only have the raw-bytes sha. `read_content` refuses files that are not UTF-8 text.
 
 With git tracking enabled, three additional read tools are exposed: `log_content`, `diff_content`, and `blame_content`. See [Git Tracking](#git-tracking).
 
