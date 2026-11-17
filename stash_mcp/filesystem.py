@@ -96,6 +96,20 @@ class FileSystem:
                 i += 1
         return re.compile(res + r"\Z")
 
+    @staticmethod
+    def _glob_pattern(pattern: str) -> str:
+        """Return the pattern to hand to ``Path.glob`` for an include pattern.
+
+        A pattern whose last segment is ``**`` means "every file beneath
+        here", which is how ``_glob_to_regex`` reads it. ``Path.glob`` only
+        agrees from Python 3.13; before that a trailing ``**`` matches
+        directories alone, so the listing came back empty. Appending ``/*``
+        selects the same files on every version.
+        """
+        if pattern == "**" or pattern.endswith("/**"):
+            return pattern + "/*"
+        return pattern
+
     def _matches_patterns(self, relative_path: str) -> bool:
         """Check if a relative path matches any of the include patterns.
 
@@ -194,7 +208,7 @@ class FileSystem:
         if self.include_patterns:
             seen: set[str] = set()
             for pattern in self.include_patterns:
-                for item in self.content_dir.glob(pattern):
+                for item in self.content_dir.glob(self._glob_pattern(pattern)):
                     if not item.is_file():
                         continue
                     if any(part.startswith(".") for part in item.relative_to(self.content_dir).parts):
