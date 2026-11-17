@@ -629,6 +629,11 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 (SHA-256 of the stored bytes)
             """
             data = _decode_upload(data_base64, Config.MAX_UPLOAD_BYTES)
+            # Everything from the existence check to the write stays on the
+            # event loop with no await in between, so concurrent calls cannot
+            # both validate against the same bytes and lose an update. It must
+            # also run on the loop because, under transactions, the write gate
+            # re-arms the idle timeout with asyncio.create_task.
             exists = filesystem.file_exists(path)
             if exists:
                 if sha is None:
@@ -636,7 +641,7 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                         f"File already exists: {path}. Pass the sha of its current "
                         "bytes to replace it."
                     )
-                current = await asyncio.to_thread(filesystem.read_bytes, path)
+                current = filesystem.read_bytes(path)
                 current_sha = hashlib.sha256(current).hexdigest()
                 if sha != current_sha:
                     raise ValueError(
@@ -648,8 +653,6 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     f"File '{path}' does not exist; omit sha to create it."
                 )
 
-            # Called on the event loop (not to_thread): under transactions the
-            # write gate re-arms the idle timeout with asyncio.create_task.
             filesystem.write_bytes(path, data)
             if exists:
                 if _is_resource_file(path):
