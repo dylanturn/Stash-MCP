@@ -858,19 +858,28 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             ctx: Context,
         ) -> str:
             """
-            Delete a content file.
+            Delete a content file of any type.
 
             Args:
                 path: File path relative to content root
-                sha: SHA-256 hex digest of the current file content (from read_content)
+                sha: SHA-256 hex digest of the current file content — either the
+                    sha from read_content, or for uploaded/binary files the sha
+                    returned by upload_content (SHA-256 of the raw bytes)
             Returns:
                 Confirmation message
             """
-            current = filesystem.read_file(path)
-            current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
-            if sha != current_sha:
+            raw = filesystem.read_bytes(path)
+            raw_sha = hashlib.sha256(raw).hexdigest()
+            # read_content's sha is over the newline-translated text, which can
+            # differ from the raw bytes (e.g. CRLF); binaries have no text sha.
+            text = filesystem.try_read_text(path)
+            text_sha = (
+                hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else None
+            )
+            if sha not in (raw_sha, text_sha):
+                expected = text_sha or raw_sha
                 raise ValueError(
-                    f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
+                    f"SHA mismatch for '{path}': expected {expected}, got {sha}. "
                     "The file may have changed since it was last read."
                 )
             filesystem.delete_file(path)

@@ -228,3 +228,38 @@ async def test_concurrent_replacements_with_same_sha_cannot_both_succeed(
     failures = [r for r in results if isinstance(r, Exception)]
     assert len(failures) == 1
     assert "SHA mismatch" in str(failures[0])
+
+
+async def test_uploaded_binary_can_be_deleted_with_returned_sha(temp_fs, mock_context):
+    """delete_content must not require the file to decode as UTF-8."""
+    args = {"path": "assets/logo.png", "data_base64": _b64(PNG_BYTES)}
+    uploaded = _data(await _upload(temp_fs, args))
+    tool = await create_mcp_server(temp_fs).get_tool("delete_content")
+    result = await tool.run({"path": "assets/logo.png", "sha": uploaded["sha"]})
+    assert "Deleted: assets/logo.png" in str(result.content)
+    assert not temp_fs.file_exists("assets/logo.png")
+
+
+async def test_binary_delete_with_stale_sha_fails(temp_fs, mock_context):
+    temp_fs.write_bytes("logo.png", PNG_BYTES)
+    tool = await create_mcp_server(temp_fs).get_tool("delete_content")
+    with pytest.raises(Exception, match="SHA mismatch"):
+        await tool.run({"path": "logo.png", "sha": "0" * 64})
+    assert temp_fs.file_exists("logo.png")
+
+
+async def test_text_file_delete_accepts_read_content_or_upload_sha(temp_fs, mock_context):
+    """CRLF text: read_content's sha (newline-translated) and upload's raw sha
+    differ, and delete must accept either."""
+    raw = b"line one\r\nline two\r\n"
+    for name, use_upload_sha in (("a.txt", False), ("b.txt", True)):
+        uploaded = _data(await _upload(temp_fs, {"path": name, "data_base64": _b64(raw)}))
+        read = await (await create_mcp_server(temp_fs).get_tool("read_content")).run(
+            {"path": name}
+        )
+        text_sha = _data(read)["sha"]
+        assert text_sha != uploaded["sha"]
+        sha = uploaded["sha"] if use_upload_sha else text_sha
+        tool = await create_mcp_server(temp_fs).get_tool("delete_content")
+        await tool.run({"path": name, "sha": sha})
+        assert not temp_fs.file_exists(name)

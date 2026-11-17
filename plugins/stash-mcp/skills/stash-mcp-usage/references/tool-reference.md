@@ -99,7 +99,7 @@ Replace the entire file content. Requires the current SHA.
 
 ### delete_content(path, sha)
 
-Delete a file permanently. Requires the current SHA. Irreversible outside of git history (if git tracking is enabled).
+Delete a file permanently. Requires the current SHA: the one from `read_content`, or for binary/uploaded files the one returned by `upload_content`. Irreversible outside of git history (if git tracking is enabled).
 
 ### move_content(source_path, dest_path) / move_content_batch(moves[]) / move_content_directory(source_path, dest_path)
 

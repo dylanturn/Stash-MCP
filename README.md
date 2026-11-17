@@ -213,7 +213,7 @@ await client.call_tool("delete_content", {
 })
 ```
 
-`upload_content` stores files of any type (images, PDFs, archives) from base64-encoded bytes, byte-for-byte. It creates new files; to replace one, pass the `sha` it returned (the SHA-256 of the stored bytes). Uploads are capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB):
+`upload_content` stores files of any type (images, PDFs, archives) from base64-encoded bytes, byte-for-byte. It creates new files; to replace or `delete_content` one, pass the `sha` it returned (the SHA-256 of the stored bytes). Uploads are capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB):
 
 ```python
 import base64

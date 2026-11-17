@@ -254,7 +254,7 @@ Tools allow agents to create, edit, overwrite, move, and delete content. Modific
 }
 ```
 
-**delete_content** - Delete a file:
+**delete_content** - Delete a file. For binary files, pass the `sha` returned by `upload_content`:
 ```json
 {
   "path": "docs/old-doc.md",
