@@ -519,6 +519,177 @@ class TestUIMove:
         assert 'name="destination"' in body
 
 
+class TestUIBacklinks:
+    """Tests for the "Referenced By" section of the file view."""
+
+    @pytest.fixture
+    def client(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("mockups/board.html", "<html><body>board</body></html>")
+        fs.write_file(
+            "docs/plan & scope.md",
+            '# Plan "A" & B\n\n```stash-embed\nsrc: /mockups/board.html\n```\n',
+        )
+        fs.write_file("index.md", "# Home\n\n[board](mockups/board.html)")
+        fs.write_file("lonely.md", "# Lonely\n\nNothing links here.")
+        app = create_api(fs)
+        app.include_router(create_ui_router(fs))
+        client = TestClient(app)
+        client.fs = fs
+        return client
+
+    def test_lists_referencing_pages(self, client):
+        body = client.get("/ui/browse/mockups/board.html").text
+        assert "Referenced By" in body
+        assert '<span class="backlinks-count">2</span>' in body
+        assert '<details class="meta-accordion" id="backlinks" open>' in body
+        # Title and path are escaped; the href is URL-encoded.
+        assert 'href="/ui/browse/docs/plan%20%26%20scope.md"' in body
+        assert '<span class="backlink-title">Plan &quot;A&quot; &amp; B</span>' in body
+        assert '<span class="backlink-path">docs/plan &amp; scope.md</span>' in body
+        assert 'href="/ui/browse/index.md"' in body
+        # Only the stash-embed reference is tagged as an embed.
+        assert body.count('<span class="backlink-kind">embed</span>') == 1
+        # Sits above the metadata accordion.
+        assert body.index("Referenced By") < body.index("Document Metadata")
+
+    def test_embed_source_with_url_characters_is_listed(self, client):
+        """The viewer reads a stash-embed src literally; so must the backlinks."""
+        client.fs.write_file("mockups/board#1.html", "<html><body>hash board</body></html>")
+        client.fs.write_file(
+            "hash.md", '# Hash\n\n```stash-embed\nsrc: "/mockups/board#1.html"\n```\n'
+        )
+        assert "hash board" in client.get("/ui/browse/hash.md").text
+        body = client.get("/ui/browse/mockups/board%231.html").text
+        assert '<span class="backlinks-count">1</span>' in body
+        assert 'href="/ui/browse/hash.md"' in body
+
+    def test_collapsed_when_nothing_references_the_page(self, client):
+        body = client.get("/ui/browse/lonely.md").text
+        assert '<details class="meta-accordion" id="backlinks">' in body
+        assert '<span class="backlinks-count">0</span>' in body
+        assert "No other pages reference this one." in body
+
+    def test_reflects_edits_without_restart(self, client):
+        client.fs.write_file("lonely.md", "# Lonely\n\nNow see [home](index.md).")
+        body = client.get("/ui/browse/index.md").text
+        assert '<span class="backlinks-count">1</span>' in body
+        assert 'href="/ui/browse/lonely.md"' in body
+
+    def test_directories_have_no_backlinks_section(self, client):
+        assert "Referenced By" not in client.get("/ui/browse/docs").text
+
+    def test_links_to_the_document_map(self, client):
+        body = client.get("/ui/browse/docs/plan & scope.md").text
+        assert 'href="/ui/map?focus=docs/plan%20%26%20scope.md"' in body
+
+
+class TestUIMap:
+    """Tests for the document map page."""
+
+    @staticmethod
+    def _client(fs):
+        app = create_api(fs)
+        app.include_router(create_ui_router(fs))
+        return TestClient(app)
+
+    @staticmethod
+    def _graph(body):
+        import json
+
+        start = body.index('StashMap.render(document.getElementById("map-root"),')
+        payload = body[body.index("{", start):]
+        graph, end = json.JSONDecoder().raw_decode(payload)
+        options = payload[end:payload.index(");", end)]
+        return graph, options
+
+    def test_sidebar_links_to_the_map(self, ui_client):
+        assert 'href="/ui/map"' in ui_client.get("/ui/browse/").text
+
+    def test_renders_graph_data_and_stats(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("index.md", "# Home\n\n[a](docs/a.md) ![logo](logo.png)")
+        fs.write_file("docs/a.md", "# A\n\n[home](../index.md)")
+        fs.write_file("docs/orphan.md", "# Orphan")
+        fs.write_file("logo.png", "x")
+        response = self._client(fs).get("/ui/map")
+        assert response.status_code == 200
+        body = response.text
+        assert "3 pages \u00b7 3 links \u00b7 1 unlinked" in body
+        assert "vendor/stash-map.js" in body
+        graph, options = self._graph(body)
+        assert [n["path"] for n in graph["nodes"]] == [
+            "docs/a.md", "docs/orphan.md", "index.md", "logo.png",
+        ]
+        assert len(graph["edges"]) == 3
+        assert options == ',{focus:"",listId:"map-list"}'
+
+    def test_focus_is_passed_to_the_map_and_selected_in_the_tree(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("docs/a.md", "# A")
+        body = self._client(fs).get("/ui/map", params={"focus": "docs/a.md"}).text
+        _, options = self._graph(body)
+        assert options == ',{focus:"docs/a.md",listId:"map-list"}'
+        assert 'class="tree-file selected"' in body
+
+    def test_data_cannot_break_out_of_the_script(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file(
+            "a.html",
+            "<title>&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;</title>"
+            '<a href="b.md">b</a>',
+        )
+        fs.write_file("b.md", "# B")
+        body = self._client(fs).get("/ui/map", params={"focus": "</script>x"}).text
+        assert "</script><script>alert(1)" not in body
+        assert "</script>x" not in body
+        graph, _ = self._graph(body.replace("<\\/", "</"))
+        assert graph["nodes"][0]["title"] == "</script><script>alert(1)</script>"
+
+    def test_lists_pages_and_links_as_plain_html(self, tmp_path):
+        """The canvas is unreadable to assistive technology; the list is not."""
+        fs = FileSystem(tmp_path)
+        fs.write_file("index.md", "# Home\n\n[a](docs/a & b.md) ![logo](logo.png)")
+        fs.write_file("docs/a & b.md", '# A "quoted" <b>\n\n[home](../index.md)')
+        fs.write_file("docs/orphan.md", "No heading here.")
+        fs.write_file("logo.png", "x")
+        body = self._client(fs).get("/ui/map").text
+        start = body.index('<details class="map-list" id="map-list">')
+        listing = body[start:body.index("</details>", start)]
+        assert "<summary>Pages and links as a list (4)</summary>" in listing
+
+        # Every page is a real link, labelled with its title and path.
+        assert (
+            '<a class="map-list-page" href="/ui/browse/index.md">Home</a> '
+            '<span class="map-list-path">index.md</span>'
+        ) in listing
+        assert 'href="/ui/browse/docs/a%20%26%20b.md">A &quot;quoted&quot;</a>' in listing
+        assert '<span class="map-list-path">docs/a &amp; b.md</span>' in listing
+
+        # Both directions are listed, with embeds marked.
+        home = listing[listing.index('href="/ui/browse/index.md">Home</a> <span'):]
+        home = home[:home.index("</ul></li>")]
+        assert '<span class="map-list-label">Links to (2):</span>' in home
+        assert 'aria-label="A &quot;quoted&quot;, docs/a &amp; b.md"' in home
+        assert (
+            'aria-label="logo.png, logo.png" title="logo.png">logo.png</a> '
+            '<span class="map-list-kind">(embed)</span>'
+        ) in home
+        assert '<span class="map-list-label">Linked from (1):</span>' in home
+
+        # Unlinked pages say so rather than showing empty lists.
+        orphan = listing[listing.index('href="/ui/browse/docs/orphan.md">orphan.md</a>'):]
+        assert "No links to or from this page." in orphan[:orphan.index("</ul></li>")]
+
+    def test_empty_stash_shows_a_message(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("data.json", "{}")
+        body = self._client(fs).get("/ui/map").text
+        assert "No markdown or HTML documents to map yet." in body
+        assert "StashMap.render" not in body
+        assert 'id="map-list"' not in body
+
+
 class TestUIMarkdown:
     """Tests for markdown rendering."""
 

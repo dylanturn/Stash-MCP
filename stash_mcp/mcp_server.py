@@ -5,6 +5,7 @@ import functools
 import hashlib
 import inspect
 import logging
+import posixpath
 import re
 import time
 from collections.abc import AsyncIterator
@@ -21,6 +22,7 @@ from pydantic import AnyUrl, BaseModel, Field
 from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
+from .links import BrokenLink, LinkIndex, LinkSnapshot, broken_by_moves
 from .metrics import get_metrics
 from .transactions import TransactionError, TransactionManager
 
@@ -100,6 +102,11 @@ def _build_instructions(
         "relative to the content root, with no leading slash (e.g. 'docs/guide.md'). "
         "Start with list_content(recursive=true) to discover files."
     ]
+    parts.append(
+        "Documents reference each other with links, images and stash-embed blocks. "
+        "inspect_content_links lists what references a file and what it references, "
+        "with every link resolved to a content-root path."
+    )
     if read_only:
         parts.append(
             "This server is read-only: content can be listed and read but not modified."
@@ -111,7 +118,10 @@ def _build_instructions(
             "get its sha, then edit_content (targeted string replacement, preferred "
             "for small changes) or overwrite_content (full replace). create_content "
             "is only for files that do not exist yet; delete_content also requires "
-            "the sha."
+            "the sha. Moving or deleting a file can break links; the move and delete "
+            "tools report the links they broke so you can fix them in the same change. "
+            "That report covers links, images and embeds, not plain-text mentions of a "
+            "path, and states when the check could not run or was incomplete."
         )
     if transactions_active:
         parts.append(
@@ -338,13 +348,103 @@ def parse_markdown_structure(content: str) -> list[dict]:
     return _build_heading_tree(flat_headings)
 
 
-def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=None) -> FastMCP:
+# Cap on link entries returned by one tool call, so a heavily linked file or
+# a large directory move cannot flood the agent's context.
+_MAX_BROKEN_LINKS = 50
+_MAX_INSPECTED_LINKS = 200
+
+
+def _content_key(path: str) -> str:
+    """Normalize a tool-supplied path to the form the link index uses."""
+    return posixpath.normpath(path.lstrip("/"))
+
+
+def _format_broken_links(broken: list[BrokenLink]) -> str:
+    """Render move-broken links as lines appended to a text tool result."""
+    lines = [
+        f"\n\n{len(broken)} link{'s' if len(broken) != 1 else ''} broken by this move "
+        "\u2014 edit each file so its link reaches the new target:"
+    ]
+    for link in broken[:_MAX_BROKEN_LINKS]:
+        if link.old_target == link.new_target:
+            lines.append(
+                f"- {link.file}: its link to '{link.new_target}' no longer resolves "
+                "(a relative link, and this file moved)"
+            )
+        else:
+            lines.append(
+                f"- {link.file}: links to '{link.old_target}', now at '{link.new_target}'"
+            )
+    if len(broken) > _MAX_BROKEN_LINKS:
+        lines.append(f"- \u2026 and {len(broken) - _MAX_BROKEN_LINKS} more")
+    return "\n".join(lines)
+
+
+# Appended to a text result when the link check could not run. Silence would
+# read as "nothing broke", so the gap is stated and a manual check named.
+_LINKS_NOT_CHECKED = (
+    "\n\nLinks were not checked: the link scan failed, so this result says nothing "
+    "about broken links. inspect_content_links relies on the same scan and may fail "
+    "too. Search for each affected file's name with find_content \u2014 the name, not "
+    "the full path, because relative links do not contain the path."
+)
+
+
+def _format_unscanned(unscanned: list[str]) -> str:
+    """Render documents the link scan had to skip, for a text tool result."""
+    if not unscanned:
+        return ""
+    one = len(unscanned) == 1
+    names = ", ".join(unscanned[:_MAX_BROKEN_LINKS])
+    if len(unscanned) > _MAX_BROKEN_LINKS:
+        names += f", \u2026 and {len(unscanned) - _MAX_BROKEN_LINKS} more"
+    return (
+        f"\n\nLink check incomplete: {len(unscanned)} document{'' if one else 's'} could "
+        f"not be scanned, so links inside {'it' if one else 'them'} were not checked: "
+        f"{names}. Links elsewhere were checked. Search {'that document' if one else 'those'} "
+        "for each affected file's name with find_content, or read "
+        f"{'it' if one else 'them'} with read_content."
+    )
+
+
+def _link_check_fields(checked: tuple[list[BrokenLink], list[str]] | None) -> dict:
+    """Render a move's link check as fields merged into a dict tool result.
+
+    `link_check` says how far the result can be trusted: "complete", "partial"
+    (the documents in `unscanned_files` could not be scanned, so links inside
+    them are unknown) or "unavailable" (the check did not run at all). An
+    empty `broken_links` only means "nothing broke" when it is "complete".
+    """
+    if checked is None:
+        return {"link_check": "unavailable"}
+    broken, unscanned = checked
+    fields: dict = {
+        "link_check": "partial" if unscanned else "complete",
+        "broken_links": [
+            {"file": b.file, "old_target": b.old_target, "new_target": b.new_target}
+            for b in broken[:_MAX_BROKEN_LINKS]
+        ],
+    }
+    if len(broken) > _MAX_BROKEN_LINKS:
+        fields["broken_links_total"] = len(broken)
+    if unscanned:
+        fields["unscanned_files"] = unscanned[:_MAX_BROKEN_LINKS]
+        if len(unscanned) > _MAX_BROKEN_LINKS:
+            fields["unscanned_files_total"] = len(unscanned)
+    return fields
+
+
+def create_mcp_server(
+    filesystem: FileSystem, search_engine=None, git_backend=None, link_index=None
+) -> FastMCP:
     """Create and configure the FastMCP server.
 
     Args:
         filesystem: Filesystem instance for content management
         search_engine: Optional SearchEngine instance for semantic search
         git_backend: Optional GitBackend instance for git tools
+        link_index: Optional LinkIndex shared with the UI; one is created
+            when omitted
 
     Returns:
         Configured FastMCP server
@@ -360,6 +460,40 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
         and git_backend is not None
         and isinstance(filesystem, TransactionManager)
     )
+    if link_index is None:
+        link_index = LinkIndex(filesystem)
+
+    # Link reporting is advisory: a move or delete that succeeded must still
+    # report success if the link scan fails, so failures are logged, not raised.
+    async def _link_snapshot() -> LinkSnapshot | None:
+        try:
+            return await asyncio.to_thread(link_index.snapshot)
+        except Exception:
+            logger.warning("Link scan before move failed", exc_info=True)
+            return None
+
+    def _links_broken_by(
+        before: LinkSnapshot | None,
+        moves: dict[str, str],
+        directory_moves: dict[str, str] | None = None,
+    ) -> tuple[list[BrokenLink], list[str]] | None:
+        """Return the links a move broke and the documents it could not vouch for."""
+        if before is None:
+            return None
+        try:
+            moved = {_content_key(old): _content_key(new) for old, new in moves.items()}
+            broken = broken_by_moves(
+                before,
+                moved,
+                {
+                    _content_key(old): _content_key(new)
+                    for old, new in (directory_moves or {}).items()
+                },
+            )
+            return broken, sorted(moved.get(path, path) for path in before.unscanned)
+        except Exception:
+            logger.warning("Link check after move failed", exc_info=True)
+            return None
 
     mcp = FastMCP(
         name=Config.SERVER_NAME,
@@ -721,11 +855,18 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             """
             Delete a content file.
 
+            If other files still link to or embed the deleted file, the
+            confirmation lists them so the dangling references can be fixed.
+            Only links, images and stash-embed sources are tracked, not
+            plain-text mentions of the path; if the check could not run, or
+            had to skip some documents, the confirmation says so.
+
             Args:
                 path: File path relative to content root
                 sha: SHA-256 hex digest of the current file content (from read_content)
             Returns:
-                Confirmation message
+                Confirmation message, followed by any files left with dangling
+                references to the deleted file
             """
             current = filesystem.read_file(path)
             current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
@@ -739,7 +880,26 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 await ctx.send_resource_list_changed()
             emit(CONTENT_DELETED, path)
             logger.info(f"Deleted: {path}")
-            return f"Deleted: {path}"
+            message = f"Deleted: {path}"
+            def _references() -> tuple[list, list[str]]:
+                return link_index.backlinks(_content_key(path)), link_index.unscanned()
+
+            try:
+                dangling, unscanned = await asyncio.to_thread(_references)
+            except Exception:
+                logger.warning("Link scan after delete failed", exc_info=True)
+                return message + _LINKS_NOT_CHECKED
+            if dangling:
+                names = ", ".join(link.path for link in dangling[:_MAX_BROKEN_LINKS])
+                if len(dangling) > _MAX_BROKEN_LINKS:
+                    names += f", \u2026 and {len(dangling) - _MAX_BROKEN_LINKS} more"
+                message += (
+                    f"\n\n{len(dangling)} file{'s' if len(dangling) != 1 else ''} still "
+                    f"reference{'s' if len(dangling) == 1 else ''} the deleted file and now "
+                    f"{'has a' if len(dangling) == 1 else 'have'} dangling "
+                    f"link{'s' if len(dangling) != 1 else ''}: {names}"
+                )
+            return message + _format_unscanned(unscanned)
 
     # --- Read-only tools (always registered) ---
 
@@ -1005,6 +1165,69 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
     @mcp.tool(
         annotations=ToolAnnotations(
+            title="Inspect content links",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def inspect_content_links(path: ContentPath) -> dict:
+        """List the files that reference a file, and the files it references.
+
+        Covers markdown links, images, reference-style links, raw HTML
+        href/src attributes, and stash-embed blocks, each resolved to a
+        content-root path. Unlike a text search for the file name, this finds
+        a reference however it is written (relative, '../', or
+        root-absolute) and ignores links inside code blocks.
+
+        Use it before moving, renaming, or deleting a file to see what
+        depends on it, to find broken links in a document ('exists': false
+        under 'outgoing'), and to navigate between related documents.
+
+        Any file can be the target — for example, which documents embed an
+        image. Only markdown and HTML files have outgoing references.
+
+        Args:
+            path: File path relative to content root
+        Returns:
+            A dict with 'path', 'exists' (false if no such file — 'incoming'
+            then lists dangling references to it), 'incoming' (list of
+            {path, title, kind}), 'outgoing' (list of {path, kind, exists}),
+            'incoming_count', and 'outgoing_count'. 'kind' is 'link' or
+            'embed' (images, media, stash-embed blocks). Each list is capped
+            at 200 entries; 'truncated' is true when a count exceeds that.
+            'unscanned_files' lists documents whose links could not be read
+            (too large, unreadable, or not renderable): while it is not
+            empty, 'incoming' may be missing references from those documents.
+        """
+        resolved = filesystem._resolve_path(path)
+        if resolved.is_dir():
+            raise ValueError(
+                f"inspect_content_links works on files; '{path}' is a directory."
+            )
+        key = _content_key(path)
+        incoming = await asyncio.to_thread(link_index.backlinks, key)
+        outgoing = await asyncio.to_thread(link_index.outgoing, key)
+        unscanned = await asyncio.to_thread(link_index.unscanned)
+        return {
+            "path": key,
+            "exists": resolved.is_file(),
+            "incoming": [
+                {"path": link.path, "title": link.title, "kind": link.kind}
+                for link in incoming[:_MAX_INSPECTED_LINKS]
+            ],
+            "outgoing": [
+                {"path": link.path, "kind": link.kind, "exists": link.exists}
+                for link in outgoing[:_MAX_INSPECTED_LINKS]
+            ],
+            "incoming_count": len(incoming),
+            "outgoing_count": len(outgoing),
+            "truncated": max(len(incoming), len(outgoing)) > _MAX_INSPECTED_LINKS,
+            "unscanned_files": unscanned[:_MAX_BROKEN_LINKS],
+            "unscanned_count": len(unscanned),
+        }
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
             title="Find literal matches in content",
             readOnlyHint=True,
             openWorldHint=False,
@@ -1150,12 +1373,20 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             overwritten by a move); missing parent directories are created
             automatically. Use move_content_directory for whole directories.
 
+            Links are not rewritten. The confirmation lists every link the
+            move broke — other files still pointing at the old path, and
+            relative links inside the moved file — so they can be fixed.
+            Only links, images and stash-embed sources are tracked, not
+            plain-text mentions of the path; if the check could not run, or
+            had to skip some documents, the confirmation says so.
+
             Args:
                 source_path: Current file path relative to content root
                 dest_path: New file path relative to content root
             Returns:
-                Confirmation message
+                Confirmation message, followed by any links broken by the move
             """
+            links_before = await _link_snapshot()
             filesystem.move_file(source_path, dest_path)
             source_was_resource = _unregister_resource(source_path)
             dest_is_resource = _register_resource(dest_path)
@@ -1163,7 +1394,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 await ctx.send_resource_list_changed()
             emit(CONTENT_MOVED, dest_path, source_path=source_path)
             logger.info(f"Moved: {source_path} -> {dest_path}")
-            return f"Moved: {source_path} -> {dest_path}"
+            message = f"Moved: {source_path} -> {dest_path}"
+            checked = _links_broken_by(links_before, {source_path: dest_path})
+            if checked is None:
+                return message + _LINKS_NOT_CHECKED
+            broken, unscanned = checked
+            if broken:
+                message += _format_broken_links(broken)
+            return message + _format_unscanned(unscanned)
 
         @_write_tool(
             annotations=ToolAnnotations(
@@ -1191,12 +1429,26 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             Moves all files and subdirectories from source_path to dest_path.
             The destination must not already exist.
 
+            Links are not rewritten. Relative links between files that moved
+            together keep working; every link the move did break is returned
+            in 'broken_links' so it can be fixed.
+
             Args:
                 source_path: Current directory path relative to content root
                 dest_path: New directory path relative to content root
             Returns:
-                A dict with 'source', 'destination', and 'files_moved' count
+                A dict with 'source', 'destination', 'files_moved' count,
+                'link_check', and 'broken_links': a list of
+                {file, old_target, new_target} — edit 'file' so the link that
+                reached 'old_target' reaches 'new_target' (capped at 50;
+                'broken_links_total' is set when there are more).
+                'link_check' is "complete", "partial" (links inside the
+                documents listed in 'unscanned_files' are unknown — check
+                those yourself) or "unavailable" (the check did not run and
+                'broken_links' is absent). Plain-text mentions of a path are
+                never tracked.
             """
+            links_before = await _link_snapshot()
             moved_files = filesystem.move_directory(source_path, dest_path)
 
             # Handle resource registration changes for any README.md files
@@ -1212,10 +1464,14 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                 await ctx.send_resource_list_changed()
 
             logger.info(f"Moved directory: {source_path} -> {dest_path} ({len(moved_files)} files)")
+            checked = _links_broken_by(
+                links_before, dict(moved_files), {source_path: dest_path}
+            )
             return {
                 "source": source_path,
                 "destination": dest_path,
                 "files_moved": len(moved_files),
+                **_link_check_fields(checked),
             }
 
         @_write_tool(
@@ -1244,10 +1500,20 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             the entire operation is aborted and no files are moved. Destinations
             must not already exist.
 
+            Links are not rewritten. Every link the moves broke is returned in
+            'broken_links' so it can be fixed.
+
             Args:
                 moves: List of move operations (max 10), each with source_path and dest_path
             Returns:
-                A dict with 'results' list containing source, destination, and status per file
+                A dict with 'results' list containing source, destination, and
+                status per file, 'link_check', and 'broken_links': a list of
+                {file, old_target, new_target} — edit 'file' so the link that
+                reached 'old_target' reaches 'new_target'. 'link_check' is
+                "complete", "partial" (links inside the documents listed in
+                'unscanned_files' are unknown — check those yourself) or
+                "unavailable" (the check did not run and 'broken_links' is
+                absent). Plain-text mentions of a path are never tracked.
             """
             if len(moves) == 0:
                 raise ValueError("At least one move operation is required.")
@@ -1272,6 +1538,12 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                     f"Paths cannot appear as both source and destination: {overlap}. "
                     "Use intermediate paths for swap operations."
                 )
+
+            # The link scan awaits, so it must come before the filesystem
+            # checks: nothing may yield between those checks and the moves,
+            # or another request could invalidate them and leave the batch
+            # half applied.
+            links_before = await _link_snapshot()
 
             for m in moves:
                 if not filesystem.file_exists(m.source_path):
@@ -1300,7 +1572,10 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             if resources_changed:
                 await ctx.send_resource_list_changed()
 
-            return {"results": results}
+            checked = _links_broken_by(
+                links_before, {m.source_path: m.dest_path for m in moves}
+            )
+            return {"results": results, **_link_check_fields(checked)}
 
     # --- Search tool (conditional) ---
 
