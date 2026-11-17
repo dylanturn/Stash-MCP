@@ -11,6 +11,7 @@ from stash_mcp.links import (
     BrokenLink,
     LinkIndex,
     OutgoingLink,
+    Reference,
     broken_by_moves,
     extract_links,
     extract_references,
@@ -33,7 +34,6 @@ class TestResolveTarget:
             ("b.md?raw=1", "docs", "docs/b.md"),
             ("my%20notes.md", "docs", "docs/my notes.md"),
             ("what%3F%23.md", "docs", "docs/what?#.md"),
-            ("a&amp;b.md", "", "a&b.md"),
         ],
     )
     def test_resolves_paths_in_the_store(self, target, base_dir, expected):
@@ -147,8 +147,48 @@ class TestExtractLinks:
             "docs/a.md", "[one](b.md) [two](/docs/b.md) [web](https://example.com)"
         )
         assert references == [
-            ("b.md", LINK), ("/docs/b.md", LINK), ("https://example.com", LINK),
+            Reference("b.md", LINK),
+            Reference("/docs/b.md", LINK),
+            Reference("https://example.com", LINK),
         ]
+
+    def test_html_is_parsed_not_pattern_matched(self):
+        content = (
+            "<a href=unquoted.md>ok</a> <A HREF='upper.md'>ok</A> "
+            '<a href="a&amp;b.md">entity</a> '
+            '<a data-href="ghost.md">not a link</a> '
+            '<a href="first.md" href="second.md">first attribute wins</a> '
+            "<script>var s = '<a href=\"script.md\">x</a>';</script> "
+            "<style>a::after { content: '<img src=\"style.png\">'; }</style> "
+            '<!-- <a href="comment.md">x</a> --> '
+            '<script src="app.js"></script>'
+        )
+        expected = {
+            "unquoted.md": LINK,
+            "upper.md": LINK,
+            "a&b.md": LINK,
+            "first.md": LINK,
+            "app.js": EMBED,
+        }
+        assert extract_links("page.html", content)[0] == expected
+        # Raw HTML inside markdown goes through the same parser.
+        assert extract_links("page.md", content)[0] == expected
+
+    def test_stash_embed_src_is_a_literal_path(self):
+        content = (
+            "```stash-embed\nsrc: \"/mockups/board#1.html\"\n```\n\n"
+            "```stash-embed\nsrc: my%20file?.html\n```\n\n"
+            "```stash-embed\nsrc: /ui/browse/kept.html\n```\n\n"
+            "```stash-embed\nsrc: ../../outside.html\n```\n\n"
+            "[a link is a URL](other%20page.md#section)\n"
+        )
+        links, _ = extract_links("docs/a.md", content)
+        assert links == {
+            "mockups/board#1.html": EMBED,
+            "docs/my%20file?.html": EMBED,
+            "ui/browse/kept.html": EMBED,
+            "docs/other page.md": LINK,
+        }
 
     def test_external_anchor_and_self_links_are_dropped(self):
         content = "[web](https://example.com) [top](#top) [me](a.md) [me too](./a.md#x)"
@@ -343,6 +383,49 @@ class TestBrokenByMoves:
             # Root-absolute link inside the moved directory still names the old path.
             BrokenLink("guides/a.md", "docs/b.md", "guides/b.md"),
             BrokenLink("index.md", "docs/a.md", "guides/a.md"),
+        ]
+
+    def test_moved_stash_embed_source_is_reported_by_its_literal_path(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("mockups/board#1.html", "<p>board</p>")
+        fs.write_file("docs/a.md", "```stash-embed\nsrc: \"/mockups/board#1.html\"\n```\n")
+        index = LinkIndex(fs)
+        assert [b.path for b in index.backlinks("mockups/board#1.html")] == ["docs/a.md"]
+        before = index.snapshot()
+        fs.move_file("mockups/board#1.html", "archive/board#1.html")
+        moves = {"mockups/board#1.html": "archive/board#1.html"}
+        assert broken_by_moves(before, moves) == [
+            BrokenLink("docs/a.md", "mockups/board#1.html", "archive/board#1.html"),
+        ]
+
+    def test_links_to_moved_directories_are_reported(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("docs/guide.md", "[up](./) [nested](sub/) [home](../index.md)")
+        fs.write_file("docs/sub/deep.md", "# Deep")
+        fs.write_file("other/keep.md", "# Keep")
+        fs.write_file(
+            "index.md",
+            "[docs](/ui/browse/docs/) [sub](docs/sub) [other](other/) [gone](nowhere/)",
+        )
+        index = LinkIndex(fs)
+        before = index.snapshot()
+        moved = dict(fs.move_directory("docs", "guides"))
+        # Links to the moved folder and to a folder inside it are reported;
+        # the moved document's own relative folder links still resolve.
+        assert broken_by_moves(before, moved, {"docs": "guides"}) == [
+            BrokenLink("index.md", "docs", "guides"),
+            BrokenLink("index.md", "docs/sub", "guides/sub"),
+        ]
+
+    def test_relative_link_to_a_directory_breaks_when_the_file_moves(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("docs/a.md", "[assets](assets/)")
+        fs.write_file("docs/assets/pic.png", "x")
+        index = LinkIndex(fs)
+        before = index.snapshot()
+        fs.move_file("docs/a.md", "archive/a.md")
+        assert broken_by_moves(before, {"docs/a.md": "archive/a.md"}) == [
+            BrokenLink("archive/a.md", "docs/assets", "docs/assets"),
         ]
 
     def test_links_that_were_already_broken_are_not_reported(self, tmp_path):

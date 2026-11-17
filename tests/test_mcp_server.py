@@ -1929,6 +1929,17 @@ async def test_move_content_directory_reports_only_links_it_broke(linked_fs, moc
     assert "broken_links_total" not in data
 
 
+async def test_move_content_directory_reports_links_to_the_moved_folder(
+    linked_fs, mock_context
+):
+    linked_fs.write_file("toc.md", "[all docs](docs/) and [browse](/ui/browse/docs/)")
+    tool = await create_mcp_server(linked_fs).get_tool("move_content_directory")
+    data = _find_data(await tool.run({"source_path": "docs/", "dest_path": "guides"}))
+    assert {"file": "toc.md", "old_target": "docs", "new_target": "guides"} in (
+        data["broken_links"]
+    )
+
+
 async def test_move_content_batch_reports_broken_links(linked_fs, mock_context):
     tool = await create_mcp_server(linked_fs).get_tool("move_content_batch")
     data = _find_data(await tool.run({

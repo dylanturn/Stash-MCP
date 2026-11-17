@@ -553,6 +553,17 @@ class TestUIBacklinks:
         # Sits above the metadata accordion.
         assert body.index("Referenced By") < body.index("Document Metadata")
 
+    def test_embed_source_with_url_characters_is_listed(self, client):
+        """The viewer reads a stash-embed src literally; so must the backlinks."""
+        client.fs.write_file("mockups/board#1.html", "<html><body>hash board</body></html>")
+        client.fs.write_file(
+            "hash.md", '# Hash\n\n```stash-embed\nsrc: "/mockups/board#1.html"\n```\n'
+        )
+        assert "hash board" in client.get("/ui/browse/hash.md").text
+        body = client.get("/ui/browse/mockups/board%231.html").text
+        assert '<span class="backlinks-count">1</span>' in body
+        assert 'href="/ui/browse/hash.md"' in body
+
     def test_collapsed_when_nothing_references_the_page(self, client):
         body = client.get("/ui/browse/lonely.md").text
         assert '<details class="meta-accordion" id="backlinks">' in body

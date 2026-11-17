@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError as FSFileNotFoundError
 from .filesystem import FileSystem, InvalidPathError
-from .links import EMBED, Backlink, LinkIndex
+from .links import EMBED, Backlink, LinkIndex, resolve_embed_src
 from .mcp_server import MIME_TYPES
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -582,32 +582,6 @@ def _embed_error(message: str) -> str:
     return f'<div class="error-msg">Embed error: {html.escape(message)}</div>'
 
 
-def _resolve_embed_src(src: str, base_dir: str) -> str:
-    """Resolve an embed `src` to a content-store-relative path.
-
-    Absolute (`/specs/api.json`) is rooted at the content store; otherwise the
-    src is interpreted relative to the embedding document's directory.
-
-    The result is normalized (`.`/`..` segments collapsed) so downstream
-    consumers — `filesystem.read_file`, embed-error messages, and the URL
-    rewriter that uses the parent dir to anchor relative `<img>`/`<a>`
-    targets — get a clean path. A `src` that escapes the content root with
-    leading `..` segments still yields a path starting with `..`, which the
-    filesystem layer rejects with `InvalidPathError`; the caller catches that
-    and produces a dedicated embed error.
-    """
-    if src.startswith("/"):
-        joined = src.lstrip("/")
-    elif base_dir:
-        joined = str(PurePosixPath(base_dir) / src)
-    else:
-        joined = src
-    normalized = posixpath.normpath(joined) if joined else ""
-    # normpath("") -> "." — collapse that to "" so callers see "no path"
-    # consistently when the input was empty.
-    return "" if normalized == "." else normalized
-
-
 def _filter_openapi_spec(
     spec: dict,
     *,
@@ -1048,7 +1022,7 @@ def _make_embed_replacer(filesystem: "FileSystem | None", base_dir: str):
         if filesystem is None:
             return _embed_error(f"cannot resolve '{src}': no filesystem in context")
 
-        resolved = _resolve_embed_src(src, base_dir)
+        resolved = resolve_embed_src(src, base_dir)
         try:
             raw = filesystem.read_file(resolved)
         except (FileNotFoundError, FSFileNotFoundError):

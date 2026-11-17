@@ -432,13 +432,20 @@ def create_mcp_server(
             return None
 
     def _links_broken_by(
-        before: LinkSnapshot | None, moves: dict[str, str]
+        before: LinkSnapshot | None,
+        moves: dict[str, str],
+        directory_moves: dict[str, str] | None = None,
     ) -> list[BrokenLink] | None:
         if before is None:
             return None
         try:
             return broken_by_moves(
-                before, {_content_key(old): _content_key(new) for old, new in moves.items()}
+                before,
+                {_content_key(old): _content_key(new) for old, new in moves.items()},
+                {
+                    _content_key(old): _content_key(new)
+                    for old, new in (directory_moves or {}).items()
+                },
             )
         except Exception:
             logger.warning("Link check after move failed", exc_info=True)
@@ -1390,7 +1397,9 @@ def create_mcp_server(
                 await ctx.send_resource_list_changed()
 
             logger.info(f"Moved directory: {source_path} -> {dest_path} ({len(moved_files)} files)")
-            broken = _links_broken_by(links_before, dict(moved_files))
+            broken = _links_broken_by(
+                links_before, dict(moved_files), {source_path: dest_path}
+            )
             return {
                 "source": source_path,
                 "destination": dest_path,
