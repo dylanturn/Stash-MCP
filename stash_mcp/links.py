@@ -110,8 +110,9 @@ class LinkSnapshot:
     pairs: the reference as written and the content-root path it resolved
     to. Keeping the written form lets a move be judged one reference at a
     time — two links to the same file, one relative and one root-absolute,
-    fare differently. `directories` holds every folder that contains a file,
-    since a link may point at a folder.
+    fare differently. A link may point at a folder, so `directories` holds
+    every folder that contains a file, plus any other existing folder a
+    reference points at (an empty one, say).
     """
 
     references: dict[str, tuple[tuple[Reference, str], ...]]
@@ -478,6 +479,16 @@ class LinkIndex:
                 for parent in PurePosixPath(path).parents
             }
             directories.discard(".")
+            # Folders with no visible files are not implied by any file path;
+            # find the ones something links to by looking on disk.
+            content_dir = self._filesystem.content_dir
+            unknown = {
+                target
+                for doc in self._documents.values()
+                for _, target in doc.references
+                if target not in self._files and target not in directories
+            }
+            directories.update(t for t in unknown if (content_dir / t).is_dir())
             return LinkSnapshot(
                 {source: doc.references for source, doc in self._documents.items()},
                 self._files,

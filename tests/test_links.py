@@ -417,6 +417,20 @@ class TestBrokenByMoves:
             BrokenLink("index.md", "docs/sub", "guides/sub"),
         ]
 
+    def test_links_to_an_empty_moved_directory_are_reported(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("docs/guide.md", "# Guide")
+        fs.create_directory("docs/empty")
+        fs.write_file("index.md", "[empty](docs/empty/) [gone](docs/missing/)")
+        index = LinkIndex(fs)
+        before = index.snapshot()
+        assert "docs/empty" in before.directories
+        assert "docs/missing" not in before.directories
+        moved = dict(fs.move_directory("docs", "guides"))
+        assert broken_by_moves(before, moved, {"docs": "guides"}) == [
+            BrokenLink("index.md", "docs/empty", "guides/empty"),
+        ]
+
     def test_relative_link_to_a_directory_breaks_when_the_file_moves(self, tmp_path):
         fs = FileSystem(tmp_path)
         fs.write_file("docs/a.md", "[assets](assets/)")

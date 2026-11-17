@@ -1468,6 +1468,12 @@ def create_mcp_server(
                     "Use intermediate paths for swap operations."
                 )
 
+            # The link scan awaits, so it must come before the filesystem
+            # checks: nothing may yield between those checks and the moves,
+            # or another request could invalidate them and leave the batch
+            # half applied.
+            links_before = await _link_snapshot()
+
             for m in moves:
                 if not filesystem.file_exists(m.source_path):
                     raise ValueError(f"Source file not found: {m.source_path}")
@@ -1477,7 +1483,6 @@ def create_mcp_server(
 
             results = []
             resources_changed = False
-            links_before = await _link_snapshot()
 
             for m in moves:
                 filesystem.move_file(m.source_path, m.dest_path)

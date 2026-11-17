@@ -1986,6 +1986,30 @@ async def test_delete_content_without_references_is_unchanged(linked_fs, mock_co
     assert result.content[0].text == "Deleted: index.md"
 
 
+async def test_move_content_batch_checks_after_the_link_scan(linked_fs, mock_context):
+    """A destination created while the link scan runs must abort the whole batch."""
+    from stash_mcp.links import LinkIndex
+
+    class _RacingIndex(LinkIndex):
+        def snapshot(self):
+            # Another request lands while this one is waiting on the scan.
+            linked_fs.write_file("taken.md", "someone else's file")
+            return super().snapshot()
+
+    mcp = create_mcp_server(linked_fs, link_index=_RacingIndex(linked_fs))
+    tool = await mcp.get_tool("move_content_batch")
+    with pytest.raises(ValueError, match="Destination already exists: taken.md"):
+        await tool.run({
+            "moves": [
+                MoveOperation(source_path="index.md", dest_path="home.md"),
+                MoveOperation(source_path="docs/notes.md", dest_path="taken.md"),
+            ],
+        })
+    assert linked_fs.file_exists("index.md")
+    assert not linked_fs.file_exists("home.md")
+    assert linked_fs.read_file("taken.md") == "someone else's file"
+
+
 async def test_move_succeeds_when_link_scan_fails(linked_fs, mock_context):
     from stash_mcp.links import LinkIndex
 
