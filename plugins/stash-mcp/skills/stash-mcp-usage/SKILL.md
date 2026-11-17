@@ -28,7 +28,7 @@ Think of Stash-MCP as a filesystem with guardrails:
 
 ## Content Types
 
-Stash stores files as-is on disk. Anything text-based round-trips losslessly through the tools; binary types (images, etc.) are stored and served as assets but should not be opened with `read_content` — you'll get raw bytes.
+Stash stores files as-is on disk. Anything text-based round-trips losslessly through the tools; binary types (images, etc.) are stored and served as assets. `read_content` refuses them because they are not UTF-8 text. Add images with `upload_content`, and keep the `sha` it returns to replace or delete them later. Executables, archives, PDFs and compiled code cannot be uploaded.
 
 ### Document types
 
@@ -41,7 +41,7 @@ Stash stores files as-is on disk. Anything text-based round-trips losslessly thr
 | **Web** | `.html`, `.htm` | Rendered in a sandboxed iframe. Fragments can also be embedded into markdown via ` ```stash-embed ` (CSS selector). |
 | **Structured text** | `.json`, `.yaml`, `.yml`, `.toml`, `.xml`, `.ini`, `.cfg` | Stored as text, no special rendering. |
 | **Code** | `.py`, `.js`, `.ts`, `.css`, `.rst`, `.txt`, `.log`, plus any other text extension | Stored as text. Searchable. |
-| **Image assets** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.bmp` | Served via `/ui/raw/<path>` for embedding. Do **not** `read_content` these — store and link instead. |
+| **Image assets** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.bmp` | Served via `/ui/raw/<path>` for embedding. Upload with `upload_content`; do **not** `read_content` these — store and link instead. |
 
 There is no extension allowlist for storage. Files with unknown extensions are accepted and served as `text/plain`.
 
@@ -91,7 +91,7 @@ Markdown is the host format — several other types can be embedded inline so a 
   **Errors** render inline (missing `src`, source not found, no selector match, ambiguous type, etc.) — they never silently drop content. If you see a red error box in a rendered doc, fix the embed reference.
 - **Raw HTML** — passes through the markdown renderer by design. `<details>`, `<img>`, `<video>`, `<iframe>`, `<div>` all work. Use sparingly; markdown syntax is preferable when it covers the case.
 
-**Cannot be embedded inline:** PDFs, Office documents (`.docx`, `.xlsx`, `.pptx`), Jupyter notebooks (`.ipynb`), and other binary formats. Link to them as assets if needed, but Stash has no native renderer for these — `read_content` will return unreadable bytes.
+**Cannot be embedded inline:** PDFs, Office documents (`.docx`, `.xlsx`, `.pptx`), Jupyter notebooks (`.ipynb`), and other binary formats. Stash has no native renderer for these, `read_content` refuses them, and `upload_content` does not accept them.
 
 **Rule of thumb:** if the asset is referenced from one document, embed it as a fenced block. If multiple documents reference it, store it as a standalone file and link.
 

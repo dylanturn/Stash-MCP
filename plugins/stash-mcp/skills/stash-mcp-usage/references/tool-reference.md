@@ -62,12 +62,15 @@ Create a new file. **Fails if the file already exists** — this is intentional 
 
 ### upload_content(path, data_base64, sha?)
 
-Store a file of any type (image, PDF, archive, text) from base64-encoded bytes, byte-for-byte. Use it for binaries; use `create_content` for text you are writing yourself.
+Store a document or image from base64-encoded bytes, byte-for-byte. Use it for images or to store an existing document unchanged; use `create_content` for text you are writing yourself.
 
+- Accepts only text documents (Markdown, HTML, JSON, YAML, CSV, SVG and the other text formats the store indexes) and images (PNG, JPEG, GIF, WebP, BMP, ICO). **Executables, archives, PDFs and compiled code are refused.**
+- Content must match the extension: text must be UTF-8 without NUL bytes, and an image must start with its format's signature. A binary renamed to `.png` or `.md` is rejected.
 - Without `sha` it creates the file and **fails if the file already exists**
 - To replace an existing file, pass the `sha` returned by the upload that wrote it — this is the SHA-256 of the raw bytes, not the `read_content` sha
 - Returns `path`, `created`, `size_bytes`, `mime_type`, and `sha`
 - Size is capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB of decoded bytes)
+- There is no tool that reads an image's bytes back. **Keep the returned `sha`**, because you need it to replace or delete the file.
 
 ### edit_content(file_path, sha, edits[]) / edit_content_batch(edit_operations[])
 
@@ -100,6 +103,8 @@ Replace the entire file content. Requires the current SHA.
 ### delete_content(path, sha)
 
 Delete a file permanently. Requires the current SHA. Irreversible outside of git history (if git tracking is enabled).
+
+The SHA can be the `read_content` sha (hash of the decoded text) or the raw-bytes sha from `upload_content`; either is accepted. Images and other binary files only have the raw-bytes sha, because `read_content` refuses files that are not UTF-8 text.
 
 ### move_content(source_path, dest_path) / move_content_batch(moves[]) / move_content_directory(source_path, dest_path)
 
