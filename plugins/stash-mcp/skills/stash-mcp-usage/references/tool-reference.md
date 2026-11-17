@@ -123,11 +123,18 @@ Rename or relocate files and directories.
 
 **Know what the report does and does not tell you:**
 
-- **It may not have run.** The check is advisory: if the link scan fails, the move still succeeds. The batch and directory variants then return `link_check: "unavailable"` with no `broken_links`, and `move_content` and `delete_content` say "Links were not checked" in their text. Treat that as unknown, not as clean — check with `inspect_content_links` and `find_content`.
-- **It may be incomplete.** A document that is too large, unreadable, or cannot be rendered is skipped, and links inside it are unknown. The batch and directory variants then return `link_check: "partial"` with the skipped documents in `unscanned_files`; `move_content` and `delete_content` say "Link check incomplete" and name them. Read those documents yourself. `inspect_content_links` lists the same documents under `unscanned_files`.
+- **It may not have run.** The check is advisory: if the link scan fails, the move still succeeds. The batch and directory variants then return `link_check: "unavailable"` with no `broken_links`, and `move_content` and `delete_content` say "Links were not checked" in their text. Treat that as unknown, not as clean. `inspect_content_links` relies on the same scan and may fail too, so fall back to `find_content` (see "Finding references by hand" below).
+- **It may be incomplete.** A document that is too large, unreadable, or cannot be rendered is skipped, and links inside it are unknown. The batch and directory variants then return `link_check: "partial"` with the skipped documents in `unscanned_files`; `move_content` and `delete_content` say "Link check incomplete" and name them. Links in every other document were checked, so only the named documents need a look: search them with `find_content` using `path_prefix`, or read them. `inspect_content_links` lists the same documents under `unscanned_files`.
 - **It only covers tracked references:** markdown and HTML links, images, and `stash-embed` sources, in markdown and HTML files up to 2 MB. Plain-text mentions of a path (prose, code samples, YAML, JSON, other file types) are never reported — search for those with `find_content`.
 - **Only links that worked before are reported.** A link that was already broken stays unreported.
 - So an empty `broken_links` with `link_check: "complete"` means no tracked link broke. It does not mean nothing refers to the old path.
+
+**Finding references by hand** (when the check was unavailable or partial, or for plain-text mentions):
+
+- Search for the file's **name**, not its full path: `find_content("api.json")`, not `find_content("specs/api.json")`. A relative link such as `../specs/api.json` or `api.json` does not contain the full path.
+- For a moved directory, search for the directory's name as well.
+- A common file name (`README.md`, `index.md`) will match unrelated files; read each hit to see which file it points at.
+- `find_content` only searches recognized text files and skips ones that are not valid UTF-8. A document reported as unscanned for that reason cannot be searched or reliably read; say so rather than assuming it has no references.
 
 ## Transactions
 

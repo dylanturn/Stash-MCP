@@ -384,8 +384,9 @@ def _format_broken_links(broken: list[BrokenLink]) -> str:
 # read as "nothing broke", so the gap is stated and a manual check named.
 _LINKS_NOT_CHECKED = (
     "\n\nLinks were not checked: the link scan failed, so this result says nothing "
-    "about broken links. Check references to the affected paths yourself with "
-    "inspect_content_links or find_content."
+    "about broken links. inspect_content_links relies on the same scan and may fail "
+    "too. Search for each affected file's name with find_content \u2014 the name, not "
+    "the full path, because relative links do not contain the path."
 )
 
 
@@ -400,8 +401,9 @@ def _format_unscanned(unscanned: list[str]) -> str:
     return (
         f"\n\nLink check incomplete: {len(unscanned)} document{'' if one else 's'} could "
         f"not be scanned, so links inside {'it' if one else 'them'} were not checked: "
-        f"{names}. Check {'it' if one else 'them'} yourself with read_content or "
-        "find_content."
+        f"{names}. Links elsewhere were checked. Search {'that document' if one else 'those'} "
+        "for each affected file's name with find_content, or read "
+        f"{'it' if one else 'them'} with read_content."
     )
 
 
