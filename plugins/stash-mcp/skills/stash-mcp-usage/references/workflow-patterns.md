@@ -173,7 +173,8 @@ commit_content_transaction(message="Reorganize: describe the new structure and w
 
 **Watch for:**
 - `move_content_directory` requires the destination not to exist
-- Moves do not rewrite links. Each move tool reports the links it broke (`broken_links`, or lines in `move_content`'s confirmation) — fix exactly those rather than scanning the store
+- Moves do not rewrite links. Each move tool reports the links it broke (`broken_links`, or lines in `move_content`'s confirmation) — start by fixing those
+- If a result has `links_checked: false`, or its text says "Links were not checked", the check did not run: find references yourself with `inspect_content_links` and `find_content` before committing
 - To check what depends on a file before moving or deleting it, call `inspect_content_links(path)`
-- `broken_links` covers markdown/HTML links, images, and `stash-embed` sources; plain-text mentions of a path (prose, code samples, YAML) are not tracked — use `find_content` for those
+- `broken_links` covers markdown/HTML links, images, and `stash-embed` sources; plain-text mentions of a path (prose, code samples, YAML) are not tracked — run `find_content` for the old path as well when a rename matters
 - Large reorganizations deserve a descriptive commit message explaining the rationale

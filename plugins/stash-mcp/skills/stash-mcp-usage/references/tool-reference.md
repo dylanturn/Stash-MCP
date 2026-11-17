@@ -103,7 +103,7 @@ Replace the entire file content. Requires the current SHA.
 
 Delete a file permanently. Requires the current SHA. Irreversible outside of git history (if git tracking is enabled).
 
-If other files still link to or embed the deleted file, the confirmation lists them. Fix or remove those references in the same transaction.
+If other files still link to or embed the deleted file, the confirmation lists them. Fix or remove those references in the same transaction. The same limits apply as for moves (below): a confirmation with no list is not proof that nothing mentions the file.
 
 ### move_content(source_path, dest_path) / move_content_batch(moves[]) / move_content_directory(source_path, dest_path)
 
@@ -118,8 +118,14 @@ Rename or relocate files and directories.
 - Other files still pointing at the old path are reported with the new location as `new_target`
 - Relative links inside a moved file that no longer resolve are reported with `old_target` equal to `new_target` (the target did not move; the linking file did)
 - Relative links between files that moved together keep working and are not reported
-- The list is capped at 50 entries; `broken_links_total` is set when there are more
-- No `broken_links` entries means the move broke nothing — no follow-up scan is needed
+- The list is capped at 50 entries; `broken_links_total` is set when there are more — fix those, then use `inspect_content_links` on the moved paths to find the rest
+
+**Know what the report does and does not tell you:**
+
+- **It may not have run.** The check is advisory: if the link scan fails, the move still succeeds. The batch and directory variants then return `links_checked: false` with no `broken_links`, and `move_content` and `delete_content` say "Links were not checked" in their text. Treat that as unknown, not as clean — check with `inspect_content_links` and `find_content`.
+- **It only covers tracked references:** markdown and HTML links, images, and `stash-embed` sources, in markdown and HTML files up to 2 MB. Plain-text mentions of a path (prose, code samples, YAML, JSON, other file types) are never reported — search for those with `find_content`.
+- **Only links that worked before are reported.** A link that was already broken stays unreported.
+- So an empty `broken_links` with `links_checked: true` means no tracked link broke. It does not mean nothing refers to the old path.
 
 ## Transactions
 

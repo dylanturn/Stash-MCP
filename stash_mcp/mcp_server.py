@@ -119,7 +119,9 @@ def _build_instructions(
             "for small changes) or overwrite_content (full replace). create_content "
             "is only for files that do not exist yet; delete_content also requires "
             "the sha. Moving or deleting a file can break links; the move and delete "
-            "tools report the links they broke so you can fix them in the same change."
+            "tools report the links they broke so you can fix them in the same change. "
+            "That report covers links, images and embeds, not plain-text mentions of a "
+            "path, and states when the check could not run."
         )
     if transactions_active:
         parts.append(
@@ -378,11 +380,25 @@ def _format_broken_links(broken: list[BrokenLink]) -> str:
     return "\n".join(lines)
 
 
+# Appended to a text result when the link check could not run. Silence would
+# read as "nothing broke", so the gap is stated and a manual check named.
+_LINKS_NOT_CHECKED = (
+    "\n\nLinks were not checked: the link scan failed, so this result says nothing "
+    "about broken links. Check references to the affected paths yourself with "
+    "inspect_content_links or find_content."
+)
+
+
 def _broken_links_fields(broken: list[BrokenLink] | None) -> dict:
-    """Render move-broken links as fields merged into a dict tool result."""
+    """Render move-broken links as fields merged into a dict tool result.
+
+    `links_checked` says whether the check ran at all: an empty
+    `broken_links` only means "nothing broke" when it is true.
+    """
     if broken is None:
-        return {}
+        return {"links_checked": False}
     fields: dict = {
+        "links_checked": True,
         "broken_links": [
             {"file": b.file, "old_target": b.old_target, "new_target": b.new_target}
             for b in broken[:_MAX_BROKEN_LINKS]
@@ -813,6 +829,9 @@ def create_mcp_server(
 
             If other files still link to or embed the deleted file, the
             confirmation lists them so the dangling references can be fixed.
+            Only links, images and stash-embed sources are tracked, not
+            plain-text mentions of the path; if the check could not run, the
+            confirmation says so.
 
             Args:
                 path: File path relative to content root
@@ -838,7 +857,7 @@ def create_mcp_server(
                 dangling = await asyncio.to_thread(link_index.backlinks, _content_key(path))
             except Exception:
                 logger.warning("Link scan after delete failed", exc_info=True)
-                dangling = []
+                return message + _LINKS_NOT_CHECKED
             if dangling:
                 names = ", ".join(link.path for link in dangling[:_MAX_BROKEN_LINKS])
                 if len(dangling) > _MAX_BROKEN_LINKS:
@@ -1320,6 +1339,9 @@ def create_mcp_server(
             Links are not rewritten. The confirmation lists every link the
             move broke — other files still pointing at the old path, and
             relative links inside the moved file — so they can be fixed.
+            Only links, images and stash-embed sources are tracked, not
+            plain-text mentions of the path; if the check could not run, the
+            confirmation says so.
 
             Args:
                 source_path: Current file path relative to content root
@@ -1337,7 +1359,9 @@ def create_mcp_server(
             logger.info(f"Moved: {source_path} -> {dest_path}")
             message = f"Moved: {source_path} -> {dest_path}"
             broken = _links_broken_by(links_before, {source_path: dest_path})
-            if broken:
+            if broken is None:
+                message += _LINKS_NOT_CHECKED
+            elif broken:
                 message += _format_broken_links(broken)
             return message
 
@@ -1375,11 +1399,14 @@ def create_mcp_server(
                 source_path: Current directory path relative to content root
                 dest_path: New directory path relative to content root
             Returns:
-                A dict with 'source', 'destination', 'files_moved' count, and
-                'broken_links': a list of {file, old_target, new_target} — edit
-                'file' so the link that reached 'old_target' reaches
-                'new_target' (capped at 50; 'broken_links_total' is set when
-                there are more)
+                A dict with 'source', 'destination', 'files_moved' count,
+                'links_checked', and 'broken_links': a list of
+                {file, old_target, new_target} — edit 'file' so the link that
+                reached 'old_target' reaches 'new_target' (capped at 50;
+                'broken_links_total' is set when there are more). When
+                'links_checked' is false the check could not run and
+                'broken_links' is absent: verify links yourself. Plain-text
+                mentions of a path are never tracked.
             """
             links_before = await _link_snapshot()
             moved_files = filesystem.move_directory(source_path, dest_path)
@@ -1440,9 +1467,12 @@ def create_mcp_server(
                 moves: List of move operations (max 10), each with source_path and dest_path
             Returns:
                 A dict with 'results' list containing source, destination, and
-                status per file, and 'broken_links': a list of
+                status per file, 'links_checked', and 'broken_links': a list of
                 {file, old_target, new_target} — edit 'file' so the link that
-                reached 'old_target' reaches 'new_target'
+                reached 'old_target' reaches 'new_target'. When 'links_checked'
+                is false the check could not run and 'broken_links' is absent:
+                verify links yourself. Plain-text mentions of a path are never
+                tracked.
             """
             if len(moves) == 0:
                 raise ValueError("At least one move operation is required.")

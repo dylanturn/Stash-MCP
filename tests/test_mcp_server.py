@@ -1921,6 +1921,7 @@ async def test_move_content_directory_reports_only_links_it_broke(linked_fs, moc
     tool = await create_mcp_server(linked_fs).get_tool("move_content_directory")
     data = _find_data(await tool.run({"source_path": "docs", "dest_path": "guides"}))
     assert data["files_moved"] == 2
+    assert data["links_checked"] is True
     # guide.md <-> notes.md are relative links between files that moved
     # together, and guide.md -> ../index.md still resolves: none are reported.
     assert data["broken_links"] == [
@@ -2022,10 +2023,40 @@ async def test_move_succeeds_when_link_scan_fails(linked_fs, mock_context):
     data = _find_data(await tool.run({
         "moves": [MoveOperation(source_path="index.md", dest_path="home.md")],
     }))
-    assert data == {"results": [
-        {"source": "index.md", "destination": "home.md", "result": "ok"},
-    ]}
+    # The move happened, and the result says the link check did not.
+    assert data == {
+        "results": [{"source": "index.md", "destination": "home.md", "result": "ok"}],
+        "links_checked": False,
+    }
     assert linked_fs.file_exists("home.md")
+
+    directory = await mcp.get_tool("move_content_directory")
+    data = _find_data(await directory.run({"source_path": "docs", "dest_path": "guides"}))
+    assert data["links_checked"] is False
+    assert "broken_links" not in data
+
+    single = await mcp.get_tool("move_content")
+    result = await single.run({"source_path": "home.md", "dest_path": "start.md"})
+    text = result.content[0].text
+    assert text.startswith("Moved: home.md -> start.md")
+    assert "Links were not checked" in text
+
+
+async def test_delete_says_when_links_were_not_checked(linked_fs, mock_context):
+    from stash_mcp.links import LinkIndex
+
+    class _FailingIndex(LinkIndex):
+        def backlinks(self, path):
+            raise OSError("scan failed")
+
+    mcp = create_mcp_server(linked_fs, link_index=_FailingIndex(linked_fs))
+    tool = await mcp.get_tool("delete_content")
+    content = linked_fs.read_file("docs/guide.md")
+    result = await tool.run({"path": "docs/guide.md", "sha": _sha(content)})
+    text = result.content[0].text
+    assert text.startswith("Deleted: docs/guide.md")
+    assert "Links were not checked" in text
+    assert not linked_fs.file_exists("docs/guide.md")
 
 
 async def test_link_tools_work_with_transactions(tmp_path, mock_context):

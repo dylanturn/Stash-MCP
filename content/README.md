@@ -35,7 +35,7 @@ Every modification is guarded by an optimistic-concurrency check: `read_content`
 - **`move_content_directory`** — moves a whole directory tree.
 - **`move_content_batch`** — up to 10 moves, validated all-or-nothing.
 - **`delete_content`** — `path`, `sha`. Deletes are permanent.
-- Moves and deletes do not rewrite links; they report the links they broke (`broken_links`, or lines in the confirmation text) so you can fix them in the same change.
+- Moves and deletes do not rewrite links; they report the links they broke (`broken_links`, or lines in the confirmation text) so you can fix them in the same change. The report covers links, images and embeds only — not plain-text mentions — and says so when the check could not run (`links_checked: false`, or "Links were not checked").
 
 ### Configuration-Dependent Tools
 
