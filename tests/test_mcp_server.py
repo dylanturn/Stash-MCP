@@ -1854,6 +1854,8 @@ async def test_inspect_content_links_incoming_and_outgoing(linked_fs):
         "incoming_count": 2,
         "outgoing_count": 2,
         "truncated": False,
+        "unscanned_files": [],
+        "unscanned_count": 0,
     }
 
 
@@ -1921,7 +1923,8 @@ async def test_move_content_directory_reports_only_links_it_broke(linked_fs, moc
     tool = await create_mcp_server(linked_fs).get_tool("move_content_directory")
     data = _find_data(await tool.run({"source_path": "docs", "dest_path": "guides"}))
     assert data["files_moved"] == 2
-    assert data["links_checked"] is True
+    assert data["link_check"] == "complete"
+    assert "unscanned_files" not in data
     # guide.md <-> notes.md are relative links between files that moved
     # together, and guide.md -> ../index.md still resolves: none are reported.
     assert data["broken_links"] == [
@@ -2026,13 +2029,13 @@ async def test_move_succeeds_when_link_scan_fails(linked_fs, mock_context):
     # The move happened, and the result says the link check did not.
     assert data == {
         "results": [{"source": "index.md", "destination": "home.md", "result": "ok"}],
-        "links_checked": False,
+        "link_check": "unavailable",
     }
     assert linked_fs.file_exists("home.md")
 
     directory = await mcp.get_tool("move_content_directory")
     data = _find_data(await directory.run({"source_path": "docs", "dest_path": "guides"}))
-    assert data["links_checked"] is False
+    assert data["link_check"] == "unavailable"
     assert "broken_links" not in data
 
     single = await mcp.get_tool("move_content")
@@ -2057,6 +2060,50 @@ async def test_delete_says_when_links_were_not_checked(linked_fs, mock_context):
     assert text.startswith("Deleted: docs/guide.md")
     assert "Links were not checked" in text
     assert not linked_fs.file_exists("docs/guide.md")
+
+
+async def test_tools_report_documents_the_link_scan_skipped(linked_fs, mock_context):
+    """An unreadable document may hold links; results must not pass as complete."""
+    (linked_fs.content_dir / "docs" / "binary.md").write_bytes(b"\xff\xfe[x](guide.md)")
+    linked_fs.write_file("loose.md", "# Loose")
+    mcp = create_mcp_server(linked_fs)
+
+    inspect = _find_data(
+        await (await mcp.get_tool("inspect_content_links")).run({"path": "docs/guide.md"})
+    )
+    assert inspect["unscanned_files"] == ["docs/binary.md"]
+    assert inspect["unscanned_count"] == 1
+
+    result = await (await mcp.get_tool("move_content")).run(
+        {"source_path": "loose.md", "dest_path": "kept/loose.md"}
+    )
+    text = result.content[0].text
+    assert text.startswith("Moved: loose.md -> kept/loose.md")
+    assert "Link check incomplete: 1 document could not be scanned" in text
+    assert "docs/binary.md" in text
+
+    batch = _find_data(await (await mcp.get_tool("move_content_batch")).run({
+        "moves": [MoveOperation(source_path="kept/loose.md", dest_path="loose.md")],
+    }))
+    assert batch["link_check"] == "partial"
+    assert batch["broken_links"] == []
+    assert batch["unscanned_files"] == ["docs/binary.md"]
+
+    # The unscanned document moves with its folder and is named by its new path.
+    directory = _find_data(await (await mcp.get_tool("move_content_directory")).run(
+        {"source_path": "docs", "dest_path": "guides"}
+    ))
+    assert directory["link_check"] == "partial"
+    assert directory["unscanned_files"] == ["guides/binary.md"]
+
+    content = linked_fs.read_file("loose.md")
+    result = await (await mcp.get_tool("delete_content")).run(
+        {"path": "loose.md", "sha": _sha(content)}
+    )
+    text = result.content[0].text
+    assert text.startswith("Deleted: loose.md")
+    assert "Link check incomplete" in text
+    assert "guides/binary.md" in text
 
 
 async def test_link_tools_work_with_transactions(tmp_path, mock_context):

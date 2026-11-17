@@ -121,7 +121,7 @@ def _build_instructions(
             "the sha. Moving or deleting a file can break links; the move and delete "
             "tools report the links they broke so you can fix them in the same change. "
             "That report covers links, images and embeds, not plain-text mentions of a "
-            "path, and states when the check could not run."
+            "path, and states when the check could not run or was incomplete."
         )
     if transactions_active:
         parts.append(
@@ -389,23 +389,46 @@ _LINKS_NOT_CHECKED = (
 )
 
 
-def _broken_links_fields(broken: list[BrokenLink] | None) -> dict:
-    """Render move-broken links as fields merged into a dict tool result.
+def _format_unscanned(unscanned: list[str]) -> str:
+    """Render documents the link scan had to skip, for a text tool result."""
+    if not unscanned:
+        return ""
+    one = len(unscanned) == 1
+    names = ", ".join(unscanned[:_MAX_BROKEN_LINKS])
+    if len(unscanned) > _MAX_BROKEN_LINKS:
+        names += f", \u2026 and {len(unscanned) - _MAX_BROKEN_LINKS} more"
+    return (
+        f"\n\nLink check incomplete: {len(unscanned)} document{'' if one else 's'} could "
+        f"not be scanned, so links inside {'it' if one else 'them'} were not checked: "
+        f"{names}. Check {'it' if one else 'them'} yourself with read_content or "
+        "find_content."
+    )
 
-    `links_checked` says whether the check ran at all: an empty
-    `broken_links` only means "nothing broke" when it is true.
+
+def _link_check_fields(checked: tuple[list[BrokenLink], list[str]] | None) -> dict:
+    """Render a move's link check as fields merged into a dict tool result.
+
+    `link_check` says how far the result can be trusted: "complete", "partial"
+    (the documents in `unscanned_files` could not be scanned, so links inside
+    them are unknown) or "unavailable" (the check did not run at all). An
+    empty `broken_links` only means "nothing broke" when it is "complete".
     """
-    if broken is None:
-        return {"links_checked": False}
+    if checked is None:
+        return {"link_check": "unavailable"}
+    broken, unscanned = checked
     fields: dict = {
-        "links_checked": True,
+        "link_check": "partial" if unscanned else "complete",
         "broken_links": [
             {"file": b.file, "old_target": b.old_target, "new_target": b.new_target}
             for b in broken[:_MAX_BROKEN_LINKS]
-        ]
+        ],
     }
     if len(broken) > _MAX_BROKEN_LINKS:
         fields["broken_links_total"] = len(broken)
+    if unscanned:
+        fields["unscanned_files"] = unscanned[:_MAX_BROKEN_LINKS]
+        if len(unscanned) > _MAX_BROKEN_LINKS:
+            fields["unscanned_files_total"] = len(unscanned)
     return fields
 
 
@@ -451,18 +474,21 @@ def create_mcp_server(
         before: LinkSnapshot | None,
         moves: dict[str, str],
         directory_moves: dict[str, str] | None = None,
-    ) -> list[BrokenLink] | None:
+    ) -> tuple[list[BrokenLink], list[str]] | None:
+        """Return the links a move broke and the documents it could not vouch for."""
         if before is None:
             return None
         try:
-            return broken_by_moves(
+            moved = {_content_key(old): _content_key(new) for old, new in moves.items()}
+            broken = broken_by_moves(
                 before,
-                {_content_key(old): _content_key(new) for old, new in moves.items()},
+                moved,
                 {
                     _content_key(old): _content_key(new)
                     for old, new in (directory_moves or {}).items()
                 },
             )
+            return broken, sorted(moved.get(path, path) for path in before.unscanned)
         except Exception:
             logger.warning("Link check after move failed", exc_info=True)
             return None
@@ -830,8 +856,8 @@ def create_mcp_server(
             If other files still link to or embed the deleted file, the
             confirmation lists them so the dangling references can be fixed.
             Only links, images and stash-embed sources are tracked, not
-            plain-text mentions of the path; if the check could not run, the
-            confirmation says so.
+            plain-text mentions of the path; if the check could not run, or
+            had to skip some documents, the confirmation says so.
 
             Args:
                 path: File path relative to content root
@@ -853,8 +879,11 @@ def create_mcp_server(
             emit(CONTENT_DELETED, path)
             logger.info(f"Deleted: {path}")
             message = f"Deleted: {path}"
+            def _references() -> tuple[list, list[str]]:
+                return link_index.backlinks(_content_key(path)), link_index.unscanned()
+
             try:
-                dangling = await asyncio.to_thread(link_index.backlinks, _content_key(path))
+                dangling, unscanned = await asyncio.to_thread(_references)
             except Exception:
                 logger.warning("Link scan after delete failed", exc_info=True)
                 return message + _LINKS_NOT_CHECKED
@@ -868,7 +897,7 @@ def create_mcp_server(
                     f"{'has a' if len(dangling) == 1 else 'have'} dangling "
                     f"link{'s' if len(dangling) != 1 else ''}: {names}"
                 )
-            return message
+            return message + _format_unscanned(unscanned)
 
     # --- Read-only tools (always registered) ---
 
@@ -1164,6 +1193,9 @@ def create_mcp_server(
             'incoming_count', and 'outgoing_count'. 'kind' is 'link' or
             'embed' (images, media, stash-embed blocks). Each list is capped
             at 200 entries; 'truncated' is true when a count exceeds that.
+            'unscanned_files' lists documents whose links could not be read
+            (too large, unreadable, or not renderable): while it is not
+            empty, 'incoming' may be missing references from those documents.
         """
         resolved = filesystem._resolve_path(path)
         if resolved.is_dir():
@@ -1173,6 +1205,7 @@ def create_mcp_server(
         key = _content_key(path)
         incoming = await asyncio.to_thread(link_index.backlinks, key)
         outgoing = await asyncio.to_thread(link_index.outgoing, key)
+        unscanned = await asyncio.to_thread(link_index.unscanned)
         return {
             "path": key,
             "exists": resolved.is_file(),
@@ -1187,6 +1220,8 @@ def create_mcp_server(
             "incoming_count": len(incoming),
             "outgoing_count": len(outgoing),
             "truncated": max(len(incoming), len(outgoing)) > _MAX_INSPECTED_LINKS,
+            "unscanned_files": unscanned[:_MAX_BROKEN_LINKS],
+            "unscanned_count": len(unscanned),
         }
 
     @mcp.tool(
@@ -1340,8 +1375,8 @@ def create_mcp_server(
             move broke — other files still pointing at the old path, and
             relative links inside the moved file — so they can be fixed.
             Only links, images and stash-embed sources are tracked, not
-            plain-text mentions of the path; if the check could not run, the
-            confirmation says so.
+            plain-text mentions of the path; if the check could not run, or
+            had to skip some documents, the confirmation says so.
 
             Args:
                 source_path: Current file path relative to content root
@@ -1358,12 +1393,13 @@ def create_mcp_server(
             emit(CONTENT_MOVED, dest_path, source_path=source_path)
             logger.info(f"Moved: {source_path} -> {dest_path}")
             message = f"Moved: {source_path} -> {dest_path}"
-            broken = _links_broken_by(links_before, {source_path: dest_path})
-            if broken is None:
-                message += _LINKS_NOT_CHECKED
-            elif broken:
+            checked = _links_broken_by(links_before, {source_path: dest_path})
+            if checked is None:
+                return message + _LINKS_NOT_CHECKED
+            broken, unscanned = checked
+            if broken:
                 message += _format_broken_links(broken)
-            return message
+            return message + _format_unscanned(unscanned)
 
         @_write_tool(
             annotations=ToolAnnotations(
@@ -1400,13 +1436,15 @@ def create_mcp_server(
                 dest_path: New directory path relative to content root
             Returns:
                 A dict with 'source', 'destination', 'files_moved' count,
-                'links_checked', and 'broken_links': a list of
+                'link_check', and 'broken_links': a list of
                 {file, old_target, new_target} — edit 'file' so the link that
                 reached 'old_target' reaches 'new_target' (capped at 50;
-                'broken_links_total' is set when there are more). When
-                'links_checked' is false the check could not run and
-                'broken_links' is absent: verify links yourself. Plain-text
-                mentions of a path are never tracked.
+                'broken_links_total' is set when there are more).
+                'link_check' is "complete", "partial" (links inside the
+                documents listed in 'unscanned_files' are unknown — check
+                those yourself) or "unavailable" (the check did not run and
+                'broken_links' is absent). Plain-text mentions of a path are
+                never tracked.
             """
             links_before = await _link_snapshot()
             moved_files = filesystem.move_directory(source_path, dest_path)
@@ -1424,14 +1462,14 @@ def create_mcp_server(
                 await ctx.send_resource_list_changed()
 
             logger.info(f"Moved directory: {source_path} -> {dest_path} ({len(moved_files)} files)")
-            broken = _links_broken_by(
+            checked = _links_broken_by(
                 links_before, dict(moved_files), {source_path: dest_path}
             )
             return {
                 "source": source_path,
                 "destination": dest_path,
                 "files_moved": len(moved_files),
-                **_broken_links_fields(broken),
+                **_link_check_fields(checked),
             }
 
         @_write_tool(
@@ -1467,12 +1505,13 @@ def create_mcp_server(
                 moves: List of move operations (max 10), each with source_path and dest_path
             Returns:
                 A dict with 'results' list containing source, destination, and
-                status per file, 'links_checked', and 'broken_links': a list of
+                status per file, 'link_check', and 'broken_links': a list of
                 {file, old_target, new_target} — edit 'file' so the link that
-                reached 'old_target' reaches 'new_target'. When 'links_checked'
-                is false the check could not run and 'broken_links' is absent:
-                verify links yourself. Plain-text mentions of a path are never
-                tracked.
+                reached 'old_target' reaches 'new_target'. 'link_check' is
+                "complete", "partial" (links inside the documents listed in
+                'unscanned_files' are unknown — check those yourself) or
+                "unavailable" (the check did not run and 'broken_links' is
+                absent). Plain-text mentions of a path are never tracked.
             """
             if len(moves) == 0:
                 raise ValueError("At least one move operation is required.")
@@ -1531,10 +1570,10 @@ def create_mcp_server(
             if resources_changed:
                 await ctx.send_resource_list_changed()
 
-            broken = _links_broken_by(
+            checked = _links_broken_by(
                 links_before, {m.source_path: m.dest_path for m in moves}
             )
-            return {"results": results, **_broken_links_fields(broken)}
+            return {"results": results, **_link_check_fields(checked)}
 
     # --- Search tool (conditional) ---
 

@@ -253,10 +253,14 @@ class TestLinkIndex:
         index = LinkIndex(fs)
         index.backlinks("index.md")
 
+        import stash_mcp.links as links_module
+
         reads = []
-        original = fs.try_read_text
+        original = links_module.extract_references
         monkeypatch.setattr(
-            fs, "try_read_text", lambda path: reads.append(path) or original(path)
+            links_module,
+            "extract_references",
+            lambda path, content: reads.append(path) or original(path, content),
         )
         index.backlinks("index.md")
         assert reads == []
@@ -281,6 +285,72 @@ class TestLinkIndex:
         (fs.content_dir / "broken.md").write_bytes(b"\xff\xfe[x](index.md)")
         index = LinkIndex(fs)
         assert [b.path for b in index.backlinks("index.md")] == ["docs/guide.md"]
+        # Skipped is not the same as "has no links": the gap is reported.
+        assert index.unscanned() == ["broken.md"]
+        assert index.snapshot().unscanned == frozenset({"broken.md"})
+
+    def test_oversized_documents_are_reported_as_unscanned(self, fs, monkeypatch):
+        import stash_mcp.links as links_module
+
+        monkeypatch.setattr(links_module, "_MAX_SCAN_BYTES", 40)
+        fs.write_file("big.md", "[home](index.md) " + "padding " * 10)
+        index = LinkIndex(fs)
+        assert index.unscanned() == ["big.md", "index.md"]
+        assert "big.md" not in [b.path for b in index.backlinks("index.md")]
+
+    def test_document_the_renderer_fails_on_is_unscanned_until_it_changes(
+        self, fs, monkeypatch
+    ):
+        import stash_mcp.links as links_module
+
+        calls = []
+        original = links_module.extract_references
+
+        def flaky(path, content):
+            calls.append(path)
+            if path == "docs/notes.md" and "fixed" not in content:
+                raise RuntimeError("renderer bug")
+            return original(path, content)
+
+        monkeypatch.setattr(links_module, "extract_references", flaky)
+        index = LinkIndex(fs)
+        assert index.unscanned() == ["docs/notes.md"]
+        assert [b.path for b in index.backlinks("docs/guide.md")] == ["index.md"]
+
+        # Deterministic for the same content, so it is not rendered again...
+        calls.clear()
+        assert index.unscanned() == ["docs/notes.md"]
+        assert calls == []
+
+        # ...until the file changes.
+        fs.write_file("docs/notes.md", "fixed: see the [guide](guide.md).")
+        assert index.unscanned() == []
+        assert [b.path for b in index.backlinks("docs/guide.md")] == [
+            "docs/notes.md", "index.md",
+        ]
+
+    def test_transient_read_failure_is_retried(self, fs, monkeypatch):
+        from pathlib import Path
+
+        failing = {"on": True}
+        original = Path.read_text
+
+        def read_text(self, *args, **kwargs):
+            if failing["on"] and self.name == "notes.md":
+                raise OSError("temporarily unavailable")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+        index = LinkIndex(fs)
+        assert index.unscanned() == ["docs/notes.md"]
+        assert [b.path for b in index.backlinks("docs/guide.md")] == ["index.md"]
+
+        # The file itself has not changed, but the next query tries again.
+        failing["on"] = False
+        assert index.unscanned() == []
+        assert [b.path for b in index.backlinks("docs/guide.md")] == [
+            "docs/notes.md", "index.md",
+        ]
 
     def test_graph_has_every_document_and_only_existing_targets(self, fs):
         fs.write_file("orphan.md", "# Orphan")

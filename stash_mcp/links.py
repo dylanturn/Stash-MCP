@@ -18,7 +18,7 @@ from urllib.parse import unquote
 import markdown as md
 import yaml
 
-from .filesystem import FileSystem
+from .filesystem import FileSystem, FileSystemError
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +112,15 @@ class LinkSnapshot:
     time — two links to the same file, one relative and one root-absolute,
     fare differently. A link may point at a folder, so `directories` holds
     every folder that contains a file, plus any other existing folder a
-    reference points at (an empty one, say).
+    reference points at (an empty one, say). `unscanned` names the documents
+    whose references are unknown, so anything derived from the snapshot is
+    incomplete with respect to them.
     """
 
     references: dict[str, tuple[tuple[Reference, str], ...]]
     files: frozenset[str]
     directories: frozenset[str]
+    unscanned: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -137,10 +140,19 @@ class BrokenLink:
 
 @dataclass(frozen=True)
 class _Document:
-    signature: tuple[int, int]
+    """What is known about one scannable document.
+
+    `scanned` is False when its references could not be determined — too
+    large, unreadable, or the renderer failed — which is not the same as
+    having none. `signature` is None when the failure may be temporary, so
+    it never matches and the document is tried again on the next refresh.
+    """
+
+    signature: tuple[int, int] | None
     title: str | None
     links: dict[str, str]
     references: tuple[tuple[Reference, str], ...]
+    scanned: bool = True
 
 
 def _base_dir(path: str) -> str:
@@ -422,21 +434,7 @@ class LinkIndex:
                 documents[path] = cached
                 continue
             changed = True
-            links: dict[str, str] = {}
-            references: tuple[tuple[Reference, str], ...] = ()
-            title = None
-            if st.st_size <= _MAX_SCAN_BYTES:
-                content = self._filesystem.try_read_text(path)
-                if content is not None:
-                    try:
-                        raw_references, title = extract_references(path, content)
-                    except Exception:
-                        # One document the renderer chokes on must not take
-                        # the whole graph down with it.
-                        logger.warning("Could not scan '%s' for links", path, exc_info=True)
-                    else:
-                        links, references = _resolve_references(path, raw_references)
-            documents[path] = _Document(signature, title, links, references)
+            documents[path] = self._scan(path, st.st_size, signature, cached)
 
         if not changed and documents.keys() == self._documents.keys():
             return
@@ -447,6 +445,50 @@ class LinkIndex:
                 incoming.setdefault(target, []).append(Backlink(source, doc.title, kind))
         self._documents = documents
         self._incoming = incoming
+
+    def _scan(
+        self, path: str, size: int, signature: tuple[int, int], cached: _Document | None
+    ) -> _Document:
+        """Read one document's references, or record that they are unknown.
+
+        A document that cannot be scanned must not take the graph down with
+        it, but neither may it pass for a document without links: it is kept
+        as unscanned. Failures that depend only on the content (too large,
+        not UTF-8, the renderer raising) are cached until the file changes;
+        an I/O error may clear up, so that one is retried every refresh.
+        """
+        def unscanned(reason: str, *, retry: bool = False, exc_info: bool = False) -> _Document:
+            # Say so once, not on every refresh while the cause persists.
+            if cached is None or cached.scanned:
+                logger.warning("Links in '%s' not scanned: %s", path, reason, exc_info=exc_info)
+            return _Document(None if retry else signature, None, {}, (), scanned=False)
+
+        if size > _MAX_SCAN_BYTES:
+            return unscanned(f"larger than {_MAX_SCAN_BYTES:,} bytes")
+        try:
+            content = self._filesystem._resolve_path(path).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return unscanned("not valid UTF-8")
+        except FileSystemError as exc:
+            return unscanned(str(exc))
+        except OSError as exc:
+            return unscanned(f"read failed ({exc})", retry=True)
+        try:
+            raw_references, title = extract_references(path, content)
+        except Exception:
+            return unscanned("could not be rendered", exc_info=True)
+        links, references = _resolve_references(path, raw_references)
+        return _Document(signature, title, links, references)
+
+    def unscanned(self) -> list[str]:
+        """Return the documents whose references could not be determined.
+
+        While this is non-empty, backlinks and move checks are incomplete:
+        links inside these documents are not in the graph.
+        """
+        with self._lock:
+            self._refresh()
+            return sorted(path for path, doc in self._documents.items() if not doc.scanned)
 
     def backlinks(self, path: str) -> list[Backlink]:
         """Return the documents that reference `path`, sorted by path."""
@@ -493,6 +535,7 @@ class LinkIndex:
                 {source: doc.references for source, doc in self._documents.items()},
                 self._files,
                 frozenset(directories),
+                frozenset(path for path, doc in self._documents.items() if not doc.scanned),
             )
 
     def graph(self) -> dict:

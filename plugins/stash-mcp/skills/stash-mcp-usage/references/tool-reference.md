@@ -35,6 +35,7 @@ List the files that reference a file (`incoming`) and the files it references (`
 - Works for any file as the target (e.g. which documents embed an image); only markdown and HTML files have outgoing references
 - `kind` is `link` or `embed` (images, media, `stash-embed` blocks)
 - A path that does not exist returns `exists: false` with any dangling references to it under `incoming`
+- `unscanned_files` lists documents whose links could not be read; while it is not empty, `incoming` may be missing references from them
 
 ### search_content(query, max_results?, file_types?)
 
@@ -122,10 +123,11 @@ Rename or relocate files and directories.
 
 **Know what the report does and does not tell you:**
 
-- **It may not have run.** The check is advisory: if the link scan fails, the move still succeeds. The batch and directory variants then return `links_checked: false` with no `broken_links`, and `move_content` and `delete_content` say "Links were not checked" in their text. Treat that as unknown, not as clean — check with `inspect_content_links` and `find_content`.
+- **It may not have run.** The check is advisory: if the link scan fails, the move still succeeds. The batch and directory variants then return `link_check: "unavailable"` with no `broken_links`, and `move_content` and `delete_content` say "Links were not checked" in their text. Treat that as unknown, not as clean — check with `inspect_content_links` and `find_content`.
+- **It may be incomplete.** A document that is too large, unreadable, or cannot be rendered is skipped, and links inside it are unknown. The batch and directory variants then return `link_check: "partial"` with the skipped documents in `unscanned_files`; `move_content` and `delete_content` say "Link check incomplete" and name them. Read those documents yourself. `inspect_content_links` lists the same documents under `unscanned_files`.
 - **It only covers tracked references:** markdown and HTML links, images, and `stash-embed` sources, in markdown and HTML files up to 2 MB. Plain-text mentions of a path (prose, code samples, YAML, JSON, other file types) are never reported — search for those with `find_content`.
 - **Only links that worked before are reported.** A link that was already broken stays unreported.
-- So an empty `broken_links` with `links_checked: true` means no tracked link broke. It does not mean nothing refers to the old path.
+- So an empty `broken_links` with `link_check: "complete"` means no tracked link broke. It does not mean nothing refers to the old path.
 
 ## Transactions
 
