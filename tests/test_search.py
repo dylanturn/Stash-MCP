@@ -876,6 +876,8 @@ class TestSearchConfig:
         monkeypatch.setattr(Config, "SEARCH_RERANK_MODEL", "test-reranker")
         monkeypatch.setattr(Config, "SEARCH_RERANK_CANDIDATES", 7)
         monkeypatch.setattr(Config, "SEARCH_RERANK_MARGIN", 0.25)
+        monkeypatch.setattr(Config, "SEARCH_NOISE_FLOOR", 0.61)
+        monkeypatch.setattr(Config, "SEARCH_NOISE_FLOOR_TEXT", 0.72)
 
         create = module._create_search_engine
         engine = create(None) if module_name == "stash_mcp.server" else create()
@@ -893,6 +895,14 @@ class TestSearchConfig:
         assert captured["rerank_model"] == "test-reranker"
         assert captured["rerank_candidates"] == 7
         assert captured["rerank_margin"] == 0.25
+        assert captured["noise_floor_question"] == 0.61
+        assert captured["noise_floor_text"] == 0.72
+
+    def test_noise_floors_are_measured_unless_configured(self):
+        from stash_mcp.config import Config
+
+        assert Config.SEARCH_NOISE_FLOOR is None
+        assert Config.SEARCH_NOISE_FLOOR_TEXT is None
 
     def test_hybrid_retrieval_on_by_default_when_bm25s_is_installed(self):
         """BM25 catches the exact-token queries dense retrieval is worst at."""

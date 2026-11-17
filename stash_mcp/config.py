@@ -168,6 +168,21 @@ class Config:
         os.getenv("STASH_SEARCH_RERANK_MARGIN", "0.1")
     )
 
+    # Similarity below which a result is treated as a nearest neighbour rather
+    # than a match. Unset = measured from the index with probe queries (see
+    # SearchEngine.noise_floor); set only for a store the probes do not suit.
+    # _TEXT is the floor for raw working text (input_type=text).
+    SEARCH_NOISE_FLOOR: float | None = (
+        float(os.getenv("STASH_SEARCH_NOISE_FLOOR"))
+        if os.getenv("STASH_SEARCH_NOISE_FLOOR")
+        else None
+    )
+    SEARCH_NOISE_FLOOR_TEXT: float | None = (
+        float(os.getenv("STASH_SEARCH_NOISE_FLOOR_TEXT"))
+        if os.getenv("STASH_SEARCH_NOISE_FLOOR_TEXT")
+        else None
+    )
+
     # Model cache directory for locally downloaded embedding weights. The ONNX
     # backend stores its files under <dir>/fastembed; the Docker image also
     # points HF_HOME here for the torch (sentence-transformers) path.

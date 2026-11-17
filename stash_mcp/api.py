@@ -5,6 +5,7 @@ import logging
 import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -316,23 +317,47 @@ def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> Fas
             q: str,
             max_results: int = 5,
             file_types: str | None = None,
+            min_similarity: float | None = None,
+            relevant_only: bool = False,
+            input_type: Literal["question", "text"] = "question",
         ):
             """Semantic search across stashed content.
+
+            Each result carries ``score`` (what the list is ordered by, only
+            comparable within one response) and ``similarity`` (the query-to-chunk
+            cosine, comparable across requests). ``similarity_floor`` is what
+            input unrelated to this store reaches; ``above_floor`` marks the
+            results that beat it.
 
             Args:
                 q: Search query.
                 max_results: Maximum number of results (default 5).
                 file_types: Comma-separated file extensions (e.g. ".md,.py").
+                min_similarity: Drop results whose similarity is below this.
+                relevant_only: Drop results below the similarity floor, so a
+                    query the store has nothing on returns an empty list.
+                input_type: What ``q`` is, which selects the floor: "question"
+                    for a natural-language query, "text" for raw working text
+                    (command output, logs, diffs, source).
             """
             types_list = None
             if file_types:
                 types_list = [t.strip() for t in file_types.split(",") if t.strip()]
 
+            floor = await search_engine.noise_floor(input_type)
+            thresholds = [min_similarity, floor if relevant_only else None]
+            thresholds = [t for t in thresholds if t is not None]
+
             results = await search_engine.search(
-                q, max_results=max_results, file_types=types_list
+                q,
+                max_results=max_results,
+                file_types=types_list,
+                min_similarity=max(thresholds) if thresholds else None,
             )
             return {
                 "query": q,
+                "input_type": input_type,
+                "similarity_floor": floor,
                 "results": [
                     {
                         "file_path": r.file_path,
@@ -340,6 +365,12 @@ def create_api(filesystem: FileSystem, lifespan=None, search_engine=None) -> Fas
                         "content": r.content,
                         "context": r.context,
                         "score": r.score,
+                        "similarity": r.similarity,
+                        "above_floor": (
+                            r.similarity >= floor
+                            if floor is not None and r.similarity is not None
+                            else None
+                        ),
                     }
                     for r in results
                 ],
