@@ -209,7 +209,9 @@ def _html_base_dir(base: str, document_dir: str) -> str | None:
         return None
     path = unquote(re.split(r"[#?]", base, maxsplit=1)[0])
     if path.startswith("/"):
-        joined = path.lstrip("/")
+        # Rooted the same way as a rooted link: `/ui/raw/shared/` is the
+        # store's `shared/` folder as the viewer serves it.
+        joined = _UI_ROUTE_RE.sub("", path).lstrip("/")
     else:
         joined = posixpath.join(document_dir, path) if document_dir else path
     # A base URL names a resource; relative URLs replace its last segment.

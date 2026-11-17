@@ -195,6 +195,16 @@ class TestExtractLinks:
             "shared/img/a.png": EMBED,
             "rooted.md": LINK,
         }
+        # A base given as a viewer URL addresses the same folder in the store.
+        for viewer_base in ("/ui/raw/shared/", "/ui/browse/shared/index.html", "/ui/raw/shared/x"):
+            served = f'<head><base href="{viewer_base}"></head>{body}'
+            assert extract_links("site/index.html", served)[0] == {
+                "shared/page.md": LINK,
+                "shared/img/a.png": EMBED,
+                "rooted.md": LINK,
+            }
+        served_root = f'<head><base href="/ui/raw/"></head>{body}'
+        assert "page.md" in extract_links("site/index.html", served_root)[0]
         # Only the first base counts, and one above the root leaves the store.
         first = f'<base href="one/"><base href="two/">{body}'
         assert "site/one/page.md" in extract_links("site/index.html", first)[0]
