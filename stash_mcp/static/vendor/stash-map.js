@@ -158,6 +158,10 @@ function render(root,data,opts){
   var view={x:0, y:0, k:1};
   var autoFit=true;     // follow the layout until the reader takes over
   var hover=null, dragNode=null, panning=false, moved=false, last=null;
+  /* The pointer and the keyboard can each pick a page. One page is "current"
+     at a time — see current() — and it is the one that is highlighted, named
+     in the status line, and opened by Enter, so those never disagree. Taking
+     up the arrow keys drops any hover left behind by a resting pointer. */
   var selected=null;    // the page keyboard navigation is on
   var keyboard=false;   // true while the canvas is being driven by keys
   var alpha=1, alphaTarget=0, running=false, drawQueued=false;
@@ -252,7 +256,7 @@ function render(root,data,opts){
     /* A hovered page dims everything but its neighbourhood. The focused
        page is only marked — ring, teal links, labels — so the rest of the
        map stays readable while exploring from it. */
-    var hot=dragNode||hover||(keyboard?selected:null);
+    var hot=current();
     var mark=hot||focus;
     if(mark&&nodes.indexOf(mark)<0){ hot=null; mark=null; }
     var marked=null;
@@ -354,8 +358,9 @@ function render(root,data,opts){
     }
     return best;
   }
+  function current(){ return dragNode||hover||(keyboard?selected:null); }
   function refreshStatus(){
-    var n=dragNode||hover||(keyboard?selected:null);
+    var n=current();
     status.textContent='';
     if(n){
       status.appendChild(el('strong',null,n.title||basename(n.path)));
@@ -371,6 +376,11 @@ function render(root,data,opts){
     canvas.style.cursor=n?'pointer':'';
     refreshStatus();
     requestDraw();
+  }
+  function useKeyboard(){
+    keyboard=true;
+    hover=null;
+    canvas.style.cursor='';
   }
   function open(n,ev){
     var url='/ui/browse/'+n.path.split('/').map(encodeURIComponent).join('/');
@@ -474,7 +484,7 @@ function render(root,data,opts){
   }
   canvas.addEventListener('focus',function(){
     /* Only a keyboard arrival selects a page; a click should not. */
-    keyboard=canvas.matches(':focus-visible');
+    if(canvas.matches(':focus-visible')) useKeyboard();
     if(keyboard&&!present(selected)) selected=startNode();
     if(keyboard&&selected) reveal(selected);
     refreshStatus();
@@ -488,12 +498,13 @@ function render(root,data,opts){
   canvas.addEventListener('keydown',function(ev){
     var key=ev.key;
     if(key==='Enter'){
-      if(keyboard&&present(selected)){ ev.preventDefault(); open(selected,ev); }
+      var target=current();
+      if(keyboard&&!dragNode&&present(target)){ ev.preventDefault(); open(target,ev); }
       return;
     }
     if(ev.metaKey||ev.ctrlKey||ev.altKey) return;   // leave browser shortcuts alone
     var arrows={ArrowRight:[1,0], ArrowLeft:[-1,0], ArrowDown:[0,1], ArrowUp:[0,-1]};
-    if(arrows[key]){ keyboard=true; step(arrows[key][0],arrows[key][1]); }
+    if(arrows[key]){ useKeyboard(); step(arrows[key][0],arrows[key][1]); }
     else if(key==='+'||key==='='){ zoomBy(1.25); }
     else if(key==='-'||key==='_'){ zoomBy(0.8); }
     else if(key==='0'){ autoFit=true; fit(); requestDraw(); }
