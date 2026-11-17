@@ -329,6 +329,50 @@ class TestLinkIndex:
             "docs/notes.md", "index.md",
         ]
 
+    def test_document_that_cannot_be_inspected_is_unscanned_and_retried(
+        self, fs, monkeypatch
+    ):
+        from pathlib import Path
+
+        # The file is listed, then becomes unreachable before the index gets
+        # to it: fail only once the listing has returned.
+        failing = {"on": True, "armed": False}
+        original = Path.stat
+        real_listing = fs.list_all_files
+
+        def listing():
+            failing["armed"] = False
+            files = real_listing()
+            failing["armed"] = failing["on"]
+            return files
+
+        def stat(self, *args, **kwargs):
+            if failing["armed"] and self == fs.content_dir / "docs/notes.md":
+                raise PermissionError("not reachable right now")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(fs, "list_all_files", listing)
+        monkeypatch.setattr(Path, "stat", stat)
+        index = LinkIndex(fs)
+        assert index.unscanned() == ["docs/notes.md"]
+        assert index.snapshot().unscanned == frozenset({"docs/notes.md"})
+        assert [b.path for b in index.backlinks("docs/guide.md")] == ["index.md"]
+
+        failing["on"] = False
+        assert index.unscanned() == []
+        assert [b.path for b in index.backlinks("docs/guide.md")] == [
+            "docs/notes.md", "index.md",
+        ]
+
+    def test_document_deleted_after_listing_is_dropped_not_unscanned(
+        self, fs, monkeypatch
+    ):
+        index = LinkIndex(fs)
+        real_listing = fs.list_all_files
+        monkeypatch.setattr(fs, "list_all_files", lambda: [*real_listing(), "docs/gone.md"])
+        assert index.unscanned() == []
+        assert "docs/gone.md" not in [n["path"] for n in index.graph()["nodes"]]
+
     def test_transient_read_failure_is_retried(self, fs, monkeypatch):
         from pathlib import Path
 

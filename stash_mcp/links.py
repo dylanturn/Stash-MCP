@@ -424,12 +424,21 @@ class LinkIndex:
         for path in files:
             if PurePosixPath(path).suffix.lower() not in SOURCE_EXTENSIONS:
                 continue
+            cached = self._documents.get(path)
             try:
                 st = (content_dir / path).stat()
-            except OSError:
+            except FileNotFoundError:
+                continue  # deleted since it was listed: there is nothing to scan
+            except OSError as exc:
+                # Still there but not reachable right now. Dropping it would
+                # make its links vanish without a trace, so keep it as
+                # unscanned and try again next time.
+                changed = True
+                documents[path] = self._unscanned(
+                    path, None, cached, f"could not be inspected ({exc})"
+                )
                 continue
             signature = (st.st_mtime_ns, st.st_size)
-            cached = self._documents.get(path)
             if cached is not None and cached.signature == signature:
                 documents[path] = cached
                 continue
@@ -458,10 +467,9 @@ class LinkIndex:
         an I/O error may clear up, so that one is retried every refresh.
         """
         def unscanned(reason: str, *, retry: bool = False, exc_info: bool = False) -> _Document:
-            # Say so once, not on every refresh while the cause persists.
-            if cached is None or cached.scanned:
-                logger.warning("Links in '%s' not scanned: %s", path, reason, exc_info=exc_info)
-            return _Document(None if retry else signature, None, {}, (), scanned=False)
+            return self._unscanned(
+                path, None if retry else signature, cached, reason, exc_info=exc_info
+            )
 
         if size > _MAX_SCAN_BYTES:
             return unscanned(f"larger than {_MAX_SCAN_BYTES:,} bytes")
@@ -479,6 +487,25 @@ class LinkIndex:
             return unscanned("could not be rendered", exc_info=True)
         links, references = _resolve_references(path, raw_references)
         return _Document(signature, title, links, references)
+
+    @staticmethod
+    def _unscanned(
+        path: str,
+        signature: tuple[int, int] | None,
+        cached: _Document | None,
+        reason: str,
+        *,
+        exc_info: bool = False,
+    ) -> _Document:
+        """Build the record for a document whose references are unknown.
+
+        A None `signature` marks the cause as possibly temporary, so the
+        document is tried again on the next refresh.
+        """
+        # Say so once, not on every refresh while the cause persists.
+        if cached is None or cached.scanned:
+            logger.warning("Links in '%s' not scanned: %s", path, reason, exc_info=exc_info)
+        return _Document(signature, None, {}, (), scanned=False)
 
     def unscanned(self) -> list[str]:
         """Return the documents whose references could not be determined.
