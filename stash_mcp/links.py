@@ -10,7 +10,7 @@ import logging
 import posixpath
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from urllib.parse import unquote
@@ -88,17 +88,27 @@ class Reference:
 
     `literal` marks a stash-embed `src`, which the viewer reads as a
     filesystem path rather than a URL: `#`, `?` and `%` are ordinary
-    characters in it.
+    characters in it. `base` is the `href` of the HTML document's `<base>`
+    element, if it has one: relative URLs in that document resolve against
+    it rather than against the document's own location.
     """
 
     raw: str
     kind: str
     literal: bool = False
+    base: str | None = None
 
     def resolve(self, base_dir: str) -> str | None:
-        """Resolve to a content-root path, or None if it leaves the store."""
+        """Resolve to a content-root path, or None if it leaves the store.
+
+        `base_dir` is the directory of the document holding the reference.
+        """
         if self.literal:
             return _resolve_embed_target(self.raw, base_dir)
+        if self.base is not None:
+            base_dir = _html_base_dir(self.base, base_dir)
+            if base_dir is None:
+                return None
         return resolve_target(self.raw, base_dir)
 
 
@@ -188,6 +198,30 @@ def resolve_target(target: str, base_dir: str) -> str | None:
     return normalized
 
 
+def _html_base_dir(base: str, document_dir: str) -> str | None:
+    """Return the directory a `<base href>` makes relative URLs resolve in.
+
+    None means the base points outside the store — another site, or above
+    the content root — so nothing relative to it can be a file here.
+    """
+    base = base.strip()
+    if base.startswith("//") or _SCHEME_RE.match(base):
+        return None
+    path = unquote(re.split(r"[#?]", base, maxsplit=1)[0])
+    if path.startswith("/"):
+        joined = path.lstrip("/")
+    else:
+        joined = posixpath.join(document_dir, path) if document_dir else path
+    # A base URL names a resource; relative URLs replace its last segment.
+    directory = joined if joined.endswith("/") or not joined else posixpath.dirname(joined)
+    normalized = posixpath.normpath(directory) if directory else ""
+    if normalized == ".":
+        return ""
+    if normalized == ".." or normalized.startswith("../"):
+        return None
+    return normalized
+
+
 def resolve_embed_src(src: str, base_dir: str) -> str:
     """Resolve a stash-embed `src` to a content-store-relative path.
 
@@ -244,10 +278,14 @@ class _ReferenceParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.references: list[Reference] = []
         self.title: str | None = None
+        self.base: str | None = None
         self._title_tag = title_tag
         self._title_parts: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "base" and self.base is None:
+            # Only the first <base> with an href counts, as in a browser.
+            self.base = next((v for k, v in attrs if k == "href" and v), None)
         reference_attribute = _REFERENCE_ATTRIBUTES.get(tag)
         if reference_attribute is not None:
             name, kind = reference_attribute
@@ -268,11 +306,22 @@ class _ReferenceParser(HTMLParser):
             self._title_parts = None
 
 
-def _scan_html(text: str, title_tag: str) -> tuple[list[Reference], str | None]:
+def _scan_html(
+    text: str, title_tag: str, honor_base: bool = False
+) -> tuple[list[Reference], str | None]:
+    """Parse HTML for references and a title.
+
+    `honor_base` applies the document's `<base href>` to its references. It
+    is for standalone HTML documents only: in markdown the viewer rewrites
+    relative URLs itself, so a stray `<base>` in the source changes nothing.
+    """
     parser = _ReferenceParser(title_tag)
     parser.feed(text)
     parser.close()
-    return parser.references, parser.title
+    references = parser.references
+    if honor_base and parser.base is not None:
+        references = [replace(reference, base=parser.base) for reference in references]
+    return references, parser.title
 
 
 def _scan_markdown(text: str) -> tuple[list[Reference], str | None]:
@@ -313,7 +362,7 @@ def extract_references(path: str, content: str) -> tuple[list[Reference], str | 
     if suffix in _MARKDOWN_EXTENSIONS:
         return _scan_markdown(content)
     if suffix in _HTML_EXTENSIONS:
-        return _scan_html(content, title_tag="title")
+        return _scan_html(content, title_tag="title", honor_base=True)
     return [], None
 
 

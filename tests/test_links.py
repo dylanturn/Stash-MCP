@@ -174,6 +174,37 @@ class TestExtractLinks:
         # Raw HTML inside markdown goes through the same parser.
         assert extract_links("page.md", content)[0] == expected
 
+    def test_html_base_element_redirects_relative_links(self):
+        body = '<a href="page.md">p</a> <img src="img/a.png"> <a href="/rooted.md">r</a>'
+
+        # An external base sends every relative URL to another site.
+        external = f'<head><base href="https://example.com/docs/"></head>{body}'
+        assert extract_links("site/index.html", external)[0] == {}
+
+        # A base inside the store moves where relative URLs resolve.
+        relative = f'<head><base href="assets/"></head>{body}'
+        assert extract_links("site/index.html", relative)[0] == {
+            "site/assets/page.md": LINK,
+            "site/assets/img/a.png": EMBED,
+            "rooted.md": LINK,
+        }
+        # A base names a resource: relative URLs replace its last segment.
+        rooted = f'<head><base href="/shared/index.html?v=1"></head>{body}'
+        assert extract_links("site/index.html", rooted)[0] == {
+            "shared/page.md": LINK,
+            "shared/img/a.png": EMBED,
+            "rooted.md": LINK,
+        }
+        # Only the first base counts, and one above the root leaves the store.
+        first = f'<base href="one/"><base href="two/">{body}'
+        assert "site/one/page.md" in extract_links("site/index.html", first)[0]
+        outside = f'<base href="../../elsewhere/">{body}'
+        assert extract_links("site/index.html", outside)[0] == {}
+
+    def test_base_element_in_markdown_is_ignored(self):
+        content = '<base href="https://example.com/">\n\n[page](page.md)'
+        assert extract_links("docs/a.md", content)[0] == {"docs/page.md": LINK}
+
     def test_stash_embed_src_is_a_literal_path(self):
         content = (
             "```stash-embed\nsrc: \"/mockups/board#1.html\"\n```\n\n"
@@ -554,6 +585,31 @@ class TestBrokenByMoves:
         fs.move_file("docs/a.md", "archive/a.md")
         assert broken_by_moves(before, {"docs/a.md": "archive/a.md"}) == [
             BrokenLink("archive/a.md", "docs/assets", "docs/assets"),
+        ]
+
+    def test_html_base_decides_whether_a_move_breaks_relative_links(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("shared/page.md", "# Page")
+        fs.write_file("site/local.md", "# Local")
+        fs.write_file(
+            "site/rooted.html", '<base href="/shared/"><a href="page.md">p</a>'
+        )
+        fs.write_file(
+            "site/relative.html", '<base href="./"><a href="local.md">l</a>'
+        )
+        index = LinkIndex(fs)
+        assert [b.path for b in index.backlinks("shared/page.md")] == ["site/rooted.html"]
+        before = index.snapshot()
+        moves = {
+            "site/rooted.html": "archive/rooted.html",
+            "site/relative.html": "archive/relative.html",
+        }
+        for old, new in moves.items():
+            fs.move_file(old, new)
+        # A rooted base keeps pointing at the same folder; a relative one moves
+        # with the document.
+        assert broken_by_moves(before, moves) == [
+            BrokenLink("archive/relative.html", "site/local.md", "site/local.md"),
         ]
 
     def test_links_that_were_already_broken_are_not_reported(self, tmp_path):
