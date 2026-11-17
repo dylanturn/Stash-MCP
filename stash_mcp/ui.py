@@ -1207,6 +1207,65 @@ def _backlinks_html(path: str, backlinks: list[Backlink]) -> str:
     )
 
 
+def _map_list_html(nodes: list[dict], edges: list[dict]) -> str:
+    """Render the link graph as a nested list: each page, what it links to,
+    and what links to it.
+
+    The map itself is a canvas, which assistive technology cannot read into.
+    This is the same information as ordinary links, reachable by keyboard
+    and screen reader, and it still works if the map script does not run.
+    """
+    titles = {node["path"]: node["title"] for node in nodes}
+    outgoing: dict[str, list[tuple[str, str]]] = {}
+    incoming: dict[str, list[tuple[str, str]]] = {}
+    for edge in edges:
+        outgoing.setdefault(edge["source"], []).append((edge["target"], edge["kind"]))
+        incoming.setdefault(edge["target"], []).append((edge["source"], edge["kind"]))
+
+    def _name(path: str) -> str:
+        return titles.get(path) or PurePosixPath(path).name
+
+    def _related(path: str, kind: str) -> str:
+        # Titles repeat across a store ("README", "Overview"), so the
+        # accessible name carries the path as well.
+        name = _name(path)
+        label = html.escape(f"{name}, {path}")
+        embed = ' <span class="map-list-kind">(embed)</span>' if kind == EMBED else ""
+        return (
+            f'<a href="/ui/browse/{html.escape(quote(path, safe="/"))}" '
+            f'aria-label="{label}" title="{html.escape(path)}">{html.escape(name)}</a>{embed}'
+        )
+
+    items = []
+    for node in nodes:
+        path = node["path"]
+        relations = ""
+        for label, related in (
+            ("Links to", outgoing.get(path, [])),
+            ("Linked from", incoming.get(path, [])),
+        ):
+            if related:
+                links = ", ".join(_related(other, kind) for other, kind in sorted(related))
+                relations += (
+                    f'<li><span class="map-list-label">{label} ({len(related)}):</span> '
+                    f"{links}</li>"
+                )
+        if not relations:
+            relations = '<li class="map-list-none">No links to or from this page.</li>'
+        items.append(
+            f'<li><a class="map-list-page" href="/ui/browse/{html.escape(quote(path, safe="/"))}">'
+            f"{html.escape(_name(path))}</a> "
+            f'<span class="map-list-path">{html.escape(path)}</span>'
+            f"<ul>{relations}</ul></li>"
+        )
+    return (
+        '<details class="map-list" id="map-list">'
+        f"<summary>Pages and links as a list ({len(nodes):,})</summary>"
+        f'<ul class="map-list-pages">{"".join(items)}</ul>'
+        "</details>"
+    )
+
+
 def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
     """Sort entries: directories first, then README.md, then remaining files (all alpha)."""
     dirs = [(n, d) for n, d in entries if d]
@@ -1441,6 +1500,20 @@ font-size:12px;padding:3px 9px;cursor:pointer}
 .map-status{bottom:10px;left:10px;right:auto;max-width:calc(100% - 20px);padding:5px 10px;
 white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
 .map-status strong{color:#cdd6f4;font-weight:600}
+.map-canvas:focus-visible{outline:2px solid #94e2d5;outline-offset:-2px}
+.map-help{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.map-list{flex-shrink:0;margin-top:12px;border:1px solid #313244;border-radius:8px;
+background:#272738}
+.map-list summary{padding:10px 14px;font-size:14px;font-weight:600;color:#cdd6f4;cursor:pointer}
+.map-list summary:focus-visible,.map-list a:focus-visible{outline:2px solid #94e2d5;
+outline-offset:2px;border-radius:3px}
+.map-list-pages{list-style:none;margin:0;padding:0 14px 12px}
+.map-list-pages>li{padding:10px 0;border-top:1px solid #313244}
+.map-list-page{font-weight:600}
+.map-list-path{font-size:12px;color:#7f849c;margin-left:6px;word-break:break-all}
+.map-list-pages ul{list-style:none;margin:6px 0 0;padding:0;font-size:13px;line-height:1.6}
+.map-list-label,.map-list-kind,.map-list-none{color:#7f849c}
 .right-bottom{flex-shrink:0;border-top:1px solid #313244;padding:12px 16px}
 
 /* breadcrumbs */
@@ -2427,9 +2500,10 @@ def create_ui_router(
             f'<div class="map-header"><h1>Document map</h1>'
             f'<span class="map-stats">{stats}</span></div>'
             '<div class="viewer-map" id="map-root"></div>'
+            f"{_map_list_html(nodes, edges)}"
             f'<script src="{_static_url("vendor/stash-map.js")}"></script>'
             f'<script>StashMap.render(document.getElementById("map-root"),'
-            f'{js_data},{{focus:{js_focus}}});</script>'
+            f'{js_data},{{focus:{js_focus},listId:"map-list"}});</script>'
         )
         return _page("Document map", sidebar, center)
 

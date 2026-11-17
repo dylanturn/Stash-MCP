@@ -4,7 +4,13 @@
  * Input: {nodes: [{path, title, document}], edges: [{source, target, kind}]}
  * where edge endpoints are node paths and kind is "link" or "embed".
  * Features: canvas rendering, hover highlighting, click to open, drag nodes,
- * scroll zoom, pan, optional focus node.
+ * scroll zoom, pan, optional focus node, keyboard navigation.
+ *
+ * Keyboard (canvas focused): arrow keys move between pages, Enter opens the
+ * selected page, + and - zoom, 0 fits, Escape clears the selection. Each
+ * selection is announced through a live status region. A canvas cannot expose
+ * its contents to assistive technology, so the page renders the same pages
+ * and links as an ordinary list next to the map; this script only points to it.
  */
 (function(){
 'use strict';
@@ -44,7 +50,7 @@ function render(root,data,opts){
     var slash=d.path.indexOf('/');
     var n={path:d.path, title:d.title, doc:d.document, folder:slash<0?'':d.path.slice(0,slash),
       label:truncate(d.title||basename(d.path),42), x:0, y:0, vx:0, vy:0, degree:0, r:4,
-      fixed:false, near:[], color:C.overlay2};
+      fixed:false, near:[], out:0, inc:0, color:C.overlay2};
     byPath[d.path]=n;
     return n;
   });
@@ -54,6 +60,7 @@ function render(root,data,opts){
     if(!s||!t||s===t) return;
     allEdges.push({s:s, t:t, embed:d.kind==='embed'});
     s.degree++; t.degree++;
+    s.out++; t.inc++;
     s.near.push(t); t.near.push(s);
   });
   allEdges.forEach(function(e){
@@ -83,10 +90,23 @@ function render(root,data,opts){
 
   /* ── DOM ── */
   var canvas=el('canvas','map-canvas');
-  canvas.setAttribute('role','img');
-  canvas.setAttribute('aria-label','Graph of links between documents');
+  /* An application region, so screen readers pass the arrow keys through. */
+  canvas.tabIndex=0;
+  canvas.setAttribute('role','application');
+  canvas.setAttribute('aria-roledescription','document map');
+  canvas.setAttribute('aria-label','Document map of '+allNodes.length+' files');
+  canvas.textContent='Map of how documents link to each other.';
   var ctx=canvas.getContext('2d');
   root.appendChild(canvas);
+
+  var help=el('div','map-help',
+    'Use the arrow keys to move between pages and Enter to open the selected page. '+
+    'Plus and minus zoom, zero fits the whole map, and Escape clears the selection. '+
+    (opts.listId&&document.getElementById(opts.listId)
+      ?'The same pages and links are available as a list after the map.':''));
+  help.id='map-help';
+  canvas.setAttribute('aria-describedby',help.id);
+  root.appendChild(help);
 
   var legend=el('div','map-legend');
   folders.slice(0,LEGEND_MAX).forEach(function(f){
@@ -126,8 +146,11 @@ function render(root,data,opts){
   controls.appendChild(fitButton);
   root.appendChild(controls);
 
-  var HINT='Scroll to zoom · drag to pan · click a page to open it';
+  var HINT='Scroll to zoom \u00b7 drag to pan \u00b7 click a page to open it';
+  var KEY_HINT='Arrow keys move between pages \u00b7 Enter opens \u00b7 + and \u2212 zoom \u00b7 0 fits';
   var status=el('div','map-status',HINT);
+  status.setAttribute('role','status');
+  status.setAttribute('aria-live','polite');
   root.appendChild(status);
 
   /* ── view ── */
@@ -135,6 +158,8 @@ function render(root,data,opts){
   var view={x:0, y:0, k:1};
   var autoFit=true;     // follow the layout until the reader takes over
   var hover=null, dragNode=null, panning=false, moved=false, last=null;
+  var selected=null;    // the page keyboard navigation is on
+  var keyboard=false;   // true while the canvas is being driven by keys
   var alpha=1, alphaTarget=0, running=false, drawQueued=false;
 
   function resize(){
@@ -227,7 +252,7 @@ function render(root,data,opts){
     /* A hovered page dims everything but its neighbourhood. The focused
        page is only marked — ring, teal links, labels — so the rest of the
        map stays readable while exploring from it. */
-    var hot=dragNode||hover;
+    var hot=dragNode||hover||(keyboard?selected:null);
     var mark=hot||focus;
     if(mark&&nodes.indexOf(mark)<0){ hot=null; mark=null; }
     var marked=null;
@@ -265,6 +290,13 @@ function render(root,data,opts){
         ctx.beginPath();
         ctx.arc(n.x,n.y,n.r+4/k,0,6.2832);
         ctx.strokeStyle=C.teal; ctx.lineWidth=2/k; ctx.stroke();
+      }
+      if(keyboard&&n===selected){
+        /* Keyboard position: a second, brighter ring outside any focus ring. */
+        ctx.globalAlpha=1;
+        ctx.beginPath();
+        ctx.arc(n.x,n.y,n.r+(n===focus?8:4)/k,0,6.2832);
+        ctx.strokeStyle=C.text; ctx.lineWidth=2/k; ctx.stroke();
       }
     }
 
@@ -322,17 +354,22 @@ function render(root,data,opts){
     }
     return best;
   }
+  function refreshStatus(){
+    var n=dragNode||hover||(keyboard?selected:null);
+    status.textContent='';
+    if(n){
+      status.appendChild(el('strong',null,n.title||basename(n.path)));
+      status.appendChild(document.createTextNode(
+        '  '+n.path+' \u00b7 links to '+n.out+' \u00b7 linked from '+n.inc));
+    }else{
+      status.textContent=keyboard?KEY_HINT:HINT;
+    }
+  }
   function setHover(n){
     if(n===hover) return;
     hover=n;
     canvas.style.cursor=n?'pointer':'';
-    status.textContent='';
-    if(n){
-      status.appendChild(el('strong',null,n.title||basename(n.path)));
-      status.appendChild(document.createTextNode('  '+n.path));
-    }else{
-      status.textContent=HINT;
-    }
+    refreshStatus();
     requestDraw();
   }
   function open(n,ev){
@@ -385,11 +422,92 @@ function render(root,data,opts){
     requestDraw();
   },{passive:false});
 
+  /* ── keyboard ── */
+  function present(n){ return n&&nodes.indexOf(n)>=0; }
+  /* Start from the focused page, else whichever page is nearest the middle. */
+  function startNode(){
+    if(present(focus)) return focus;
+    var cx=(width/2-view.x)/view.k, cy=(height/2-view.y)/view.k, best=null, bestD=Infinity;
+    nodes.forEach(function(n){
+      var d=(n.x-cx)*(n.x-cx)+(n.y-cy)*(n.y-cy);
+      if(d<bestD){best=n; bestD=d;}
+    });
+    return best;
+  }
+  /* Pan just enough to bring a page on screen; leave the view alone otherwise. */
+  function reveal(n){
+    var sx=n.x*view.k+view.x, sy=n.y*view.k+view.y, pad=48;
+    if(sx>=pad&&sx<=width-pad&&sy>=pad&&sy<=height-pad) return;
+    view.x+=width/2-sx; view.y+=height/2-sy;
+    autoFit=false;
+  }
+  function select(n){
+    selected=n||null;
+    if(selected) reveal(selected);
+    refreshStatus();
+    requestDraw();
+  }
+  /* Move to the nearest page in a direction, preferring ones close to that
+     axis so that repeated presses travel in a line rather than zig-zagging. */
+  function step(dx,dy){
+    if(!present(selected)){ select(startNode()); return; }
+    var best=null, bestScore=Infinity;
+    nodes.forEach(function(n){
+      if(n===selected) return;
+      var vx=n.x-selected.x, vy=n.y-selected.y;
+      var along=vx*dx+vy*dy, across=vx*dy-vy*dx;
+      if(along<=0) return;
+      var score=along*along+4*across*across;
+      if(score<bestScore){best=n; bestScore=score;}
+    });
+    if(best) select(best);
+  }
+  function zoomBy(factor){
+    var anchor=present(selected)&&keyboard
+      ?{x:selected.x*view.k+view.x, y:selected.y*view.k+view.y}
+      :{x:width/2, y:height/2};
+    var k=Math.min(MAX_ZOOM,Math.max(MIN_ZOOM,view.k*factor));
+    view.x=anchor.x-(anchor.x-view.x)*k/view.k;
+    view.y=anchor.y-(anchor.y-view.y)*k/view.k;
+    view.k=k; autoFit=false;
+    requestDraw();
+  }
+  canvas.addEventListener('focus',function(){
+    /* Only a keyboard arrival selects a page; a click should not. */
+    keyboard=canvas.matches(':focus-visible');
+    if(keyboard&&!present(selected)) selected=startNode();
+    if(keyboard&&selected) reveal(selected);
+    refreshStatus();
+    requestDraw();
+  });
+  canvas.addEventListener('blur',function(){
+    keyboard=false;
+    refreshStatus();
+    requestDraw();
+  });
+  canvas.addEventListener('keydown',function(ev){
+    var key=ev.key;
+    if(key==='Enter'){
+      if(keyboard&&present(selected)){ ev.preventDefault(); open(selected,ev); }
+      return;
+    }
+    if(ev.metaKey||ev.ctrlKey||ev.altKey) return;   // leave browser shortcuts alone
+    var arrows={ArrowRight:[1,0], ArrowLeft:[-1,0], ArrowDown:[0,1], ArrowUp:[0,-1]};
+    if(arrows[key]){ keyboard=true; step(arrows[key][0],arrows[key][1]); }
+    else if(key==='+'||key==='='){ zoomBy(1.25); }
+    else if(key==='-'||key==='_'){ zoomBy(0.8); }
+    else if(key==='0'){ autoFit=true; fit(); requestDraw(); }
+    else if(key==='Escape'){ select(null); }
+    else return;
+    ev.preventDefault();
+  });
+
   fitButton.addEventListener('click',function(){ autoFit=true; fit(); requestDraw(); });
   toggle.addEventListener('change',function(){
     showUnlinked=toggle.checked;
     nodes=showUnlinked?allNodes:allNodes.filter(function(n){return n.degree>0;});
     if(hover&&nodes.indexOf(hover)<0) setHover(null);
+    if(selected&&nodes.indexOf(selected)<0) select(null);
     autoFit=true;
     wake(0.5);
   });
@@ -403,6 +521,7 @@ function render(root,data,opts){
     fit:function(){ autoFit=true; fit(); requestDraw(); },
     nodes:function(){ return nodes; },
     view:function(){ return view; },
+    selected:function(){ return keyboard?selected:null; },
     settled:settled,
   };
 }
