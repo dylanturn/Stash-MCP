@@ -211,6 +211,44 @@ class TestExtractLinks:
         outside = f'<base href="../../elsewhere/">{body}'
         assert extract_links("site/index.html", outside)[0] == {}
 
+    @pytest.mark.parametrize(
+        "base",
+        [
+            "..", ".", "../", "./", "assets", "assets/", "assets/..", "assets/.",
+            "../shared", "../shared/", "", "?v=1", "#top", "./a/./b/", "a/b/../c",
+            "/ui/raw/shared", "/ui/raw/shared/", "/ui/raw/shared/..", "/ui/raw/a/b/../c/",
+            "/ui/raw/x/../shared/",
+        ],
+    )
+    def test_html_base_resolves_like_a_browser(self, base):
+        """Check base handling against standard URL resolution.
+
+        The document is served at /ui/raw/site/index.html, so whatever a
+        browser makes of a relative link there is the file under /ui/raw/.
+        """
+        from urllib.parse import urljoin
+
+        served = urljoin(urljoin("http://host/ui/raw/site/index.html", base), "x.md")
+        prefix = "http://host/ui/raw/"
+        expected = {served[len(prefix):]: LINK} if served.startswith(prefix) else {}
+        html = f'<base href="{base}"><a href="x.md">x</a>'
+        assert extract_links("site/index.html", html)[0] == expected
+
+    def test_html_base_edge_cases(self):
+        link = '<a href="x.md">x</a>'
+        # Nothing is above the root, so a rooted base cannot climb out of it.
+        assert extract_links("site/a.html", f'<base href="/../shared/">{link}')[0] == {
+            "shared/x.md": LINK
+        }
+        # An empty href is still the document's base: a later one is ignored.
+        assert extract_links("site/a.html", f'<base href=""><base href="/other/">{link}')[0] == {
+            "site/x.md": LINK
+        }
+        # A base without an href is not one, so the next element counts.
+        assert extract_links(
+            "site/a.html", f'<base target="_blank"><base href="/other/">{link}'
+        )[0] == {"other/x.md": LINK}
+
     def test_base_element_in_markdown_is_ignored(self):
         content = '<base href="https://example.com/">\n\n[page](page.md)'
         assert extract_links("docs/a.md", content)[0] == {"docs/page.md": LINK}

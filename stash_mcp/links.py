@@ -208,14 +208,21 @@ def _html_base_dir(base: str, document_dir: str) -> str | None:
     if base.startswith("//") or _SCHEME_RE.match(base):
         return None
     path = unquote(re.split(r"[#?]", base, maxsplit=1)[0])
-    if path.startswith("/"):
-        # Rooted the same way as a rooted link: `/ui/raw/shared/` is the
-        # store's `shared/` folder as the viewer serves it.
-        joined = _UI_ROUTE_RE.sub("", path).lstrip("/")
-    else:
-        joined = posixpath.join(document_dir, path) if document_dir else path
-    # A base URL names a resource; relative URLs replace its last segment.
-    directory = joined if joined.endswith("/") or not joined else posixpath.dirname(joined)
+    rooted = path.startswith("/")
+    if not rooted and document_dir:
+        path = posixpath.join(document_dir, path)
+    # A base URL names a resource, and relative URLs replace its last
+    # segment — unless that segment is a folder: a trailing slash, or a
+    # final `.` or `..`, which a URL resolves to the folder itself.
+    last = path.rsplit("/", 1)[-1]
+    directory = path if last in ("", ".", "..") else posixpath.dirname(path)
+    if rooted:
+        # Collapse dot segments first — nothing is above the root, so
+        # `/../shared/` is `/shared/` — and only then read the result the
+        # way a rooted link is read: `/ui/raw/shared/` is the store's
+        # `shared/` folder as the viewer serves it.
+        collapsed = posixpath.normpath("/" + directory.lstrip("/"))
+        return _UI_ROUTE_RE.sub("", collapsed.rstrip("/") + "/").strip("/")
     normalized = posixpath.normpath(directory) if directory else ""
     if normalized == ".":
         return ""
@@ -286,8 +293,9 @@ class _ReferenceParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "base" and self.base is None:
-            # Only the first <base> with an href counts, as in a browser.
-            self.base = next((v for k, v in attrs if k == "href" and v), None)
+            # Only the first <base> with an href counts, as in a browser —
+            # even an empty one, which names the document itself.
+            self.base = next((v or "" for k, v in attrs if k == "href"), None)
         reference_attribute = _REFERENCE_ATTRIBUTES.get(tag)
         if reference_attribute is not None:
             name, kind = reference_attribute
