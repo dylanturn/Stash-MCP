@@ -25,6 +25,17 @@ This is the key efficiency tool. Use it to:
 
 The batch variant is ideal after `list_content` identifies candidate markdown files — inspect them all at once rather than one by one.
 
+### inspect_content_links(path)
+
+List the files that reference a file (`incoming`) and the files it references (`outgoing`) — links, images, and `stash-embed` blocks, each resolved to a content-root path.
+
+- Use it before moving, renaming, or deleting a file to see what depends on it
+- Use it instead of `find_content` when the question is "what links here?" — a text search for the file name misses relative links (`../specs/api.json` and `/specs/api.json` are the same file) and matches mentions inside code blocks
+- `outgoing` entries carry `exists`; `false` means a broken link in that document
+- Works for any file as the target (e.g. which documents embed an image); only markdown and HTML files have outgoing references
+- `kind` is `link` or `embed` (images, media, `stash-embed` blocks)
+- A path that does not exist returns `exists: false` with any dangling references to it under `incoming`
+
 ### search_content(query, max_results?, file_types?)
 
 Semantic similarity search across indexed content. Only available when search is enabled on the server.
@@ -92,6 +103,8 @@ Replace the entire file content. Requires the current SHA.
 
 Delete a file permanently. Requires the current SHA. Irreversible outside of git history (if git tracking is enabled).
 
+If other files still link to or embed the deleted file, the confirmation lists them. Fix or remove those references in the same transaction.
+
 ### move_content(source_path, dest_path) / move_content_batch(moves[]) / move_content_directory(source_path, dest_path)
 
 Rename or relocate files and directories.
@@ -99,6 +112,14 @@ Rename or relocate files and directories.
 - `move_content` — single file rename/move
 - `move_content_batch` — up to 10 file moves atomically
 - `move_content_directory` — move an entire directory subtree; destination must not exist
+
+**Moves do not rewrite links — they report the ones they broke.** `move_content` appends them to its confirmation text; the batch and directory variants return a `broken_links` list of `{file, old_target, new_target}`. For each entry, edit `file` so the link that used to reach `old_target` reaches `new_target`.
+
+- Other files still pointing at the old path are reported with the new location as `new_target`
+- Relative links inside a moved file that no longer resolve are reported with `old_target` equal to `new_target` (the target did not move; the linking file did)
+- Relative links between files that moved together keep working and are not reported
+- The list is capped at 50 entries; `broken_links_total` is set when there are more
+- No `broken_links` entries means the move broke nothing — no follow-up scan is needed
 
 ## Transactions
 

@@ -141,6 +141,7 @@ async def test_list_tools(mcp_server):
     assert "inspect_content_structure" in tool_names
     assert "inspect_content_structure_batch" in tool_names
     assert "find_content" in tool_names
+    assert "inspect_content_links" in tool_names
 
 
 def test_manifest_lists_find_content_tool():
@@ -149,6 +150,7 @@ def test_manifest_lists_find_content_tool():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     tool_names = [tool["name"] for tool in manifest["tools"]]
     assert "find_content" in tool_names
+    assert "inspect_content_links" in tool_names
 
 
 async def test_create_content_tool(temp_fs, mock_context):
@@ -1820,3 +1822,193 @@ async def test_find_content_invalid_path_prefix(temp_fs):
     tool = await mcp.get_tool("find_content")
     with pytest.raises(ValueError):
         await tool.run({"pattern": "x", "path_prefix": "../escape"})
+
+
+# --- link tools: inspect_content_links and move/delete link reporting ---
+
+
+@pytest.fixture
+def linked_fs(temp_fs):
+    """A small store whose documents reference each other."""
+    temp_fs.write_file("index.md", "# Home\n\n[guide](docs/guide.md) ![logo](img/logo.png)")
+    temp_fs.write_file("docs/guide.md", "# Guide\n\n[home](../index.md) [notes](notes.md)")
+    temp_fs.write_file("docs/notes.md", "No heading. [guide](guide.md) [gone](missing.md)")
+    temp_fs.write_file("img/logo.png", "png")
+    return temp_fs
+
+
+async def test_inspect_content_links_incoming_and_outgoing(linked_fs):
+    tool = await create_mcp_server(linked_fs).get_tool("inspect_content_links")
+    data = _find_data(await tool.run({"path": "docs/guide.md"}))
+    assert data == {
+        "path": "docs/guide.md",
+        "exists": True,
+        "incoming": [
+            {"path": "docs/notes.md", "title": None, "kind": "link"},
+            {"path": "index.md", "title": "Home", "kind": "link"},
+        ],
+        "outgoing": [
+            {"path": "docs/notes.md", "kind": "link", "exists": True},
+            {"path": "index.md", "kind": "link", "exists": True},
+        ],
+        "incoming_count": 2,
+        "outgoing_count": 2,
+        "truncated": False,
+    }
+
+
+async def test_inspect_content_links_flags_broken_and_embedded(linked_fs):
+    tool = await create_mcp_server(linked_fs).get_tool("inspect_content_links")
+    notes = _find_data(await tool.run({"path": "/docs/./notes.md"}))
+    assert notes["path"] == "docs/notes.md"
+    assert {"path": "docs/missing.md", "kind": "link", "exists": False} in notes["outgoing"]
+    logo = _find_data(await tool.run({"path": "img/logo.png"}))
+    assert logo["incoming"] == [{"path": "index.md", "title": "Home", "kind": "embed"}]
+    assert logo["outgoing"] == []
+
+
+async def test_inspect_content_links_missing_file_lists_dangling_references(linked_fs):
+    tool = await create_mcp_server(linked_fs).get_tool("inspect_content_links")
+    data = _find_data(await tool.run({"path": "docs/missing.md"}))
+    assert data["exists"] is False
+    assert [link["path"] for link in data["incoming"]] == ["docs/notes.md"]
+
+
+async def test_inspect_content_links_rejects_directories_and_escapes(linked_fs):
+    from stash_mcp.filesystem import InvalidPathError
+
+    tool = await create_mcp_server(linked_fs).get_tool("inspect_content_links")
+    with pytest.raises(ValueError, match="is a directory"):
+        await tool.run({"path": "docs"})
+    with pytest.raises(InvalidPathError):
+        await tool.run({"path": "../outside.md"})
+
+
+async def test_inspect_content_links_truncates_long_lists(temp_fs):
+    temp_fs.write_file("hub.md", "# Hub")
+    for i in range(205):
+        temp_fs.write_file(f"spokes/s{i:03d}.md", "[hub](../hub.md)")
+    tool = await create_mcp_server(temp_fs).get_tool("inspect_content_links")
+    data = _find_data(await tool.run({"path": "hub.md"}))
+    assert len(data["incoming"]) == 200
+    assert data["incoming_count"] == 205
+    assert data["truncated"] is True
+
+
+async def test_move_content_reports_broken_links(linked_fs, mock_context):
+    tool = await create_mcp_server(linked_fs).get_tool("move_content")
+    result = await tool.run({"source_path": "docs/guide.md", "dest_path": "archive/guide.md"})
+    text = result.content[0].text
+    assert text.startswith("Moved: docs/guide.md -> archive/guide.md")
+    assert "3 links broken by this move" in text
+    # Other files still pointing at the old path.
+    assert "- docs/notes.md: links to 'docs/guide.md', now at 'archive/guide.md'" in text
+    assert "- index.md: links to 'docs/guide.md', now at 'archive/guide.md'" in text
+    # The moved file's own relative link to a sibling it left behind...
+    assert "- archive/guide.md: its link to 'docs/notes.md' no longer resolves" in text
+    # ...but not '../index.md', which resolves the same from the new folder.
+    assert "its link to 'index.md'" not in text
+
+
+async def test_move_content_without_broken_links_is_unchanged(linked_fs, mock_context):
+    tool = await create_mcp_server(linked_fs).get_tool("move_content")
+    linked_fs.write_file("loose.md", "# Loose")
+    result = await tool.run({"source_path": "loose.md", "dest_path": "kept/loose.md"})
+    assert result.content[0].text == "Moved: loose.md -> kept/loose.md"
+
+
+async def test_move_content_directory_reports_only_links_it_broke(linked_fs, mock_context):
+    tool = await create_mcp_server(linked_fs).get_tool("move_content_directory")
+    data = _find_data(await tool.run({"source_path": "docs", "dest_path": "guides"}))
+    assert data["files_moved"] == 2
+    # guide.md <-> notes.md are relative links between files that moved
+    # together, and guide.md -> ../index.md still resolves: none are reported.
+    assert data["broken_links"] == [
+        {"file": "index.md", "old_target": "docs/guide.md", "new_target": "guides/guide.md"},
+    ]
+    assert "broken_links_total" not in data
+
+
+async def test_move_content_batch_reports_broken_links(linked_fs, mock_context):
+    tool = await create_mcp_server(linked_fs).get_tool("move_content_batch")
+    data = _find_data(await tool.run({
+        "moves": [
+            MoveOperation(source_path="img/logo.png", dest_path="assets/logo.png"),
+            MoveOperation(source_path="docs/notes.md", dest_path="docs/journal.md"),
+        ],
+    }))
+    assert [r["result"] for r in data["results"]] == ["ok", "ok"]
+    assert data["broken_links"] == [
+        {"file": "docs/guide.md", "old_target": "docs/notes.md",
+         "new_target": "docs/journal.md"},
+        {"file": "index.md", "old_target": "img/logo.png", "new_target": "assets/logo.png"},
+    ]
+
+
+async def test_move_content_directory_caps_broken_links(temp_fs, mock_context):
+    for i in range(55):
+        temp_fs.write_file(f"old/f{i:02d}.md", f"# {i}")
+        temp_fs.write_file(f"refs/r{i:02d}.md", f"[f](../old/f{i:02d}.md)")
+    tool = await create_mcp_server(temp_fs).get_tool("move_content_directory")
+    data = _find_data(await tool.run({"source_path": "old", "dest_path": "new"}))
+    assert len(data["broken_links"]) == 50
+    assert data["broken_links_total"] == 55
+
+
+async def test_delete_content_reports_dangling_references(linked_fs, mock_context):
+    tool = await create_mcp_server(linked_fs).get_tool("delete_content")
+    content = linked_fs.read_file("docs/guide.md")
+    result = await tool.run({"path": "docs/guide.md", "sha": _sha(content)})
+    text = result.content[0].text
+    assert text.startswith("Deleted: docs/guide.md")
+    assert (
+        "2 files still reference the deleted file and now have dangling links: "
+        "docs/notes.md, index.md"
+    ) in text
+
+
+async def test_delete_content_without_references_is_unchanged(linked_fs, mock_context):
+    tool = await create_mcp_server(linked_fs).get_tool("delete_content")
+    content = linked_fs.read_file("index.md")
+    linked_fs.write_file("docs/guide.md", "# Guide")
+    result = await tool.run({"path": "index.md", "sha": _sha(content)})
+    assert result.content[0].text == "Deleted: index.md"
+
+
+async def test_move_succeeds_when_link_scan_fails(linked_fs, mock_context):
+    from stash_mcp.links import LinkIndex
+
+    class _FailingIndex(LinkIndex):
+        def snapshot(self):
+            raise OSError("scan failed")
+
+    mcp = create_mcp_server(linked_fs, link_index=_FailingIndex(linked_fs))
+    tool = await mcp.get_tool("move_content_batch")
+    data = _find_data(await tool.run({
+        "moves": [MoveOperation(source_path="index.md", dest_path="home.md")],
+    }))
+    assert data == {"results": [
+        {"source": "index.md", "destination": "home.md", "result": "ok"},
+    ]}
+    assert linked_fs.file_exists("home.md")
+
+
+async def test_link_tools_work_with_transactions(tmp_path, mock_context):
+    mcp = _txn_server(tmp_path)
+    fs = FileSystem(tmp_path)
+    fs.write_file("a.md", "# A")
+    fs.write_file("b.md", "[a](a.md)")
+    mock_context.session_id = "session-1"
+    await (await mcp.get_tool("start_content_transaction")).run({})
+    result = await (await mcp.get_tool("move_content")).run(
+        {"source_path": "a.md", "dest_path": "moved/a.md"}
+    )
+    assert "- b.md: links to 'a.md', now at 'moved/a.md'" in result.content[0].text
+    data = _find_data(
+        await (await mcp.get_tool("inspect_content_links")).run({"path": "moved/a.md"})
+    )
+    assert data["incoming"] == []
+
+
+async def test_server_instructions_mention_link_tools(mcp_server):
+    assert "inspect_content_links" in mcp_server.instructions

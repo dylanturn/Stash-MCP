@@ -4,7 +4,7 @@ Connect Claude to a [Stash-MCP](https://github.com/dylanturn/Stash-MCP) content 
 
 ## What This Plugin Does
 
-Stash-MCP is a file-backed documentation server that exposes content through MCP tools — 21+ tools for reading, writing, searching, and versioning files on disk. This plugin bundles three things:
+Stash-MCP is a file-backed documentation server that exposes content through MCP tools — 22+ tools for reading, writing, searching, and versioning files on disk. This plugin bundles three things:
 
 1. **MCP server connection** — pre-configured HTTP transport to a running Stash-MCP instance
 2. **Usage skill** — teaches Claude efficient navigation patterns, surgical editing, transaction safety, and semantic search strategy

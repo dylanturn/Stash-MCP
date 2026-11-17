@@ -14,6 +14,7 @@ from .api import create_api
 from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_UPDATED, add_listener, emit
 from .filesystem import FileSystem
+from .links import LinkIndex
 from .mcp_server import create_mcp_server
 from .metrics import get_metrics, init_metrics
 from .ui import create_ui_router
@@ -288,7 +289,12 @@ def create_app():
     # Create MCP http app first so we can wire its lifespan into FastAPI.
     # In read-only mode, use stateless HTTP so each request is self-contained
     # and any pod can serve any client (safe for horizontal scaling).
-    mcp = create_mcp_server(fs_for_mcp, search_engine=search_engine, git_backend=git_backend)
+    # One link graph for both the UI and the MCP tools, so the store is only
+    # scanned once however it is queried.
+    link_index = LinkIndex(filesystem)
+    mcp = create_mcp_server(
+        fs_for_mcp, search_engine=search_engine, git_backend=git_backend, link_index=link_index
+    )
     mcp_http_app = mcp.http_app(path="/", stateless_http=Config.READ_ONLY)
 
     # Build a combined lifespan that wraps the MCP lifespan and also
@@ -345,7 +351,7 @@ def create_app():
     app = create_api(filesystem, lifespan=_combined_lifespan, search_engine=search_engine)
     ui_router = create_ui_router(
         filesystem, search_engine=search_engine, read_only=Config.READ_ONLY,
-        git_backend=git_backend,
+        git_backend=git_backend, link_index=link_index,
     )
     app.include_router(ui_router)
 

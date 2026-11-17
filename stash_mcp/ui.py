@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError as FSFileNotFoundError
 from .filesystem import FileSystem, InvalidPathError
+from .links import EMBED, Backlink, LinkIndex
 from .mcp_server import MIME_TYPES
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -226,6 +227,14 @@ _ICONS = {
         'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
         'stroke-linejoin="round"><path d="M12 3v18"/><rect width="18" height="18" '
         'x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></svg>'
+    ),
+    "waypoints": (
+        '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><circle cx="12" cy="4.5" r="2.5"/>'
+        '<path d="m10.2 6.3-3.9 3.9"/><circle cx="4.5" cy="12" r="2.5"/>'
+        '<path d="M7 12h10"/><circle cx="19.5" cy="12" r="2.5"/>'
+        '<path d="m13.8 17.7 3.9-3.9"/><circle cx="12" cy="19.5" r="2.5"/></svg>'
     ),
 }
 
@@ -1178,6 +1187,52 @@ def _render_csv(content: str, suffix: str) -> tuple[str, str]:
     return center, ""
 
 
+def _backlinks_html(path: str, backlinks: list[Backlink]) -> str:
+    """Build the collapsible "Referenced By" section of the right panel.
+
+    Open by default when there is something to show. The reader's choice to
+    collapse it is remembered across pages, since every navigation is a full
+    page load; the inline script applies it before first paint.
+    """
+    if backlinks:
+        items = []
+        for link in backlinks:
+            name = PurePosixPath(link.path).name
+            href = html.escape(quote(link.path, safe="/"))
+            kind = '<span class="backlink-kind">embed</span>' if link.kind == EMBED else ""
+            items.append(
+                f'<li><a class="backlink" href="/ui/browse/{href}" '
+                f'title="{html.escape(link.path)}">{_file_icon(name)}'
+                '<span class="backlink-text">'
+                f'<span class="backlink-title">{html.escape(link.title or name)}</span>'
+                f'<span class="backlink-path">{html.escape(link.path)}</span>'
+                f'</span>{kind}</a></li>'
+            )
+        body = f'<ul class="backlinks-list">{"".join(items)}</ul>'
+    else:
+        body = '<div class="backlinks-empty">No other pages reference this one.</div>'
+    body += (
+        f'<a class="backlinks-map" href="/ui/map?focus={html.escape(quote(path, safe="/"))}">'
+        f'{_icon("waypoints")} Show in document map</a>'
+    )
+    open_attr = " open" if backlinks else ""
+    return (
+        '<div class="right-meta-accordion">'
+        f'<details class="meta-accordion" id="backlinks"{open_attr}>'
+        '<summary class="meta-accordion-header"><span class="backlinks-heading">Referenced By'
+        f'<span class="backlinks-count">{len(backlinks)}</span></span>'
+        f'{_icon("chevron-right")}</summary>'
+        f'<div class="meta-accordion-body backlinks-body">{body}</div>'
+        '</details>'
+        '<script>(function(){var d=document.getElementById("backlinks");'
+        'var k="stash_backlinks_collapsed";'
+        'try{if(localStorage.getItem(k)==="1")d.open=false;}catch(e){}'
+        'd.querySelector("summary").addEventListener("click",function(){'
+        'try{localStorage.setItem(k,d.open?"1":"0");}catch(e){}});})();</script>'
+        '</div>'
+    )
+
+
 def _sort_entries(entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
     """Sort entries: directories first, then README.md, then remaining files (all alpha)."""
     dirs = [(n, d) for n, d in entries if d]
@@ -1367,6 +1422,51 @@ padding:14px 16px;font-size:15px;font-weight:600;color:#cdd6f4;cursor:pointer;li
 .meta-accordion-header .icon{transition:transform 150ms ease}
 .meta-accordion[open] .meta-accordion-header .icon{transform:rotate(90deg)}
 .meta-accordion-body{padding:0 16px 16px}
+.backlinks-heading{display:flex;align-items:center;gap:8px}
+.backlinks-count{font-size:11px;font-weight:600;color:#7f849c;background:#181825;
+border-radius:10px;padding:1px 8px}
+.backlinks-body{max-height:min(280px,32vh);overflow-y:auto;padding:0 8px 12px}
+.backlinks-list{list-style:none;margin:0;padding:0}
+.backlink{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:6px;
+color:#cdd6f4;text-decoration:none}
+.backlink:hover{background:#2e2e42;text-decoration:none}
+.backlink .icon{flex-shrink:0;margin-top:3px;color:#7f849c}
+.backlink-text{display:flex;flex-direction:column;min-width:0;flex:1}
+.backlink-title{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.backlink-path{font-size:12px;color:#7f849c;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap}
+.backlink-kind{flex-shrink:0;margin-top:2px;font-size:10px;text-transform:uppercase;
+letter-spacing:0.4px;color:#7f849c;border:1px solid #313244;border-radius:4px;padding:1px 5px}
+.backlinks-empty{font-size:13px;color:#7f849c;padding:0 8px}
+.backlinks-map{display:flex;align-items:center;gap:6px;margin-top:8px;padding:6px 8px;
+font-size:12px;color:#7f849c;border-radius:6px}
+.backlinks-map:hover{color:#94e2d5;background:#2e2e42;text-decoration:none}
+
+/* document map */
+.map-header{display:flex;align-items:baseline;gap:14px;margin-bottom:14px;flex-shrink:0}
+.map-header h1{font-size:20px;font-weight:600;color:#e0e4f0}
+.map-stats{font-size:13px;color:#7f849c}
+.viewer-map{flex:1;min-height:420px;position:relative;border:1px solid #313244;
+border-radius:8px;background:#181825;overflow:hidden}
+.map-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
+.map-legend,.map-controls,.map-status{position:absolute;font-size:12px;color:#a6adc8;
+background:rgba(30,30,46,0.88);border:1px solid #313244;border-radius:6px}
+.map-legend{top:10px;left:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px;
+max-width:200px;pointer-events:none}
+.map-legend-item{display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis}
+.map-swatch{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.map-swatch.hollow{background:none;border:1.5px solid #9399b2}
+.map-legend-rule{border-top:1px solid #313244;margin:3px 0}
+.map-controls{top:10px;right:10px;padding:6px 8px;display:flex;align-items:center;gap:10px}
+.map-controls label{display:flex;align-items:center;gap:6px;cursor:pointer}
+.map-controls input{accent-color:#94e2d5}
+.map-controls button{background:none;border:1px solid #313244;border-radius:5px;color:#cdd6f4;
+font-size:12px;padding:3px 9px;cursor:pointer}
+.map-controls button:hover{border-color:#94e2d5;color:#94e2d5}
+.map-status{bottom:10px;left:10px;right:auto;max-width:calc(100% - 20px);padding:5px 10px;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
+.map-status strong{color:#cdd6f4;font-weight:600}
 .right-bottom{flex-shrink:0;border-top:1px solid #313244;padding:12px 16px}
 
 /* breadcrumbs */
@@ -2142,6 +2242,7 @@ def _sidebar_html(
         '<div class="sidebar-header">'
         f'{new_doc_btn}'
         f'<a href="/ui/activity" class="btn-activity">{_icon("history")} Recent changes</a>'
+        f'<a href="/ui/map" class="btn-activity">{_icon("waypoints")} Document map</a>'
         f'<div class="search-box"{vector_attr}>'
         f'<input type="text" id="tree-search" class="search-input" '
         f'placeholder="{placeholder}" aria-label="Search" '
@@ -2163,6 +2264,7 @@ def create_ui_router(
     search_engine=None,
     read_only: bool = False,
     git_backend=None,
+    link_index: LinkIndex | None = None,
 ) -> APIRouter:
     """Create UI router with content browser & editor.
 
@@ -2173,11 +2275,15 @@ def create_ui_router(
             endpoints return HTTP 403.
         git_backend: Optional Git backend used to populate activity, history,
             and revision views. History UI shows an enablement message when omitted.
+        link_index: Optional LinkIndex shared with the MCP server; one is
+            created when omitted.
 
     Returns:
         FastAPI router for UI
     """
     _search_enabled = search_engine is not None
+    if link_index is None:
+        link_index = LinkIndex(filesystem)
     router = APIRouter()
 
     def _is_visible_path(path: str, *, allow_directory: bool = False) -> bool:
@@ -2315,6 +2421,43 @@ def create_ui_router(
     async def ui_home():
         """Redirect to browse root."""
         return RedirectResponse(url="/ui/browse/", status_code=302)
+
+    # --- document map (link graph of the whole stash) ---
+    @router.get("/ui/map", response_class=HTMLResponse)
+    async def ui_map(focus: str = "") -> str:
+        """Show how documents link to and embed each other."""
+        focus = posixpath.normpath(focus.strip("/")) if focus.strip("/") else ""
+        sidebar = _sidebar_html(filesystem, active=focus, search_enabled=_search_enabled,
+                                read_only=read_only)
+        graph = await asyncio.to_thread(link_index.graph)
+        nodes, edges = graph["nodes"], graph["edges"]
+        if not nodes:
+            center = (
+                '<div class="map-header"><h1>Document map</h1></div>'
+                '<div class="history-empty">No markdown or HTML documents to map yet.</div>'
+            )
+            return _page("Document map", sidebar, center)
+
+        linked = {edge["source"] for edge in edges} | {edge["target"] for edge in edges}
+        unlinked = len(nodes) - len(linked)
+        pages = sum(1 for node in nodes if node["document"])
+        stats = (
+            f"{pages:,} page{'s' if pages != 1 else ''} \u00b7 "
+            f"{len(edges):,} link{'s' if len(edges) != 1 else ''}"
+        )
+        if unlinked:
+            stats += f" \u00b7 {unlinked:,} unlinked"
+        js_data = _json.dumps(graph).replace("</", "<\\/")
+        js_focus = _json.dumps(focus).replace("</", "<\\/")
+        center = (
+            f'<div class="map-header"><h1>Document map</h1>'
+            f'<span class="map-stats">{stats}</span></div>'
+            '<div class="viewer-map" id="map-root"></div>'
+            f'<script src="{_static_url("vendor/stash-map.js")}"></script>'
+            f'<script>StashMap.render(document.getElementById("map-root"),'
+            f'{js_data},{{focus:{js_focus}}});</script>'
+        )
+        return _page("Document map", sidebar, center)
 
     # --- browse (directory listing or file view) ---
     @router.get("/ui/browse/{path:path}", response_class=HTMLResponse)
@@ -2578,6 +2721,8 @@ def create_ui_router(
                 "</div></form>"
                 "</div>"
             )
+            backlinks = await asyncio.to_thread(link_index.backlinks, posixpath.normpath(path))
+            backlinks_html = _backlinks_html(path, backlinks)
             if toc_html:
                 # Markdown with headings: scrollable TOC + collapsed accordion
                 right = (
@@ -2585,6 +2730,7 @@ def create_ui_router(
                     f'<h2 class="toc-heading">{_icon("list")} On This Page</h2>'
                     f'<nav class="toc-nav" id="toc-nav">{toc_html}</nav>'
                     '</div>'
+                    f'{backlinks_html}'
                     '<div class="right-meta-accordion">'
                     '<details class="meta-accordion">'
                     f'<summary class="meta-accordion-header">Document Metadata {_icon("chevron-right")}</summary>'
@@ -2596,6 +2742,7 @@ def create_ui_router(
             else:
                 # Non-markdown or no headings: no TOC, metadata expanded
                 right = (
+                    f'{backlinks_html}'
                     '<div class="right-meta-accordion">'
                     '<details class="meta-accordion" open>'
                     f'<summary class="meta-accordion-header">Document Metadata {_icon("chevron-right")}</summary>'
