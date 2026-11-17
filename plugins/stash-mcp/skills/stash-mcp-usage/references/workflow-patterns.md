@@ -54,7 +54,7 @@ edit_content(path, sha, edits=[
 
 ## Pattern: Transactional Write
 
-**When:** Every write, whenever git tracking is enabled — single edits, multi-file reorganizations, template-based creation, or any call to a mutating tool. The gated set is `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. Any of these without an active transaction fails with:
+**When:** Every write, whenever git tracking is enabled — single edits, multi-file reorganizations, template-based creation, or any call to a mutating tool. The gated set is `create_content`, `upload_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. Any of these without an active transaction fails with:
 
 > `TransactionError: No active transaction. Call start_content_transaction first.`
 

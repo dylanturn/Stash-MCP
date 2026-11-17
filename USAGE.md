@@ -221,6 +221,14 @@ Tools allow agents to create, edit, overwrite, move, and delete content. Modific
 }
 ```
 
+**upload_content** - Upload a file of any type (images, PDFs, binaries) from base64-encoded bytes. Creates new files; to replace one, pass the `sha` returned by the upload that wrote it (SHA-256 of the raw bytes). Capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB):
+```json
+{
+  "path": "assets/diagram.png",
+  "data_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
+}
+```
+
 **read_content** - Read a file and get its `sha` for later modifications:
 ```json
 {
@@ -246,7 +254,7 @@ Tools allow agents to create, edit, overwrite, move, and delete content. Modific
 }
 ```
 
-**delete_content** - Delete a file:
+**delete_content** - Delete a file. For binary files, pass the `sha` returned by `upload_content`:
 ```json
 {
   "path": "docs/old-doc.md",

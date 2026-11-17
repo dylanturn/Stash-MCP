@@ -288,6 +288,47 @@ class FileSystem:
             logger.error(f"Error writing file '{relative_path}': {e}")
             raise FileSystemError(f"Failed to write file: {e}")
 
+    def read_bytes(self, relative_path: str) -> bytes:
+        """Read a file's raw bytes (no decoding or newline translation).
+
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            InvalidPathError: If path is invalid or not a file
+        """
+        full_path = self._resolve_path(relative_path)
+
+        if not full_path.exists():
+            raise FileNotFoundError(f"File '{relative_path}' not found")
+
+        if not full_path.is_file():
+            raise InvalidPathError(f"Path '{relative_path}' is not a file")
+
+        try:
+            return full_path.read_bytes()
+        except Exception as e:
+            logger.error(f"Error reading file '{relative_path}': {e}")
+            raise FileSystemError(f"Failed to read file: {e}")
+
+    def write_bytes(self, relative_path: str, data: bytes) -> None:
+        """Write raw bytes to a file, creating parent directories as needed.
+
+        Raises:
+            InvalidPathError: If path is invalid or names an existing directory
+        """
+        full_path = self._resolve_path(relative_path)
+
+        if full_path.is_dir():
+            raise InvalidPathError(f"Path '{relative_path}' is a directory")
+
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            full_path.write_bytes(data)
+            logger.info(f"Wrote file: {relative_path} ({len(data)} bytes)")
+        except Exception as e:
+            logger.error(f"Error writing file '{relative_path}': {e}")
+            raise FileSystemError(f"Failed to write file: {e}")
+
     def delete_file(self, relative_path: str) -> None:
         """Delete a file.
 
