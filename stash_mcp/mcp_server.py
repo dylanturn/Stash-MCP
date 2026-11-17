@@ -700,7 +700,9 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
                         f"File already exists: {path}. Pass the sha of its current "
                         "bytes to replace it."
                     )
-                current = await asyncio.to_thread(filesystem.read_bytes, path)
+                # Read synchronously: an await between this sha check and the
+                # write below would let another write slip in between.
+                current = filesystem.read_bytes(path)
                 current_sha = hashlib.sha256(current).hexdigest()
                 if sha != current_sha:
                     raise ValueError(
@@ -930,14 +932,16 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             Returns:
                 Confirmation message
             """
-            raw = await asyncio.to_thread(filesystem.read_bytes, path)
+            # No await between the sha check and delete_file: yielding here
+            # would let a concurrent write land, and then be deleted.
+            raw = filesystem.read_bytes(path)
             raw_sha = hashlib.sha256(raw).hexdigest()
             if sha != raw_sha:
                 # read_content hashes decoded text (universal newlines), which
                 # differs from the raw bytes for CRLF files. Accept that sha
                 # too; binary files have no text form, so only raw_sha applies.
                 try:
-                    text = await asyncio.to_thread(filesystem.read_file, path)
+                    text = filesystem.read_file(path)
                 except FileSystemError:
                     text = None
                 expected = (

@@ -369,3 +369,50 @@ async def test_text_upload_readable_and_deletable(temp_fs, mock_context):
     assert read["sha"] != up["sha"]
     await _call(temp_fs, "delete_content", {"path": "notes.md", "sha": up["sha"]})
     assert not temp_fs.file_exists("notes.md")
+
+
+# --- sha check and write must not interleave with other writes ---
+
+
+async def _race(fs, first, second):
+    """Start two tool calls concurrently, first one first; return outcomes."""
+    import asyncio
+
+    server = create_mcp_server(fs)
+
+    async def run(name, args):
+        tool = await server.get_tool(name)
+        try:
+            await tool.run(args)
+            return "ok"
+        except Exception as e:  # noqa: BLE001
+            return e
+
+    return await asyncio.gather(run(*first), run(*second))
+
+
+async def test_delete_does_not_remove_concurrent_overwrite(temp_fs, mock_context):
+    temp_fs.write_file("doc.md", "v1\n")
+    sha = _sha(b"v1\n")
+    deleted, overwritten = await _race(
+        temp_fs,
+        ("delete_content", {"path": "doc.md", "sha": sha}),
+        ("overwrite_content", {"path": "doc.md", "sha": sha, "content": "v2\n"}),
+    )
+    # Exactly one of the two writes holding the same sha may win.
+    assert deleted == "ok"
+    assert overwritten != "ok"
+    assert not temp_fs.file_exists("doc.md")
+
+
+async def test_replace_upload_does_not_clobber_concurrent_replace(temp_fs, mock_context):
+    temp_fs.write_bytes("logo.png", PNG_BYTES)
+    sha = _sha(PNG_BYTES)
+    a, b = await _race(
+        temp_fs,
+        ("upload_content", {"path": "logo.png", "data_base64": _b64(PNG_V2), "sha": sha}),
+        ("delete_content", {"path": "logo.png", "sha": sha}),
+    )
+    assert a == "ok"
+    assert b != "ok"
+    assert temp_fs.read_bytes("logo.png") == PNG_V2
