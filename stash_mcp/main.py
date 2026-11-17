@@ -315,8 +315,14 @@ def create_app():
             )
 
         async with mcp_lifespan(fastapi_app):
-            # Startup: build search index in background (non-blocking)
             get_metrics().record_server_event("startup")
+            # Startup: scan the store for links in the background, so the
+            # first page view does not wait on rendering every document.
+            link_task = asyncio.create_task(
+                asyncio.to_thread(link_index.snapshot), name="link-index-warmup"
+            )
+            link_task.add_done_callback(_task_done_callback)
+            # Startup: build search index in background (non-blocking)
             if search_engine is not None:
 
                 async def _do_build():

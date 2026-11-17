@@ -528,7 +528,7 @@ class TestUIBacklinks:
         fs.write_file("mockups/board.html", "<html><body>board</body></html>")
         fs.write_file(
             "docs/plan & scope.md",
-            "# Plan <v2>\n\n```stash-embed\nsrc: /mockups/board.html\n```\n",
+            '# Plan "A" & B\n\n```stash-embed\nsrc: /mockups/board.html\n```\n',
         )
         fs.write_file("index.md", "# Home\n\n[board](mockups/board.html)")
         fs.write_file("lonely.md", "# Lonely\n\nNothing links here.")
@@ -545,7 +545,7 @@ class TestUIBacklinks:
         assert '<details class="meta-accordion" id="backlinks" open>' in body
         # Title and path are escaped; the href is URL-encoded.
         assert 'href="/ui/browse/docs/plan%20%26%20scope.md"' in body
-        assert '<span class="backlink-title">Plan &lt;v2&gt;</span>' in body
+        assert '<span class="backlink-title">Plan &quot;A&quot; &amp; B</span>' in body
         assert '<span class="backlink-path">docs/plan &amp; scope.md</span>' in body
         assert 'href="/ui/browse/index.md"' in body
         # Only the stash-embed reference is tagged as an embed.
@@ -623,7 +623,11 @@ class TestUIMap:
 
     def test_data_cannot_break_out_of_the_script(self, tmp_path):
         fs = FileSystem(tmp_path)
-        fs.write_file("a.md", "# </script><script>alert(1)</script>\n\n[b](b.md)")
+        fs.write_file(
+            "a.html",
+            "<title>&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;</title>"
+            '<a href="b.md">b</a>',
+        )
         fs.write_file("b.md", "# B")
         body = self._client(fs).get("/ui/map", params={"focus": "</script>x"}).text
         assert "</script><script>alert(1)" not in body

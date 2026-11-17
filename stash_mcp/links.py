@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import unquote
 
+import markdown as md
 import yaml
 
 from .filesystem import FileSystem
@@ -37,27 +38,16 @@ _MAX_SCAN_BYTES = 2_000_000
 _UI_ROUTE_RE = re.compile(r"^/ui/(?:browse|raw|edit|history)/")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 
-_FENCE_RE = re.compile(
-    r"^(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)\n(?P<body>.*?)^(?P=fence)[ \t]*$",
+# Same shape the viewer uses to find stash-embed blocks before rendering.
+_EMBED_FENCE_RE = re.compile(
+    r"^```stash-embed\s*\n(?P<body>.*?)^```\s*$",
     re.MULTILINE | re.DOTALL,
 )
-_INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.DOTALL)
+# The block-level extensions the viewer renders with. They decide what is
+# code, a list, or a table — and so which link-shaped text is really a link.
+_MARKDOWN_BLOCK_EXTENSIONS = ["fenced_code", "tables", "sane_lists"]
 
-# `](target)` / `](target "title")` / `](<target with spaces>)`. Anchored on
-# the closing bracket so a linked image — `[![alt](img.png)](page.md)` —
-# yields both targets. One level of balanced parentheses is allowed in a bare
-# target, matching what the markdown renderer accepts.
-_MD_LINK_RE = re.compile(
-    r"\](?P<paren>\()[ \t]*"
-    r"(?:<(?P<angle>[^<>\n]*)>|(?P<bare>(?:[^()\s]|\([^()\s]*\))+))"
-    r"(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*\)"
-)
-_MD_IMAGE_RE = re.compile(r"!\[(?:[^\[\]]|\[[^\[\]]*\])*\](?P<paren>\()")
-# `[id]: target` reference definitions. `[^1]:` is a footnote, not a link.
-_MD_REFERENCE_RE = re.compile(
-    r"^ {0,3}\[(?!\^)[^\]\n]+\]:[ \t]*(?:<(?P<angle>[^<>\n]*)>|(?P<bare>\S+))",
-    re.MULTILINE,
-)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _HTML_LINK_RE = re.compile(
     r"<(?:a|area)\b[^>]*?\bhref\s*=\s*(?P<q>[\"'])(?P<target>.*?)(?P=q)",
     re.IGNORECASE | re.DOTALL,
@@ -69,10 +59,9 @@ _HTML_EMBED_RE = re.compile(
     r"|<object\b[^>]*?\bdata\s*=\s*(?P<q3>[\"'])(?P<target3>.*?)(?P=q3)",
     re.IGNORECASE | re.DOTALL,
 )
-
-_MD_TITLE_RE = re.compile(r"^ {0,3}#[ \t]+(?P<title>.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
+_HTML_H1_RE = re.compile(r"<h1\b[^>]*>(?P<title>.*?)</h1>", re.IGNORECASE | re.DOTALL)
 _HTML_TITLE_RE = re.compile(r"<title\b[^>]*>(?P<title>.*?)</title>", re.IGNORECASE | re.DOTALL)
-_MD_LINK_TEXT_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 @dataclass(frozen=True)
@@ -95,9 +84,15 @@ class OutgoingLink:
 
 @dataclass(frozen=True)
 class LinkSnapshot:
-    """The link graph at one moment: `source -> {target: kind}` plus all files."""
+    """Every reference in the store at one moment, plus the files that exist.
 
-    links: dict[str, dict[str, str]]
+    `references` maps each source document to its `(raw, target)` pairs: the
+    target as written and the content-root path it resolved to. Keeping the
+    raw form lets a move be judged one reference at a time — two links to the
+    same file, one relative and one root-absolute, fare differently.
+    """
+
+    references: dict[str, tuple[tuple[str, str], ...]]
     files: frozenset[str]
 
 
@@ -121,6 +116,12 @@ class _Document:
     signature: tuple[int, int]
     title: str | None
     links: dict[str, str]
+    references: tuple[tuple[str, str], ...]
+
+
+def _base_dir(path: str) -> str:
+    parent = PurePosixPath(path).parent.as_posix()
+    return "" if parent == "." else parent
 
 
 def resolve_target(target: str, base_dir: str) -> str | None:
@@ -151,9 +152,7 @@ def resolve_target(target: str, base_dir: str) -> str | None:
 
 
 def _clean_title(raw: str) -> str | None:
-    title = _MD_LINK_TEXT_RE.sub(r"\1", raw)
-    title = re.sub(r"[`*]", "", title)
-    title = " ".join(html.unescape(title).split())
+    title = " ".join(html.unescape(_HTML_TAG_RE.sub("", raw)).split())
     return title or None
 
 
@@ -167,6 +166,7 @@ def _embed_src(body: str) -> str | None:
 
 
 def _scan_html(text: str) -> list[tuple[str, str]]:
+    text = _HTML_COMMENT_RE.sub("", text)
     found = [(m.group("target"), LINK) for m in _HTML_LINK_RE.finditer(text)]
     for m in _HTML_EMBED_RE.finditer(text):
         found.append((m.group("target") or m.group("target2") or m.group("target3") or "", EMBED))
@@ -174,31 +174,72 @@ def _scan_html(text: str) -> list[tuple[str, str]]:
 
 
 def _scan_markdown(text: str) -> tuple[list[tuple[str, str]], str | None]:
+    """Find references by rendering the document the way the viewer does.
+
+    Recognizing links by pattern-matching the source gets the edges wrong:
+    indented code, unused reference definitions, and list continuations all
+    look like something they are not. Rendering settles every such case the
+    same way the reader sees it — code comes out escaped, an unused
+    definition produces nothing, `![logo][img]` is an image — so the
+    references are whatever anchors and embeds end up in the HTML.
+    """
     found: list[tuple[str, str]] = []
 
-    # Code is not prose: drop fenced blocks, keeping only the `src` of
-    # stash-embed blocks, which pull another file into the page.
-    def _strip_fence(m: re.Match) -> str:
-        if m.group("info").strip() == "stash-embed":
-            src = _embed_src(m.group("body"))
-            if src:
-                found.append((src, EMBED))
+    # stash-embed blocks pull another file into the page. The viewer swaps
+    # them out before rendering; take their `src` the same way.
+    def _take_embed(m: re.Match) -> str:
+        src = _embed_src(m.group("body"))
+        if src:
+            found.append((src, EMBED))
         return ""
 
-    text = _FENCE_RE.sub(_strip_fence, text)
-    title_match = _MD_TITLE_RE.search(text)
-    title = _clean_title(title_match.group("title")) if title_match else None
-    text = _INLINE_CODE_RE.sub("", text)
+    text = _EMBED_FENCE_RE.sub(_take_embed, text)
+    rendered = md.Markdown(extensions=_MARKDOWN_BLOCK_EXTENSIONS).convert(text)
+    found.extend(_scan_html(rendered))
+    title_match = _HTML_H1_RE.search(rendered)
+    return found, _clean_title(title_match.group("title")) if title_match else None
 
-    image_parens = {m.start("paren") for m in _MD_IMAGE_RE.finditer(text)}
-    for m in _MD_LINK_RE.finditer(text):
-        target = m.group("angle") if m.group("angle") is not None else m.group("bare")
-        found.append((target, EMBED if m.start("paren") in image_parens else LINK))
-    for m in _MD_REFERENCE_RE.finditer(text):
-        target = m.group("angle") if m.group("angle") is not None else m.group("bare")
-        found.append((target, LINK))
-    found.extend(_scan_html(text))
-    return found, title
+
+def extract_references(path: str, content: str) -> tuple[list[tuple[str, str]], str | None]:
+    """Extract every reference a document makes, as written.
+
+    Returns `(references, title)`. `references` holds one `(raw, kind)` pair
+    per link, image, or embed, where `raw` is the target exactly as the
+    document wrote it and `kind` is `LINK` or `EMBED`. External URLs and
+    anchors are included; `resolve_target` filters them. `title` is the
+    document's first top-level heading or `<title>`, if any.
+    """
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in _MARKDOWN_EXTENSIONS:
+        return _scan_markdown(content)
+    if suffix in _HTML_EXTENSIONS:
+        title_match = _HTML_TITLE_RE.search(content)
+        title = _clean_title(title_match.group("title")) if title_match else None
+        return _scan_html(content), title
+    return [], None
+
+
+def _resolve_references(
+    path: str, references: list[tuple[str, str]]
+) -> tuple[dict[str, str], tuple[tuple[str, str], ...]]:
+    """Resolve raw references against `path`'s directory.
+
+    Returns the document's `links` (target -> kind, without self-links; a
+    target that is both linked and embedded counts as a link) and its
+    distinct `(raw, target)` pairs, self-links included — a root-absolute
+    link to itself breaks when the document moves.
+    """
+    base_dir = _base_dir(path)
+    links: dict[str, str] = {}
+    resolved: dict[tuple[str, str], None] = {}
+    for raw, kind in references:
+        target = resolve_target(raw, base_dir)
+        if target is None:
+            continue
+        resolved[(raw, target)] = None
+        if target != path and links.get(target) != LINK:
+            links[target] = kind
+    return links, tuple(resolved)
 
 
 def extract_links(path: str, content: str) -> tuple[dict[str, str], str | None]:
@@ -210,26 +251,33 @@ def extract_links(path: str, content: str) -> tuple[dict[str, str], str | None]:
     `title` is the document's first top-level heading or `<title>`, if any.
     Targets are not checked for existence.
     """
-    suffix = PurePosixPath(path).suffix.lower()
-    if suffix in _MARKDOWN_EXTENSIONS:
-        found, title = _scan_markdown(content)
-    elif suffix in _HTML_EXTENSIONS:
-        found = _scan_html(content)
-        title_match = _HTML_TITLE_RE.search(content)
-        title = _clean_title(title_match.group("title")) if title_match else None
-    else:
-        return {}, None
+    references, title = extract_references(path, content)
+    return _resolve_references(path, references)[0], title
 
-    parent = PurePosixPath(path).parent.as_posix()
-    base_dir = "" if parent == "." else parent
-    links: dict[str, str] = {}
-    for raw, kind in found:
-        target = resolve_target(raw, base_dir)
-        if target is None or target == path:
-            continue
-        if links.get(target) != LINK:
-            links[target] = kind
-    return links, title
+
+def broken_by_moves(before: LinkSnapshot, moves: dict[str, str]) -> list[BrokenLink]:
+    """Return the links that `moves` (old path -> new path) broke.
+
+    A move changes where files are, never what documents say, so each
+    reference can be judged from the snapshot taken before it: resolve the
+    raw target from the linking document's new directory and compare that
+    with where its old target now lives. That covers both directions — other
+    documents pointing at a vacated path, and a moved document whose relative
+    links now resolve somewhere else — while leaving alone links that
+    survive, such as relative links between files moved together. Links that
+    reached nothing before the move are not reported.
+    """
+    broken = set()
+    for source, references in before.references.items():
+        new_source = moves.get(source, source)
+        new_dir = _base_dir(new_source)
+        for raw, target in references:
+            if target not in before.files or (source not in moves and target not in moves):
+                continue
+            new_target = moves.get(target, target)
+            if resolve_target(raw, new_dir) != new_target:
+                broken.add(BrokenLink(new_source, target, new_target))
+    return sorted(broken, key=lambda b: (b.file, b.old_target))
 
 
 class LinkIndex:
@@ -268,12 +316,20 @@ class LinkIndex:
                 continue
             changed = True
             links: dict[str, str] = {}
+            references: tuple[tuple[str, str], ...] = ()
             title = None
             if st.st_size <= _MAX_SCAN_BYTES:
                 content = self._filesystem.try_read_text(path)
                 if content is not None:
-                    links, title = extract_links(path, content)
-            documents[path] = _Document(signature, title, links)
+                    try:
+                        raw_references, title = extract_references(path, content)
+                    except Exception:
+                        # One document the renderer chokes on must not take
+                        # the whole graph down with it.
+                        logger.warning("Could not scan '%s' for links", path, exc_info=True)
+                    else:
+                        links, references = _resolve_references(path, raw_references)
+            documents[path] = _Document(signature, title, links, references)
 
         if not changed and documents.keys() == self._documents.keys():
             return
@@ -307,40 +363,13 @@ class LinkIndex:
             ]
 
     def snapshot(self) -> LinkSnapshot:
-        """Capture the current graph, to compare against after a move."""
+        """Capture every reference and file, to judge a move against."""
         with self._lock:
             self._refresh()
             return LinkSnapshot(
-                {source: doc.links for source, doc in self._documents.items()}, self._files
+                {source: doc.references for source, doc in self._documents.items()},
+                self._files,
             )
-
-    def broken_by_moves(self, before: LinkSnapshot, moves: dict[str, str]) -> list[BrokenLink]:
-        """Return the links that `moves` (old path -> new path) broke.
-
-        Every link that reached an existing file in `before` and touched a
-        moved file is followed through the move: it is intact if the linking
-        document, at its new path, still reaches the target at its new path.
-        That covers both directions — other documents pointing at the old
-        location, and a moved document whose relative links now resolve
-        somewhere else — while leaving alone links that survive, such as
-        relative links between files moved together.
-        """
-        after = self.snapshot()
-        broken = set()
-        for source, links in before.links.items():
-            for target in links:
-                if target not in before.files or (source not in moves and target not in moves):
-                    continue
-                new_source = moves.get(source, source)
-                new_target = moves.get(target, target)
-                now = after.links.get(new_source, {})
-                # Broken if nothing reaches the new location, or if a link
-                # still names the vacated path (the same target written two
-                # ways, only one of which followed the move).
-                stale = target in moves and target in now and target not in after.files
-                if new_target not in now or stale:
-                    broken.add(BrokenLink(new_source, target, new_target))
-        return sorted(broken, key=lambda b: (b.file, b.old_target))
 
     def graph(self) -> dict:
         """Return the whole link graph as JSON-ready nodes and edges.

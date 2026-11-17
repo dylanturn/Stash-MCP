@@ -11,7 +11,9 @@ from stash_mcp.links import (
     BrokenLink,
     LinkIndex,
     OutgoingLink,
+    broken_by_moves,
     extract_links,
+    extract_references,
     resolve_target,
 )
 
@@ -101,10 +103,52 @@ class TestExtractLinks:
         content = (
             "Write links as `[text](inline.md)`.\n\n"
             "```markdown\n[example](fenced.md)\n```\n\n"
-            "~~~\n[example](tilde.md)\n~~~\n"
+            "~~~\n[example](tilde.md)\n~~~\n\n"
+            "Example:\n\n    [sample](indented.md)\n    <a href=\"raw.md\">raw</a>\n"
         )
         links, _ = extract_links("a.md", content)
         assert links == {}
+
+    def test_indented_list_continuations_are_still_prose(self):
+        content = (
+            "- First item\n\n"
+            "    Continued with a [real link](real.md).\n\n"
+            "        [inside code](code.md)\n"
+        )
+        links, _ = extract_links("a.md", content)
+        assert links == {"real.md": LINK}
+
+    def test_unused_reference_definitions_are_not_links(self):
+        links, _ = extract_links("a.md", "Nothing uses this.\n\n[unused]: target.md\n")
+        assert links == {}
+
+    def test_reference_style_images_are_embeds(self):
+        content = "![logo][img] and [the guide][g] and [shortcut]\n\n" \
+            "[img]: logo.png\n[g]: guide.md\n[shortcut]: short.md\n"
+        links, _ = extract_links("docs/a.md", content)
+        assert links == {
+            "docs/logo.png": EMBED,
+            "docs/guide.md": LINK,
+            "docs/short.md": LINK,
+        }
+
+    def test_html_comments_are_not_scanned(self):
+        links, _ = extract_links("a.md", "<!-- <a href=\"old.md\">old</a> -->\n\n[new](new.md)")
+        assert links == {"new.md": LINK}
+        links, _ = extract_links("a.html", "<!-- <img src=\"old.png\"> --><img src=\"new.png\">")
+        assert links == {"new.png": EMBED}
+
+    def test_setext_heading_is_the_title(self):
+        _, title = extract_links("a.md", "Release *Notes*\n=============\n\nBody.")
+        assert title == "Release Notes"
+
+    def test_references_keep_each_target_as_written(self):
+        references, _ = extract_references(
+            "docs/a.md", "[one](b.md) [two](/docs/b.md) [web](https://example.com)"
+        )
+        assert references == [
+            ("b.md", LINK), ("/docs/b.md", LINK), ("https://example.com", LINK),
+        ]
 
     def test_external_anchor_and_self_links_are_dropped(self):
         content = "[web](https://example.com) [top](#top) [me](a.md) [me too](./a.md#x)"
@@ -245,22 +289,46 @@ class TestBrokenByMoves:
         index = LinkIndex(fs)
         before = index.snapshot()
         fs.move_file("a.md", "archive/a.md")
-        assert index.broken_by_moves(before, {"a.md": "archive/a.md"}) == [
+        assert broken_by_moves(before, {"a.md": "archive/a.md"}) == [
             BrokenLink("c.md", "a.md", "archive/a.md"),
             BrokenLink("docs/b.md", "a.md", "archive/a.md"),
         ]
 
     def test_relative_links_inside_a_moved_file_are_reported(self, tmp_path):
         fs = FileSystem(tmp_path)
-        fs.write_file("docs/a.md", "[sibling](b.md) [rooted](/docs/b.md#x) ![pic](pic.png)")
+        fs.write_file("docs/a.md", "[sibling](b.md) [rooted](/docs/c.md#x) ![pic](pic.png)")
         fs.write_file("docs/b.md", "# B")
+        fs.write_file("docs/c.md", "# C")
         fs.write_file("docs/pic.png", "x")
         index = LinkIndex(fs)
         before = index.snapshot()
         fs.move_file("docs/a.md", "archive/a.md")
-        # The root-absolute link to b.md still works, so b.md is not reported.
-        assert index.broken_by_moves(before, {"docs/a.md": "archive/a.md"}) == [
+        # The root-absolute link to c.md still works, so c.md is not reported.
+        assert broken_by_moves(before, {"docs/a.md": "archive/a.md"}) == [
+            BrokenLink("archive/a.md", "docs/b.md", "docs/b.md"),
             BrokenLink("archive/a.md", "docs/pic.png", "docs/pic.png"),
+        ]
+
+    def test_each_link_to_the_same_target_is_judged_separately(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("docs/a.md", "[relative](b.md) [rooted](/docs/b.md)")
+        fs.write_file("docs/b.md", "# B")
+        index = LinkIndex(fs)
+        before = index.snapshot()
+        fs.move_file("docs/a.md", "archive/a.md")
+        # The rooted link survives; the relative one to the same file does not.
+        assert broken_by_moves(before, {"docs/a.md": "archive/a.md"}) == [
+            BrokenLink("archive/a.md", "docs/b.md", "docs/b.md"),
+        ]
+
+    def test_root_absolute_self_link_breaks_when_the_file_moves(self, tmp_path):
+        fs = FileSystem(tmp_path)
+        fs.write_file("docs/a.md", "[top](/docs/a.md#top) [also me](a.md#x)")
+        index = LinkIndex(fs)
+        before = index.snapshot()
+        fs.move_file("docs/a.md", "archive/a.md")
+        assert broken_by_moves(before, {"docs/a.md": "archive/a.md"}) == [
+            BrokenLink("archive/a.md", "docs/a.md", "archive/a.md"),
         ]
 
     def test_files_moved_together_keep_their_relative_links(self, tmp_path):
@@ -271,7 +339,7 @@ class TestBrokenByMoves:
         index = LinkIndex(fs)
         before = index.snapshot()
         moved = dict(fs.move_directory("docs", "guides"))
-        assert index.broken_by_moves(before, moved) == [
+        assert broken_by_moves(before, moved) == [
             # Root-absolute link inside the moved directory still names the old path.
             BrokenLink("guides/a.md", "docs/b.md", "guides/b.md"),
             BrokenLink("index.md", "docs/a.md", "guides/a.md"),
@@ -284,4 +352,4 @@ class TestBrokenByMoves:
         index = LinkIndex(fs)
         before = index.snapshot()
         fs.move_file("a.md", "sub/a.md")
-        assert index.broken_by_moves(before, {"a.md": "sub/a.md"}) == []
+        assert broken_by_moves(before, {"a.md": "sub/a.md"}) == []

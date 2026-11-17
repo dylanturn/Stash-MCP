@@ -22,7 +22,7 @@ from pydantic import AnyUrl, BaseModel, Field
 from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
 from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
-from .links import BrokenLink, LinkIndex, LinkSnapshot
+from .links import BrokenLink, LinkIndex, LinkSnapshot, broken_by_moves
 from .metrics import get_metrics
 from .transactions import TransactionError, TransactionManager
 
@@ -431,19 +431,17 @@ def create_mcp_server(
             logger.warning("Link scan before move failed", exc_info=True)
             return None
 
-    async def _links_broken_by(
+    def _links_broken_by(
         before: LinkSnapshot | None, moves: dict[str, str]
     ) -> list[BrokenLink] | None:
         if before is None:
             return None
         try:
-            return await asyncio.to_thread(
-                link_index.broken_by_moves,
-                before,
-                {_content_key(old): _content_key(new) for old, new in moves.items()},
+            return broken_by_moves(
+                before, {_content_key(old): _content_key(new) for old, new in moves.items()}
             )
         except Exception:
-            logger.warning("Link scan after move failed", exc_info=True)
+            logger.warning("Link check after move failed", exc_info=True)
             return None
 
     mcp = FastMCP(
@@ -1331,7 +1329,7 @@ def create_mcp_server(
             emit(CONTENT_MOVED, dest_path, source_path=source_path)
             logger.info(f"Moved: {source_path} -> {dest_path}")
             message = f"Moved: {source_path} -> {dest_path}"
-            broken = await _links_broken_by(links_before, {source_path: dest_path})
+            broken = _links_broken_by(links_before, {source_path: dest_path})
             if broken:
                 message += _format_broken_links(broken)
             return message
@@ -1392,7 +1390,7 @@ def create_mcp_server(
                 await ctx.send_resource_list_changed()
 
             logger.info(f"Moved directory: {source_path} -> {dest_path} ({len(moved_files)} files)")
-            broken = await _links_broken_by(links_before, dict(moved_files))
+            broken = _links_broken_by(links_before, dict(moved_files))
             return {
                 "source": source_path,
                 "destination": dest_path,
@@ -1489,7 +1487,7 @@ def create_mcp_server(
             if resources_changed:
                 await ctx.send_resource_list_changed()
 
-            broken = await _links_broken_by(
+            broken = _links_broken_by(
                 links_before, {m.source_path: m.dest_path for m in moves}
             )
             return {"results": results, **_broken_links_fields(broken)}
