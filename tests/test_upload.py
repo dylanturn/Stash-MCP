@@ -416,3 +416,37 @@ async def test_replace_upload_does_not_clobber_concurrent_replace(temp_fs, mock_
     assert a == "ok"
     assert b != "ok"
     assert temp_fs.read_bytes("logo.png") == PNG_V2
+
+
+async def test_concurrent_replacements_with_same_sha_cannot_both_succeed(
+    temp_fs, mock_context, monkeypatch
+):
+    """The sha check and the write must not be split by an await, or two
+    replacements validated against the same bytes both win (lost update)."""
+    import asyncio
+    import time
+
+    temp_fs.write_bytes("logo.png", PNG_BYTES)
+    real_read_bytes = temp_fs.read_bytes
+
+    def slow_read_bytes(path):
+        # Read, then linger: if the read is awaited off the event loop, the
+        # second call is guaranteed to read the old bytes too.
+        data = real_read_bytes(path)
+        time.sleep(0.05)
+        return data
+
+    monkeypatch.setattr(temp_fs, "read_bytes", slow_read_bytes)
+    tool = await create_mcp_server(temp_fs).get_tool("upload_content")
+    old_sha = _sha(PNG_BYTES)
+
+    async def replace(payload: bytes):
+        args = {"path": "logo.png", "data_base64": _b64(payload), "sha": old_sha}
+        return await tool.run(args)
+
+    results = await asyncio.gather(
+        replace(PNG_V2), replace(PNG_BYTES + b"\x00"), return_exceptions=True
+    )
+    failures = [r for r in results if isinstance(r, Exception)]
+    assert len(failures) == 1
+    assert "SHA mismatch" in str(failures[0])
