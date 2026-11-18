@@ -287,6 +287,54 @@ def test_list_all_files_with_glob_star_star(populated_dir):
     assert "data.json" not in files
 
 
+def test_list_all_files_with_trailing_glob_star_star(populated_dir):
+    """A pattern ending in ** lists every file beneath it, nested ones included.
+
+    pathlib only matches directories for a trailing ** before Python 3.13, so
+    this guards against the listing depending on the interpreter version.
+    """
+    (populated_dir / "docs" / ".hidden.md").write_text("hidden")
+    (populated_dir / "docs" / ".git").mkdir()
+    (populated_dir / "docs" / ".git" / "config").write_text("hidden")
+
+    fs = FileSystem(populated_dir, include_patterns=["docs/**"])
+    files = fs.list_all_files()
+    assert files == ["docs/api.md", "docs/deep/nested.md", "docs/guide.md"]
+    # Listing agrees with the per-path matcher
+    assert all(fs._matches_patterns(f) for f in files)
+
+    # relative_path prefix filter still applies
+    assert fs.list_all_files("docs/deep") == ["docs/deep/nested.md"]
+    assert fs.list_all_files("notes") == []
+
+
+def test_list_all_files_with_bare_glob_star_star(populated_dir):
+    """A bare ** pattern lists every non-hidden file."""
+    (populated_dir / ".hidden").write_text("hidden")
+
+    fs = FileSystem(populated_dir, include_patterns=["**"])
+    assert fs.list_all_files() == [
+        "data.json",
+        "docs/api.md",
+        "docs/deep/nested.md",
+        "docs/guide.md",
+        "notes/ideas.md",
+        "notes/todo.txt",
+        "readme.md",
+    ]
+
+
+def test_list_files_with_trailing_glob_star_star(populated_dir):
+    """list_files derives its entries from a trailing ** pattern too."""
+    fs = FileSystem(populated_dir, include_patterns=["docs/**"])
+    assert fs.list_files("") == [("docs", True)]
+    assert fs.list_files("docs") == [
+        ("api.md", False),
+        ("deep", True),
+        ("guide.md", False),
+    ]
+
+
 def test_list_files_with_include_patterns(populated_dir):
     """Test directories shown only when they contain matches."""
     fs = FileSystem(populated_dir, include_patterns=["docs/**/*.md"])
