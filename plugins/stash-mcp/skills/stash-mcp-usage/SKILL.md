@@ -97,11 +97,11 @@ Markdown is the host format — several other types can be embedded inline so a 
 
 ## Tool Categories at a Glance
 
-Stash exposes 21+ tools across five categories. Not all are always available — availability depends on server configuration. Only use tools that appear in the tool list.
+Stash exposes 22+ tools across five categories. Not all are always available — availability depends on server configuration. Only use tools that appear in the tool list.
 
 | Category | Tools | Always Available |
 |----------|-------|-----------------|
-| Discovery | `list_content`, `inspect_content_structure(_batch)`, `search_content` | list/inspect yes, search conditional |
+| Discovery | `list_content`, `inspect_content_structure(_batch)`, `inspect_content_links`, `search_content` | list/inspect yes, search conditional |
 | Reading | `read_content(_batch)` | Yes |
 | Writing | `create_content`, `upload_content`, `edit_content(_batch)`, `overwrite_content`, `delete_content`, `move_content(_batch/_directory)` | Only when not read-only |
 | Transactions | `start_content_transaction`, `commit_content_transaction`, `abort_content_transaction`, `list_content_transactions` | Only with git tracking enabled |

@@ -267,6 +267,7 @@
     { "name": "move_content", "description": "Move or rename a file" },
     { "name": "move_content_directory", "description": "Move or rename an entire directory tree" },
     { "name": "move_content_batch", "description": "Move or rename multiple files in a single operation (max 10)" },
+    { "name": "inspect_content_links", "description": "List the files that link to or embed a file, and the files it references" },
     { "name": "find_content", "description": "Literal or regex search across recognized text files" },
     { "name": "search_content", "description": "Semantic similarity search across content" },
     { "name": "log_content", "description": "View git commit history for a file" },

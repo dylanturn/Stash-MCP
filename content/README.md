@@ -14,6 +14,7 @@ Every modification is guarded by an optimistic-concurrency check: `read_content`
 
 - **`list_content`** — `path` (default root), `recursive` (default false). Non-recursive entries are names prefixed with 📁 (directory) or 📄 (file); recursive listings are full relative paths.
 - **`inspect_content_structure`** / **`inspect_content_structure_batch`** — heading outline of a markdown file (title, nested sections with line numbers) without reading the full content.
+- **`inspect_content_links`** — `path`. The files that link to or embed a file (`incoming`) and the files it references (`outgoing`, with `exists: false` marking broken links).
 
 ### Read
 
@@ -34,6 +35,7 @@ Every modification is guarded by an optimistic-concurrency check: `read_content`
 - **`move_content_directory`** — moves a whole directory tree.
 - **`move_content_batch`** — up to 10 moves, validated all-or-nothing.
 - **`delete_content`** — `path`, `sha`. Deletes are permanent.
+- Moves and deletes do not rewrite links; they report the links they broke (`broken_links`, or lines in the confirmation text) so you can fix them in the same change. The report covers links, images and embeds only — not plain-text mentions — and says so when the check could not run or had to skip documents (`link_check` other than `"complete"`, or "Links were not checked" / "Link check incomplete" in text results).
 
 ### Configuration-Dependent Tools
 
