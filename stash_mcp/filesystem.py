@@ -96,6 +96,20 @@ class FileSystem:
                 i += 1
         return re.compile(res + r"\Z")
 
+    @staticmethod
+    def _glob_pattern(pattern: str) -> str:
+        """Return the pattern to hand to ``Path.glob`` for an include pattern.
+
+        A pattern whose last segment is ``**`` means "every file beneath
+        here", which is how ``_glob_to_regex`` reads it. ``Path.glob`` only
+        agrees from Python 3.13; before that a trailing ``**`` matches
+        directories alone, so the listing came back empty. Appending ``/*``
+        selects the same files on every version.
+        """
+        if pattern == "**" or pattern.endswith("/**"):
+            return pattern + "/*"
+        return pattern
+
     def _matches_patterns(self, relative_path: str) -> bool:
         """Check if a relative path matches any of the include patterns.
 
@@ -194,7 +208,7 @@ class FileSystem:
         if self.include_patterns:
             seen: set[str] = set()
             for pattern in self.include_patterns:
-                for item in self.content_dir.glob(pattern):
+                for item in self.content_dir.glob(self._glob_pattern(pattern)):
                     if not item.is_file():
                         continue
                     if any(part.startswith(".") for part in item.relative_to(self.content_dir).parts):
@@ -284,6 +298,47 @@ class FileSystem:
         try:
             full_path.write_text(content, encoding="utf-8")
             logger.info(f"Wrote file: {relative_path}")
+        except Exception as e:
+            logger.error(f"Error writing file '{relative_path}': {e}")
+            raise FileSystemError(f"Failed to write file: {e}")
+
+    def read_bytes(self, relative_path: str) -> bytes:
+        """Read a file's raw bytes (no decoding or newline translation).
+
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            InvalidPathError: If path is invalid or not a file
+        """
+        full_path = self._resolve_path(relative_path)
+
+        if not full_path.exists():
+            raise FileNotFoundError(f"File '{relative_path}' not found")
+
+        if not full_path.is_file():
+            raise InvalidPathError(f"Path '{relative_path}' is not a file")
+
+        try:
+            return full_path.read_bytes()
+        except Exception as e:
+            logger.error(f"Error reading file '{relative_path}': {e}")
+            raise FileSystemError(f"Failed to read file: {e}")
+
+    def write_bytes(self, relative_path: str, data: bytes) -> None:
+        """Write raw bytes to a file, creating parent directories as needed.
+
+        Raises:
+            InvalidPathError: If path is invalid or names an existing directory
+        """
+        full_path = self._resolve_path(relative_path)
+
+        if full_path.is_dir():
+            raise InvalidPathError(f"Path '{relative_path}' is a directory")
+
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            full_path.write_bytes(data)
+            logger.info(f"Wrote file: {relative_path} ({len(data)} bytes)")
         except Exception as e:
             logger.error(f"Error writing file '{relative_path}': {e}")
             raise FileSystemError(f"Failed to write file: {e}")

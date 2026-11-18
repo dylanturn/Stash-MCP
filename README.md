@@ -213,6 +213,25 @@ await client.call_tool("delete_content", {
 })
 ```
 
+`upload_content` stores text documents (Markdown, HTML, JSON, YAML, CSV, SVG and the other text formats the store indexes) and images (PNG, JPEG, GIF, WebP, BMP, ICO) from base64-encoded bytes, byte-for-byte. Anything else is refused: executables, archives, PDFs and compiled code cannot be uploaded. Content must match the extension, so text must be UTF-8 and an image must carry its format's signature; a binary renamed to `.png` or `.md` is rejected. It creates new files; to replace one, pass the `sha` it returned (the SHA-256 of the stored bytes). Uploads are capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB). There is no tool for reading an image's bytes back, so keep that `sha`:
+
+```python
+import base64
+
+result = await client.call_tool("upload_content", {
+    "path": "assets/diagram.png",
+    "data_base64": base64.b64encode(open("diagram.png", "rb").read()).decode()
+})
+# result.data -> {"path": ..., "created": True, "size_bytes": ..., "mime_type": "image/png", "sha": ...}
+
+await client.call_tool("delete_content", {
+    "path": "assets/diagram.png",
+    "sha": result.data["sha"]
+})
+```
+
+`delete_content` accepts either the `read_content` sha (SHA-256 of the decoded text) or the raw-bytes sha from `upload_content`. Binary files such as images only have the raw-bytes sha. `read_content` refuses files that are not UTF-8 text.
+
 With git tracking enabled, three additional read tools are exposed: `log_content`, `diff_content`, and `blame_content`. See [Git Tracking](#git-tracking).
 
 ### REST API
@@ -305,7 +324,7 @@ When `STASH_GIT_TRACKING=true` and `STASH_READ_ONLY=false`, all writes are gated
 Workflow:
 
 1. Call `start_content_transaction` — acquires an exclusive write lock and returns a transaction ID
-2. Perform any number of write calls (`create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_directory`, `move_content_batch`) — all changes are staged
+2. Perform any number of write calls (`create_content`, `upload_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_directory`, `move_content_batch`) — all changes are staged
 3. Call `commit_content_transaction` with a commit message — commits all staged changes to git and releases the lock
 4. If something goes wrong, call `abort_content_transaction` — rolls back all staged changes and releases the lock
 
@@ -534,6 +553,7 @@ What is collected:
 | `STASH_PORT` | `8000` | Server port |
 | `STASH_LOG_LEVEL` | `info` | Logging level |
 | `STASH_READ_ONLY` | `false` | Disable all write tools |
+| `STASH_MAX_UPLOAD_BYTES` | `10485760` | Largest file (decoded bytes) `upload_content` accepts |
 | `STASH_GIT_TRACKING` | `false` | Enable git read tools and blame-enriched search results |
 | `STASH_GIT_SYNC_ENABLED` | `false` | Enable periodic pull from remote (requires `STASH_GIT_TRACKING=true`) |
 | `STASH_GIT_SYNC_URL` | — | HTTPS URL of the remote repository; when set, auto-clones into an empty content directory and auto-enables `STASH_GIT_TRACKING` |

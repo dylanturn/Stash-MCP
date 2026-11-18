@@ -25,6 +25,18 @@ This is the key efficiency tool. Use it to:
 
 The batch variant is ideal after `list_content` identifies candidate markdown files — inspect them all at once rather than one by one.
 
+### inspect_content_links(path)
+
+List the files that reference a file (`incoming`) and the files it references (`outgoing`) — links, images, and `stash-embed` blocks, each resolved to a content-root path.
+
+- Use it before moving, renaming, or deleting a file to see what depends on it
+- Use it instead of `find_content` when the question is "what links here?" — a text search for the file name misses relative links (`../specs/api.json` and `/specs/api.json` are the same file) and matches mentions inside code blocks
+- `outgoing` entries carry `exists`; `false` means a broken link in that document
+- Works for any file as the target (e.g. which documents embed an image); only markdown and HTML files have outgoing references
+- `kind` is `link` or `embed` (images, media, `stash-embed` blocks)
+- A path that does not exist returns `exists: false` with any dangling references to it under `incoming`
+- `unscanned_files` lists documents whose links could not be read; while it is not empty, `incoming` may be missing references from them
+
 ### search_content(query, max_results?, file_types?)
 
 Semantic similarity search across indexed content. Only available when search is enabled on the server.
@@ -60,6 +72,18 @@ edit_content(path, sha, edits) → succeeds if sha matches current file
 
 Create a new file. **Fails if the file already exists** — this is intentional to prevent accidental overwrites. Use `overwrite_content` or `edit_content` for existing files.
 
+### upload_content(path, data_base64, sha?)
+
+Store a document or image from base64-encoded bytes, byte-for-byte. Use it for images or to store an existing document unchanged; use `create_content` for text you are writing yourself.
+
+- Accepts only text documents (Markdown, HTML, JSON, YAML, CSV, SVG and the other text formats the store indexes) and images (PNG, JPEG, GIF, WebP, BMP, ICO). **Executables, archives, PDFs and compiled code are refused.**
+- Content must match the extension: text must be UTF-8 without NUL bytes, and an image must start with its format's signature. A binary renamed to `.png` or `.md` is rejected.
+- Without `sha` it creates the file and **fails if the file already exists**
+- To replace an existing file, pass the `sha` returned by the upload that wrote it — this is the SHA-256 of the raw bytes, not the `read_content` sha
+- Returns `path`, `created`, `size_bytes`, `mime_type`, and `sha`
+- Size is capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB of decoded bytes)
+- There is no tool that reads an image's bytes back. **Keep the returned `sha`**, because you need it to replace or delete the file.
+
 ### edit_content(file_path, sha, edits[]) / edit_content_batch(edit_operations[])
 
 Apply targeted string-replacement edits. The preferred tool for modifying existing files.
@@ -92,6 +116,10 @@ Replace the entire file content. Requires the current SHA.
 
 Delete a file permanently. Requires the current SHA. Irreversible outside of git history (if git tracking is enabled).
 
+The SHA can be the `read_content` sha (hash of the decoded text) or the raw-bytes sha from `upload_content`; either is accepted. Images and other binary files only have the raw-bytes sha, because `read_content` refuses files that are not UTF-8 text.
+
+If other files still link to or embed the deleted file, the confirmation lists them. Fix or remove those references in the same transaction. The same limits apply as for moves (below): a confirmation with no list is not proof that nothing mentions the file.
+
 ### move_content(source_path, dest_path) / move_content_batch(moves[]) / move_content_directory(source_path, dest_path)
 
 Rename or relocate files and directories.
@@ -100,9 +128,31 @@ Rename or relocate files and directories.
 - `move_content_batch` — up to 10 file moves atomically
 - `move_content_directory` — move an entire directory subtree; destination must not exist
 
+**Moves do not rewrite links — they report the ones they broke.** `move_content` appends them to its confirmation text; the batch and directory variants return a `broken_links` list of `{file, old_target, new_target}`. For each entry, edit `file` so the link that used to reach `old_target` reaches `new_target`.
+
+- Other files still pointing at the old path are reported with the new location as `new_target`
+- Relative links inside a moved file that no longer resolve are reported with `old_target` equal to `new_target` (the target did not move; the linking file did)
+- Relative links between files that moved together keep working and are not reported
+- The list is capped at 50 entries; `broken_links_total` is set when there are more — fix those, then use `inspect_content_links` on the moved paths to find the rest
+
+**Know what the report does and does not tell you:**
+
+- **It may not have run.** The check is advisory: if the link scan fails, the move still succeeds. The batch and directory variants then return `link_check: "unavailable"` with no `broken_links`, and `move_content` and `delete_content` say "Links were not checked" in their text. Treat that as unknown, not as clean. `inspect_content_links` relies on the same scan and may fail too, so fall back to `find_content` (see "Finding references by hand" below).
+- **It may be incomplete.** A document that is too large, unreadable, or cannot be rendered is skipped, and links inside it are unknown. The batch and directory variants then return `link_check: "partial"` with the skipped documents in `unscanned_files`; `move_content` and `delete_content` say "Link check incomplete" and name them. Links in every other document were checked, so only the named documents need a look: search them with `find_content` using `path_prefix`, or read them. `inspect_content_links` lists the same documents under `unscanned_files`.
+- **It only covers tracked references:** markdown and HTML links, images, and `stash-embed` sources, in markdown and HTML files up to 2 MB. Plain-text mentions of a path (prose, code samples, YAML, JSON, other file types) are never reported — search for those with `find_content`.
+- **Only links that worked before are reported.** A link that was already broken stays unreported.
+- So an empty `broken_links` with `link_check: "complete"` means no tracked link broke. It does not mean nothing refers to the old path.
+
+**Finding references by hand** (when the check was unavailable or partial, or for plain-text mentions):
+
+- Search for the file's **name**, not its full path: `find_content("api.json")`, not `find_content("specs/api.json")`. A relative link such as `../specs/api.json` or `api.json` does not contain the full path.
+- For a moved directory, search for the directory's name as well.
+- A common file name (`README.md`, `index.md`) will match unrelated files; read each hit to see which file it points at.
+- `find_content` only searches recognized text files and skips ones that are not valid UTF-8. A document reported as unscanned for that reason cannot be searched or reliably read; say so rather than assuming it has no references.
+
 ## Transactions
 
-When git tracking is enabled and the server is not in read-only mode, **every write tool requires an active transaction owned by the calling session**. The gated set is `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. This applies equally to single-file edits and multi-file changes — any of these without an active transaction raises:
+When git tracking is enabled and the server is not in read-only mode, **every write tool requires an active transaction owned by the calling session**. The gated set is `create_content`, `upload_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. This applies equally to single-file edits and multi-file changes — any of these without an active transaction raises:
 
 > `TransactionError: No active transaction. Call start_content_transaction first.`
 

@@ -283,6 +283,9 @@ class TransactionManager:
     def try_read_text(self, path: str) -> str | None:
         return self.fs.try_read_text(path)
 
+    def read_bytes(self, path: str) -> bytes:
+        return self.fs.read_bytes(path)
+
     def list_files(self, relative_path: str = "") -> list:
         return self.fs.list_files(relative_path)
 
@@ -297,6 +300,10 @@ class TransactionManager:
     def write_file(self, path: str, content: str) -> None:
         self._require_active_transaction()
         return self.fs.write_file(path, content)
+
+    def write_bytes(self, path: str, data: bytes) -> None:
+        self._require_active_transaction()
+        return self.fs.write_bytes(path, data)
 
     def delete_file(self, path: str) -> None:
         self._require_active_transaction()

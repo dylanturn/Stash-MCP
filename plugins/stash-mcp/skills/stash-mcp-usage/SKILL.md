@@ -28,7 +28,7 @@ Think of Stash-MCP as a filesystem with guardrails:
 
 ## Content Types
 
-Stash stores files as-is on disk. Anything text-based round-trips losslessly through the tools; binary types (images, etc.) are stored and served as assets but should not be opened with `read_content` — you'll get raw bytes.
+Stash stores files as-is on disk. Anything text-based round-trips losslessly through the tools; binary types (images, etc.) are stored and served as assets. `read_content` refuses them because they are not UTF-8 text. Add images with `upload_content`, and keep the `sha` it returns to replace or delete them later. Executables, archives, PDFs and compiled code cannot be uploaded.
 
 ### Document types
 
@@ -41,7 +41,7 @@ Stash stores files as-is on disk. Anything text-based round-trips losslessly thr
 | **Web** | `.html`, `.htm` | Rendered in a sandboxed iframe. Fragments can also be embedded into markdown via ` ```stash-embed ` (CSS selector). |
 | **Structured text** | `.json`, `.yaml`, `.yml`, `.toml`, `.xml`, `.ini`, `.cfg` | Stored as text, no special rendering. |
 | **Code** | `.py`, `.js`, `.ts`, `.css`, `.rst`, `.txt`, `.log`, plus any other text extension | Stored as text. Searchable. |
-| **Image assets** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.bmp` | Served via `/ui/raw/<path>` for embedding. Do **not** `read_content` these — store and link instead. |
+| **Image assets** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.bmp` | Served via `/ui/raw/<path>` for embedding. Upload with `upload_content`; do **not** `read_content` these — store and link instead. |
 
 There is no extension allowlist for storage. Files with unknown extensions are accepted and served as `text/plain`.
 
@@ -91,19 +91,19 @@ Markdown is the host format — several other types can be embedded inline so a 
   **Errors** render inline (missing `src`, source not found, no selector match, ambiguous type, etc.) — they never silently drop content. If you see a red error box in a rendered doc, fix the embed reference.
 - **Raw HTML** — passes through the markdown renderer by design. `<details>`, `<img>`, `<video>`, `<iframe>`, `<div>` all work. Use sparingly; markdown syntax is preferable when it covers the case.
 
-**Cannot be embedded inline:** PDFs, Office documents (`.docx`, `.xlsx`, `.pptx`), Jupyter notebooks (`.ipynb`), and other binary formats. Link to them as assets if needed, but Stash has no native renderer for these — `read_content` will return unreadable bytes.
+**Cannot be embedded inline:** PDFs, Office documents (`.docx`, `.xlsx`, `.pptx`), Jupyter notebooks (`.ipynb`), and other binary formats. Stash has no native renderer for these, `read_content` refuses them, and `upload_content` does not accept them.
 
 **Rule of thumb:** if the asset is referenced from one document, embed it as a fenced block. If multiple documents reference it, store it as a standalone file and link.
 
 ## Tool Categories at a Glance
 
-Stash exposes 21+ tools across five categories. Not all are always available — availability depends on server configuration. Only use tools that appear in the tool list.
+Stash exposes 22+ tools across five categories. Not all are always available — availability depends on server configuration. Only use tools that appear in the tool list.
 
 | Category | Tools | Always Available |
 |----------|-------|-----------------|
-| Discovery | `list_content`, `inspect_content_structure(_batch)`, `search_content` | list/inspect yes, search conditional |
+| Discovery | `list_content`, `inspect_content_structure(_batch)`, `inspect_content_links`, `search_content` | list/inspect yes, search conditional |
 | Reading | `read_content(_batch)` | Yes |
-| Writing | `create_content`, `edit_content(_batch)`, `overwrite_content`, `delete_content`, `move_content(_batch/_directory)` | Only when not read-only |
+| Writing | `create_content`, `upload_content`, `edit_content(_batch)`, `overwrite_content`, `delete_content`, `move_content(_batch/_directory)` | Only when not read-only |
 | Transactions | `start_content_transaction`, `commit_content_transaction`, `abort_content_transaction`, `list_content_transactions` | Only with git tracking enabled |
 | Git History | `log_content`, `diff_content`, `blame_content` | Only with git tracking enabled |
 
@@ -135,7 +135,7 @@ Use `overwrite_content` only when regenerating an entire file from scratch.
 
 ### 3. Transactions Wrap Every Write (when git tracking is on)
 
-When the server has git tracking enabled, every write tool requires an active transaction owned by your session — `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory` are all gated. Calling any of them without an active transaction raises:
+When the server has git tracking enabled, every write tool requires an active transaction owned by your session — `create_content`, `upload_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory` are all gated. Calling any of them without an active transaction raises:
 
 > `TransactionError: No active transaction. Call start_content_transaction first.`
 
