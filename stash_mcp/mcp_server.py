@@ -121,8 +121,8 @@ def _build_instructions(
             "for small changes) or overwrite_content (full replace). create_content "
             "is only for files that do not exist yet; delete_content also requires "
             "the sha. upload_content stores base64-encoded documents and images "
-            "(not executables or archives). Moving or deleting a file can break links; the move and delete "
-            "tools report the links they broke so you can fix them in the same change. "
+            "(not executables or archives). Moving or deleting a file can break "
+            "links; the move and delete tools report the links they broke so you can fix them in the same change. "
             "That report covers links, images and embeds, not plain-text mentions of a "
             "path, and states when the check could not run or was incomplete."
         )
