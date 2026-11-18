@@ -1,6 +1,8 @@
 """MCP Server implementation for Stash using FastMCP."""
 
 import asyncio
+import base64
+import binascii
 import functools
 import hashlib
 import inspect
@@ -20,7 +22,7 @@ from pydantic import AnyUrl, BaseModel, Field
 
 from .config import Config
 from .events import CONTENT_CREATED, CONTENT_DELETED, CONTENT_MOVED, CONTENT_UPDATED, emit
-from .filesystem import FileNotFoundError, FileSystem, InvalidPathError
+from .filesystem import FileNotFoundError, FileSystem, FileSystemError, InvalidPathError
 from .metrics import get_metrics
 from .transactions import TransactionError, TransactionManager
 
@@ -111,7 +113,8 @@ def _build_instructions(
             "get its sha, then edit_content (targeted string replacement, preferred "
             "for small changes) or overwrite_content (full replace). create_content "
             "is only for files that do not exist yet; delete_content also requires "
-            "the sha."
+            "the sha. upload_content stores base64-encoded documents and images "
+            "(not executables or archives)."
         )
     if transactions_active:
         parts.append(
@@ -288,6 +291,106 @@ def _apply_edits(content: str, edits: list[EditOperation], path: str) -> str:
         else:
             content = content.replace(edit.old_string, edit.new_string, 1)
     return content
+
+
+def _binary_mime_type(path: str) -> str:
+    """MIME type for an uploaded file; unknown extensions are opaque binary."""
+    return MIME_TYPES.get(PurePosixPath(path).suffix.lower(), "application/octet-stream")
+
+
+# --- upload_content allowlist ---
+#
+# upload_content is for documents and images, not arbitrary binaries:
+# executables, archives and compiled code are refused. A file is accepted
+# only if its extension is allowlisted AND its bytes match that extension,
+# so renaming a binary to .png or .md does not get it through.
+
+# Text documents: the same text formats find_content searches.
+_UPLOAD_TEXT_EXTENSIONS: frozenset[str] = frozenset(
+    ext for ext, mime in MIME_TYPES.items() if mime in _SEARCHABLE_MIMES
+)
+
+
+def _is_webp(data: bytes) -> bool:
+    return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+# Raster images, each with a check on its leading magic bytes.
+_UPLOAD_IMAGE_SIGNATURES: dict[str, object] = {
+    ".png": lambda d: d.startswith(b"\x89PNG\r\n\x1a\n"),
+    ".jpg": lambda d: d.startswith(b"\xff\xd8\xff"),
+    ".jpeg": lambda d: d.startswith(b"\xff\xd8\xff"),
+    ".gif": lambda d: d.startswith((b"GIF87a", b"GIF89a")),
+    ".webp": _is_webp,
+    ".bmp": lambda d: d.startswith(b"BM"),
+    ".ico": lambda d: d.startswith(b"\x00\x00\x01\x00"),
+}
+
+
+def _check_upload_allowed(path: str, data: bytes) -> None:
+    """Reject uploads that are not an allowlisted document or image type.
+
+    Raises:
+        ValueError: If the extension is not allowed or the bytes do not
+            match it (non-UTF-8 "text", or an image without its signature).
+    """
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in _UPLOAD_TEXT_EXTENSIONS:
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"'{path}' must be UTF-8 text, but the uploaded bytes are not."
+            ) from None
+        if b"\x00" in data:
+            raise ValueError(f"'{path}' must be text, but the uploaded bytes contain NUL.")
+        return
+    check = _UPLOAD_IMAGE_SIGNATURES.get(suffix)
+    if check is not None:
+        if not check(data):
+            raise ValueError(
+                f"'{path}' does not contain a valid {suffix[1:].upper()} image."
+            )
+        return
+    shown = suffix or "(no extension)"
+    raise ValueError(
+        f"upload_content does not accept '{shown}' files. Allowed: text documents "
+        f"({', '.join(sorted(_UPLOAD_TEXT_EXTENSIONS))}) and images "
+        f"({', '.join(sorted(_UPLOAD_IMAGE_SIGNATURES))}). Executables, archives "
+        "and compiled code cannot be stored."
+    )
+
+
+_DATA_URL_RE = re.compile(r"^data:[^,]*;base64,", re.IGNORECASE)
+
+
+def _decode_upload(data_base64: str, max_bytes: int) -> bytes:
+    """Decode an upload payload, enforcing strict base64 and a size cap.
+
+    Accepts standard or URL-safe base64, tolerates embedded whitespace and a
+    leading ``data:<mime>;base64,`` prefix, and rejects anything else rather
+    than silently dropping invalid characters.
+    """
+    payload = _DATA_URL_RE.sub("", data_base64.strip(), count=1)
+    payload = "".join(payload.split())
+    # Cheap pre-check so an oversized payload is rejected before decoding.
+    if len(payload) // 4 * 3 > max_bytes + 2:
+        raise ValueError(
+            f"Upload exceeds the {max_bytes}-byte limit (STASH_MAX_UPLOAD_BYTES)."
+        )
+    if "-" in payload or "_" in payload:
+        payload = payload.replace("-", "+").replace("_", "/")
+    payload += "=" * (-len(payload) % 4)
+    try:
+        data = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"data_base64 is not valid base64: {e}") from None
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"Upload is {len(data)} bytes, over the {max_bytes}-byte limit "
+            "(STASH_MAX_UPLOAD_BYTES)."
+        )
+    return data
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
@@ -535,6 +638,105 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
         @_write_tool(
             annotations=ToolAnnotations(
+                title="Upload file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=False,
+                openWorldHint=False,
+            )
+        )
+        async def upload_content(
+            path: ContentPath,
+            data_base64: Annotated[
+                str,
+                Field(
+                    description="File bytes, base64-encoded (standard or URL-safe; a "
+                    "'data:<mime>;base64,' prefix is accepted and stripped)"
+                ),
+            ],
+            ctx: Context,
+            sha: Annotated[
+                str | None,
+                Field(
+                    description="Required only to replace an existing file: SHA-256 "
+                    "hex digest of its current raw bytes, as returned by a previous "
+                    "upload_content. Omit when creating a new file."
+                ),
+            ] = None,
+        ) -> dict:
+            """
+            Upload a document or image from base64-encoded bytes. The bytes
+            are stored exactly as given.
+
+            Accepted: text documents (Markdown, HTML, JSON, YAML, CSV, SVG and
+            the other text formats the store indexes; must be UTF-8) and
+            images (PNG, JPEG, GIF, WebP, BMP, ICO; content must match the
+            extension). Executables, archives, PDFs and compiled code are
+            refused.
+
+            Use create_content instead for plain text you are writing yourself;
+            use this tool for images or to store an existing document
+            byte-for-byte. Missing parent directories are created
+            automatically.
+
+            Without sha the file must not already exist. To replace an
+            existing file, pass the sha returned when it was last uploaded
+            (the SHA-256 of its raw bytes).
+
+            Args:
+                path: File path relative to content root
+                data_base64: Base64-encoded file content
+                sha: SHA-256 of the existing file's raw bytes, to replace it
+            Returns:
+                A dict with path, created (bool), size_bytes, mime_type, and sha
+                (SHA-256 of the stored bytes)
+            """
+            data = _decode_upload(data_base64, Config.MAX_UPLOAD_BYTES)
+            _check_upload_allowed(path, data)
+            exists = filesystem.file_exists(path)
+            if exists:
+                if sha is None:
+                    raise ValueError(
+                        f"File already exists: {path}. Pass the sha of its current "
+                        "bytes to replace it."
+                    )
+                # Read synchronously: an await between this sha check and the
+                # write below would let another write slip in between.
+                current = filesystem.read_bytes(path)
+                current_sha = hashlib.sha256(current).hexdigest()
+                if sha != current_sha:
+                    raise ValueError(
+                        f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
+                        "The file may have changed since it was last uploaded."
+                    )
+            elif sha is not None:
+                raise FileNotFoundError(
+                    f"File '{path}' does not exist; omit sha to create it."
+                )
+
+            # Called on the event loop (not to_thread): under transactions the
+            # write gate re-arms the idle timeout with asyncio.create_task.
+            filesystem.write_bytes(path, data)
+            if exists:
+                if _is_resource_file(path):
+                    await ctx.session.send_resource_updated(uri=AnyUrl(f"stash://{path}"))
+                emit(CONTENT_UPDATED, path)
+                logger.info(f"Uploaded (replaced): {path} ({len(data)} bytes)")
+            else:
+                if _register_resource(path):
+                    await ctx.send_resource_list_changed()
+                emit(CONTENT_CREATED, path)
+                logger.info(f"Uploaded: {path} ({len(data)} bytes)")
+            return {
+                "path": path,
+                "created": not exists,
+                "size_bytes": len(data),
+                "mime_type": _binary_mime_type(path),
+                "sha": hashlib.sha256(data).hexdigest(),
+            }
+
+        @_write_tool(
+            annotations=ToolAnnotations(
                 title="Overwrite file content",
                 readOnlyHint=False,
                 destructiveHint=False,
@@ -723,17 +925,34 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
 
             Args:
                 path: File path relative to content root
-                sha: SHA-256 hex digest of the current file content (from read_content)
+                sha: SHA-256 hex digest of the current file — the text sha
+                    from read_content, or the raw-bytes sha from
+                    upload_content (either is accepted; binary files such as
+                    images only have the raw-bytes sha)
             Returns:
                 Confirmation message
             """
-            current = filesystem.read_file(path)
-            current_sha = hashlib.sha256(current.encode("utf-8")).hexdigest()
-            if sha != current_sha:
-                raise ValueError(
-                    f"SHA mismatch for '{path}': expected {current_sha}, got {sha}. "
-                    "The file may have changed since it was last read."
+            # No await between the sha check and delete_file: yielding here
+            # would let a concurrent write land, and then be deleted.
+            raw = filesystem.read_bytes(path)
+            raw_sha = hashlib.sha256(raw).hexdigest()
+            if sha != raw_sha:
+                # read_content hashes decoded text (universal newlines), which
+                # differs from the raw bytes for CRLF files. Accept that sha
+                # too; binary files have no text form, so only raw_sha applies.
+                try:
+                    text = filesystem.read_file(path)
+                except FileSystemError:
+                    text = None
+                expected = (
+                    raw_sha if text is None
+                    else hashlib.sha256(text.encode("utf-8")).hexdigest()
                 )
+                if sha != expected:
+                    raise ValueError(
+                        f"SHA mismatch for '{path}': expected {expected}, got {sha}. "
+                        "The file may have changed since it was last read."
+                    )
             filesystem.delete_file(path)
             if _unregister_resource(path):
                 await ctx.send_resource_list_changed()
@@ -770,7 +989,16 @@ def create_mcp_server(filesystem: FileSystem, search_engine=None, git_backend=No
             the FULL file, even when truncated), 'truncated' (bool), and
             'total_lines' (line count of the full file)
         """
-        content = await asyncio.to_thread(filesystem.read_file, path)
+        try:
+            content = await asyncio.to_thread(filesystem.read_file, path)
+        except FileSystemError as e:
+            if isinstance(e.__context__, UnicodeDecodeError):
+                raise ValueError(
+                    f"'{path}' is not UTF-8 text (likely an image or other binary "
+                    "file) and cannot be read as text. To replace or delete it, "
+                    "use the raw-bytes sha returned by upload_content."
+                ) from None
+            raise
         sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
         total_lines = _count_lines(content)
         truncated = False

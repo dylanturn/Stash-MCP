@@ -47,6 +47,9 @@ class Config:
     SERVER_NAME: str = os.getenv("STASH_SERVER_NAME", "stash-mcp")
     READ_ONLY: bool = os.getenv("STASH_READ_ONLY", "false").lower() == "true"
     SERVER_VERSION: str = "0.1.0"
+    # Largest decoded file upload_content accepts. Uploads travel base64-encoded
+    # inside a JSON-RPC message, so the wire size is ~4/3 of this.
+    MAX_UPLOAD_BYTES: int = int(os.getenv("STASH_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 
     # Search settings
     SEARCH_ENABLED: bool = os.getenv("STASH_SEARCH_ENABLED", "false").lower() == "true"

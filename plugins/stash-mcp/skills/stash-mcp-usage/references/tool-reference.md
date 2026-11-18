@@ -60,6 +60,18 @@ edit_content(path, sha, edits) → succeeds if sha matches current file
 
 Create a new file. **Fails if the file already exists** — this is intentional to prevent accidental overwrites. Use `overwrite_content` or `edit_content` for existing files.
 
+### upload_content(path, data_base64, sha?)
+
+Store a document or image from base64-encoded bytes, byte-for-byte. Use it for images or to store an existing document unchanged; use `create_content` for text you are writing yourself.
+
+- Accepts only text documents (Markdown, HTML, JSON, YAML, CSV, SVG and the other text formats the store indexes) and images (PNG, JPEG, GIF, WebP, BMP, ICO). **Executables, archives, PDFs and compiled code are refused.**
+- Content must match the extension: text must be UTF-8 without NUL bytes, and an image must start with its format's signature. A binary renamed to `.png` or `.md` is rejected.
+- Without `sha` it creates the file and **fails if the file already exists**
+- To replace an existing file, pass the `sha` returned by the upload that wrote it — this is the SHA-256 of the raw bytes, not the `read_content` sha
+- Returns `path`, `created`, `size_bytes`, `mime_type`, and `sha`
+- Size is capped by `STASH_MAX_UPLOAD_BYTES` (default 10 MiB of decoded bytes)
+- There is no tool that reads an image's bytes back. **Keep the returned `sha`**, because you need it to replace or delete the file.
+
 ### edit_content(file_path, sha, edits[]) / edit_content_batch(edit_operations[])
 
 Apply targeted string-replacement edits. The preferred tool for modifying existing files.
@@ -92,6 +104,8 @@ Replace the entire file content. Requires the current SHA.
 
 Delete a file permanently. Requires the current SHA. Irreversible outside of git history (if git tracking is enabled).
 
+The SHA can be the `read_content` sha (hash of the decoded text) or the raw-bytes sha from `upload_content`; either is accepted. Images and other binary files only have the raw-bytes sha, because `read_content` refuses files that are not UTF-8 text.
+
 ### move_content(source_path, dest_path) / move_content_batch(moves[]) / move_content_directory(source_path, dest_path)
 
 Rename or relocate files and directories.
@@ -102,7 +116,7 @@ Rename or relocate files and directories.
 
 ## Transactions
 
-When git tracking is enabled and the server is not in read-only mode, **every write tool requires an active transaction owned by the calling session**. The gated set is `create_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. This applies equally to single-file edits and multi-file changes — any of these without an active transaction raises:
+When git tracking is enabled and the server is not in read-only mode, **every write tool requires an active transaction owned by the calling session**. The gated set is `create_content`, `upload_content`, `overwrite_content`, `edit_content`, `edit_content_batch`, `delete_content`, `move_content`, `move_content_batch`, and `move_content_directory`. This applies equally to single-file edits and multi-file changes — any of these without an active transaction raises:
 
 > `TransactionError: No active transaction. Call start_content_transaction first.`
 

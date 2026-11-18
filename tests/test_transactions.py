@@ -188,6 +188,14 @@ class TestTransactionManagerWriteGating:
                 tm.write_file("test.txt", "content")
 
     @pytest.mark.asyncio
+    async def test_write_bytes_blocked_without_transaction(self):
+        with TemporaryDirectory() as tmpdir:
+            tm, fs = _make_tm(Path(tmpdir))
+            with pytest.raises(TransactionError, match="No active transaction"):
+                tm.write_bytes("image.png", b"\x89PNG")
+            assert not fs.file_exists("image.png")
+
+    @pytest.mark.asyncio
     async def test_delete_blocked_without_transaction(self):
         with TemporaryDirectory() as tmpdir:
             tm, fs = _make_tm(Path(tmpdir))
